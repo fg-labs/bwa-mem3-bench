@@ -1,0 +1,44 @@
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  python-and-rust:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+      - uses: prefix-dev/setup-pixi@14c8aabd75893f83f4ab30c03e7cf853c8208961 # v0.8.10
+        with:
+          # Must match (or be ahead of) the pixi version that authored pixi.lock
+          # locally, since pixi rejects locks written by newer formats.
+          pixi-version: v0.66.0
+          environments: default
+          cache: true
+      - name: rust fmt
+        run: pixi run cargo-fmt-check
+      - name: rust clippy
+        run: pixi run cargo-clippy
+      - name: rust tests
+        run: pixi run cargo-test
+      - name: python fmt
+        run: pixi run py-fmt-check
+      - name: python lint
+        run: pixi run py-lint
+      - name: python types
+        run: pixi run py-type
+      - name: python tests
+        run: pixi run py-test

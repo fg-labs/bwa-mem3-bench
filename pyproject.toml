@@ -1,0 +1,74 @@
+[project]
+name = "bwa_mem3_bench"
+version = "0.1.0"
+description = "Benchmarking suite comparing bwa-mem3 against upstream bwa-mem2 v2.2.1"
+authors = [
+    { name = "Nils Homer" },
+]
+readme = "README.md"
+license = "MIT"
+keywords = ["bioinformatics", "bwa-mem2", "alignment", "benchmark", "snakemake", "aws-batch"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "Natural Language :: English",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Typing :: Typed",
+]
+requires-python = ">=3.11"
+dependencies = [
+    "defopt>=6.4",
+    "pyyaml>=6.0",
+    "pysam>=0.22",
+    "pandas>=2.0",
+    "plotly>=6.1.1,<7",
+    "rich>=13",
+    "boto3>=1.35",
+]
+
+[project.urls]
+Homepage = "https://github.com/fg-labs/bwa-mem3-bench"
+Repository = "https://github.com/fg-labs/bwa-mem3-bench"
+Issues = "https://github.com/fg-labs/bwa-mem3-bench/issues"
+
+[project.scripts]
+bwa-mem3-bench = "bwa_mem3_bench.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["bwa_mem3_bench*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "PL"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+
+[[tool.mypy.overrides]]
+module = "defopt"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["pandas", "pandas.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["plotly", "plotly.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["boto3", "boto3.*", "botocore", "botocore.*"]
+ignore_missing_imports = true

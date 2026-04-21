@@ -1,0 +1,50 @@
+# Snakemake AWS Batch profile template — rendered to ./config.yaml by
+#   pixi run render-profile
+# (or `python -m bwa_mem3_bench.render_profile`). The rendered file is
+# gitignored; placeholders below are substituted from cdk/outputs.json or
+# env vars (BWA_MEM3_BENCH_S3_BUCKET, BWA_MEM3_BENCH_ECR_REPO, AWS_REGION).
+# Optional: BWA_MEM3_BENCH_COST_CENTER adds a CostCenter Batch tag.
+executor: aws-batch
+
+# Each Batch job runs in this image. The image has bwa-mem2.{upstream,fg-labs},
+# samtools, bwameth, compare-bams, awscli, and the bwa-mem3-bench python CLI
+# pre-installed so shell commands in workflow/rules/*.smk execute directly.
+# When running inside the coordinator job, override container-image via
+#   --config image_tag=<sha>  (the coordinator-entrypoint.sh passes this through).
+container-image: ${ECR_REPO_URI}:latest
+
+# snakemake-executor-plugin-aws-batch required settings. The plugin takes a
+# single --aws-batch-job-queue; we route by arch at the rule level via
+# resources.batch_queue (which the executor reads and overrides this default).
+aws-batch-region: ${AWS_REGION}
+aws-batch-job-queue: bwa-mem3-bench-c8g
+# The plugin's default attemptDurationSeconds is 300 s, which is shorter than
+# even a 1M-read alignment's cold-start + S3 reference sync on a slow worker.
+# Match the rule-level runtime default (7200 s = 2 h); individual rules can
+# override via `resources.runtime` without touching the profile.
+aws-batch-task-timeout: 7200
+# aws-batch-job-role is intentionally omitted here. When running inside the
+# coordinator Batch job the SNAKEMAKE_AWS_BATCH_JOB_ROLE env var (set by the
+# job definition) provides the role ARN so no config-file change is needed
+# between deploys.
+aws-batch-tags:
+  Project: bwa-mem3-bench
+${COST_CENTER_LINE}
+# Snakemake 8+ requires a default storage provider for remote executors so
+# inputs/outputs are staged to/from S3 rather than assumed on a shared FS.
+default-storage-provider: s3
+default-storage-prefix: s3://${S3_BUCKET}
+storage-s3-region: ${AWS_REGION}
+
+default-resources:
+  mem_mb: 28000
+  runtime: 7200
+jobs: 50
+max-jobs-per-second: 5
+latency-wait: 60
+use-conda: false
+use-singularity: false
+retries: 3
+keep-going: true
+printshellcmds: true
+rerun-incomplete: true

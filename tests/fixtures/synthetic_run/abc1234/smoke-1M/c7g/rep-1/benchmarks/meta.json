@@ -1,0 +1,9 @@
+{
+  "fg_labs_sha": "abc1234",
+  "sample": "smoke-1M",
+  "arch": "c7g",
+  "rep": 1,
+  "instance_type": "c7g.4xlarge",
+  "availability_zone": "us-east-1a",
+  "kernel": "6.1.0-33-arm64"
+}

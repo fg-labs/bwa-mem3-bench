@@ -1,0 +1,6 @@
+target/
+.pixi/
+.git/
+docs/
+data/
+runs/

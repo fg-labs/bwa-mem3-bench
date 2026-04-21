@@ -1,0 +1,20 @@
+Looking to launch executable "/usr/local/bin/bwa-mem2.fg-labs.avx2", simd = .avx2
+Launching executable "/usr/local/bin/bwa-mem2.fg-labs.avx2"
+-----------------------------
+Executing in AVX2 mode!!
+-----------------------------
+* SA compression enabled with xfactor: 8
+* Ref file: /tmp/Homo_sapiens_assembly38.fasta
+* Done reading Index!!
+* Reference seq len for bi-index = 6434693835
+[various per-batch lines elided for brevity]
+
+	Reading IO time (Reference Genome) avg: 0.05, (0.05, 0.05)
+	Index read time avg: 2.44, (2.44, 2.44)
+
+	Overall time (sec) (Excluding Index reading time):
+	PROCESS() (Total compute time + (read + SAM) IO time) : 8.76
+	MEM_PROCESS_SEQ() (Total compute time (Kernel + SAM)), avg: 7.88, (7.88, 7.88)
+
+	 SAM Processing time (sec):
+	--WORKER_SAM avg: 0.45, (0.45, 0.45)

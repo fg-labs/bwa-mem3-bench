@@ -1,0 +1,28 @@
+region: us-east-1
+# S3 bucket holding references, fastq inputs, and run/baseline outputs. Override
+# per deployment via cdk/outputs.json (populated by `cdk deploy`) or the
+# BWA_MEM3_BENCH_S3_BUCKET env var; aws_config.load() prefers those over this
+# default. The default name will fail to resolve in S3 (names are global) — pick
+# your own bucket name.
+bucket: bwa-mem3-bench
+ecr_repo: bwa-mem3-bench
+upstream_tag: v2.2.1
+bwameth_version: "0.2.7"
+bwa_version: "0.7.19"
+
+threads: 16
+reps_default: 1
+reps_baseline: 5
+
+references:
+  hg38:
+    key: references/hg38/
+    fasta_name: Homo_sapiens_assembly38.fasta
+  hg38-meth:
+    key: references/hg38-meth/
+    fasta_name: Homo_sapiens_assembly38.fasta
+
+runs_prefix: runs/
+baseline_prefix: baseline/
+golden_prefix: golden/
+data_prefix: data/

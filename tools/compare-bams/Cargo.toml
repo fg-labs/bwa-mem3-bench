@@ -1,0 +1,33 @@
+[package]
+name = "compare-bams"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Compare two BAMs in lockstep at alignment-position / CIGAR / MAPQ level"
+
+[[bin]]
+name = "compare-bams"
+path = "src/main.rs"
+
+[lib]
+name = "compare_bams"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+noodles-bam = "0.68"
+noodles-bgzf = "0.33"
+noodles-sam = "0.65"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

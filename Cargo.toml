@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["tools/compare-bams"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+authors = ["Nils Homer <nils@fulcrumgenomics.com>"]
+license = "MIT"
+repository = "https://github.com/fg-labs/bwa-mem3-bench"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"

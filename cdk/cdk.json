@@ -1,0 +1,9 @@
+{
+  "app": "python app.py",
+  "toolkitStackName": "CDKToolkit",
+  "outputsFile": "outputs.json",
+  "watch": {
+    "include": ["**"],
+    "exclude": ["README.md", "cdk*.json", "requirements*.txt", "source.bat", "**/__pycache__", "outputs.json"]
+  }
+}

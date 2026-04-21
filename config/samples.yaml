@@ -1,0 +1,46 @@
+# `source` is a bucket-relative key prefix. The workflow joins it with the
+# configured S3 bucket (defaults.yaml `bucket` or BWA_MEM3_BENCH_S3_BUCKET) at
+# run time, so the same samples.yaml works against any bucket.
+samples:
+  wgs-5M:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/wgs/1kg-HG00096/downsampled-5M/
+    fg_labs_flags: []
+
+  wes-5M:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/wes/1kg-HG00100/downsampled-5M/
+    fg_labs_flags: []
+
+  panel-twist-5M:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/panel/twist-umi/downsampled-5M/
+    fg_labs_flags: []
+
+  meth-twist-emseq-5M:
+    baseline_tool: bwameth
+    reference: hg38-meth
+    source: data/meth/twist-emseq/downsampled-5M/
+    fg_labs_flags: ["--meth"]
+    compare_options:
+      ignore_tags: ["YD", "XM", "XG"]
+
+  smoke-1M:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/smoke/1M/
+    fg_labs_flags: []
+
+  # Tiny bisulfite smoke — ~10K pairs. Exercises the full meth pipeline
+  # (hg38-meth reference, bwameth.py baseline, fg-labs --meth, meth queue)
+  # without paying for a 5M-pair alignment. Use via `--target smoke_meth`.
+  smoke-meth:
+    baseline_tool: bwameth
+    reference: hg38-meth
+    source: data/smoke-meth/10K/
+    fg_labs_flags: ["--meth"]
+    compare_options:
+      ignore_tags: ["YD", "XM", "XG"]

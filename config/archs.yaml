@@ -1,0 +1,40 @@
+archs:
+  c7g:
+    instance_type: c7g.4xlarge
+    batch_queue: bwa-mem3-bench-c7g
+    simd: neon
+    platform: linux/arm64
+  c6a:
+    instance_type: c6a.4xlarge
+    batch_queue: bwa-mem3-bench-c6a
+    simd: avx2
+    platform: linux/amd64
+  c7i:
+    instance_type: c7i.4xlarge
+    batch_queue: bwa-mem3-bench-c7i
+    simd: avx512
+    platform: linux/amd64
+  c8g:
+    instance_type: c8g.4xlarge
+    batch_queue: bwa-mem3-bench-c8g
+    simd: neon
+    platform: linux/arm64
+  c7a:
+    instance_type: c7a.4xlarge
+    batch_queue: bwa-mem3-bench-c7a
+    simd: avx512
+    platform: linux/amd64
+  # m7i: Sapphire Rapids general-purpose (64 GB, 4 GB/vCPU). Same CPU family /
+  # AVX-512BW as c7i (32 GB host is too small for meth FMI). Meth samples run
+  # here; non-meth samples also run here so meth-vs-non-meth is apples-to-apples
+  # on identical hardware, and m7i vs c7i isolates meth-mem-overhead from raw
+  # CPU. Chosen over r7i (128 GB memory-optimized) because the extra RAM was
+  # unused and r7i's sustained-perf variance was ~5x higher under spot.
+  m7i:
+    instance_type: m7i.4xlarge
+    batch_queue: bwa-mem3-bench-m7i
+    simd: avx512
+    platform: linux/amd64
+
+core_arch: c8g
+full_archs: [c8g, c7g, c6a, c7i, c7a, m7i]

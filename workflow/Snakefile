@@ -1,0 +1,191 @@
+"""bwa-mem3-bench Snakemake workflow.
+
+AWS smoke (one baseline job + one fg-labs job + compare, via AWS Batch):
+    snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
+        --config fg_labs_sha=<sha> -- smoke
+
+Full AWS run:
+    snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
+        --config fg_labs_sha=<sha> archs=c8g,c6a,c7i reps=1
+
+Baseline bless (one-time per upstream version):
+    snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
+        --config upstream_tag=v2.2.1 reps=5 -- baseline_all
+"""
+
+import sys
+from pathlib import Path
+
+# Make the Python package importable from the repo root.
+sys.path.insert(0, str(Path(workflow.basedir).parent))
+
+from bwa_mem3_bench.workflow_config import load_config
+
+
+CONFIG = load_config(Path(workflow.basedir).parent / "config")
+
+# -- Parameters from --config
+FG_LABS_SHA = config.get("fg_labs_sha", "MISSING")
+ARCHS = config.get("archs", CONFIG.core_arch).split(",")
+SAMPLES = config.get("samples", ",".join(CONFIG.samples.keys())).split(",")
+REPS = int(config.get("reps", CONFIG.reps_default))
+REPS_BASELINE = int(config.get("reps_baseline", CONFIG.reps_baseline))
+BASELINE_ONLY = str(config.get("baseline_only", "false")).lower() == "true"
+IMAGE = config.get("image_tag", f"bwa-mem3-bench:{FG_LABS_SHA}")
+
+# Upstream bwa-mem2 v2.2.1 only supports x86. Anything that needs
+# `bwa-mem2.upstream` (align_baseline, compare_vs_baseline) is restricted to
+# baseline-supported archs; arm archs get fg-labs alignments only (and
+# eventually compare_vs_golden once a golden exists).
+BASELINE_ARCHS = [a for a in ARCHS if CONFIG.archs[a].platform == "linux/amd64"]
+ARM_ARCHS = [a for a in ARCHS if CONFIG.archs[a].platform == "linux/arm64"]
+
+RUNS_DIR = Path(f"runs/{FG_LABS_SHA}")
+
+wildcard_constraints:
+    sample = "[A-Za-z0-9_-]+",
+    arch   = "[a-z0-9]+",
+    rep    = r"\d+"
+
+include: "rules/align.smk"
+include: "rules/compare.smk"
+include: "rules/benchmark.smk"
+
+
+# Aggregator targets have no shell body, so they always run on the coordinator.
+# `emit_meta` is a tiny JSON write — no point burning a c8g.4xlarge spin-up for it.
+localrules:
+    all,
+    baseline_all,
+    smoke,
+    smoke_meth,
+    emit_meta,
+
+
+def _is_meth_sample(sample_name: str) -> bool:
+    sample = CONFIG.samples[sample_name]
+    return sample.baseline_tool == "bwameth" or "--meth" in sample.fg_labs_flags
+
+
+def _archs_for_sample(sample_name: str) -> list:
+    """Meth samples run only on m7i (needs ~50 GB container RAM for the doubled
+    meth FMI, doesn't fit on c7i.4xlarge's 32 GB host); non-meth samples run
+    across all baseline-supported x86 archs in the user's selection so we get
+    per-SIMD perf numbers."""
+    if _is_meth_sample(sample_name):
+        return [a for a in BASELINE_ARCHS if a == "m7i"]
+    return BASELINE_ARCHS
+
+
+rule all:
+    input:
+        # fg-labs query alignments + concordance reports (baseline rep-1 is
+        # pulled in as a dependency of compare_vs_baseline).
+        [
+            f"runs/{FG_LABS_SHA}/{sample}/{arch}/rep-{rep}/compare/vs-baseline.json"
+            for sample in SAMPLES
+            for arch in _archs_for_sample(sample)
+            for rep in range(1, REPS + 1)
+        ],
+        # ARM fg-labs alignments + ARM-vs-x86 concordance reports. Upstream
+        # v2.2.1 has no ARM build, so we can't compare ARM directly to upstream;
+        # vs-x86.json compares ARM fg-labs against fg-labs c6a (AVX2), which
+        # itself has a vs-baseline.json against upstream. Transitively that
+        # gives us ARM correctness. Meth excluded: ARM .4xlarge has 32 GB and
+        # can't hold the doubled-meth FMI + packed ref.
+        [
+            f"runs/{FG_LABS_SHA}/{sample}/{arch}/rep-{rep}/compare/vs-x86.json"
+            for sample in SAMPLES
+            if not _is_meth_sample(sample)
+            for arch in ARM_ARCHS
+            for rep in range(1, REPS + 1)
+        ],
+        [
+            f"runs/{FG_LABS_SHA}/{sample}/{arch}/rep-{rep}/benchmarks/meta.json"
+            for sample in SAMPLES
+            if not _is_meth_sample(sample)
+            for arch in ARM_ARCHS
+            for rep in range(1, REPS + 1)
+        ],
+        # Baseline reps 2..REPS_BASELINE exist for timing only (all reps are
+        # byte-identical since bwa-mem2 is deterministic). Listing them here
+        # forces them to be materialized by `rule all`.
+        [
+            f"baseline/bwa-mem2-{CONFIG.upstream_tag}/{sample}/{arch}/rep-{rep}/aligned.bam"
+            for sample in SAMPLES
+            for arch in _archs_for_sample(sample)
+            for rep in range(1, REPS_BASELINE + 1)
+        ],
+
+
+rule baseline_all:
+    """Run baseline (upstream bwa-mem2) for every sample × baseline-arch × rep.
+
+    Arm archs are excluded: upstream v2.2.1 has no ARM support. Highlighting
+    that gap is one of the benchmark's points — fg-labs runs on arm, upstream
+    does not.
+
+    Meth samples only run on m7i (needs >46 GB RSS).
+    """
+    input:
+        [
+            f"baseline/bwa-mem2-{CONFIG.upstream_tag}/{sample}/{arch}/rep-{rep}/aligned.bam"
+            for sample in CONFIG.samples
+            for arch in _archs_for_sample(sample)
+            for rep in range(1, REPS_BASELINE + 1)
+        ]
+
+
+rule smoke:
+    """End-to-end AWS smoke across every benchmarked arch.
+
+    For each arch in CONFIG.full_archs:
+      - run fg-labs bwa-mem2 on smoke-1M — exercises that
+        the arch-specific SIMD build (NEON / AVX2 / AVX-512 / etc.) works on a
+        real worker of that instance family.
+    Additionally, for every baseline-supported arch (x86):
+      - also run the upstream baseline + compare-bams — exercises the full
+        correctness path and produces a vs-baseline.json concordance number.
+
+    Arm archs get a vs-x86.json compare against fg-labs c6a (AVX2) — since
+    upstream v2.2.1 has no ARM build, ARM correctness is established
+    transitively (ARM == c6a fg-labs, c6a fg-labs == upstream).
+
+    Usage:
+        snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
+            --config fg_labs_sha=<sha> -- smoke
+    """
+    input:
+        [
+            f"runs/{FG_LABS_SHA}/smoke-1M/{arch}/rep-{rep}/aligned.bam"
+            for arch in CONFIG.full_archs
+            for rep in range(1, REPS + 1)
+        ],
+        [
+            f"runs/{FG_LABS_SHA}/smoke-1M/{arch}/rep-{rep}/compare/vs-x86.json"
+            for arch in CONFIG.full_archs
+            if CONFIG.archs[arch].platform == "linux/arm64"
+            for rep in range(1, REPS + 1)
+        ],
+        [
+            f"runs/{FG_LABS_SHA}/smoke-1M/{arch}/rep-{rep}/compare/vs-baseline.json"
+            for arch in CONFIG.full_archs
+            if CONFIG.archs[arch].platform == "linux/amd64"
+            for rep in range(1, REPS + 1)
+        ],
+
+
+rule smoke_meth:
+    """Bisulfite-specific smoke. Runs the full meth pipeline end-to-end on a
+    ~10K-pair sample — exercises (a) the hg38-meth doubled c2t reference,
+    (b) the bwameth.py → bwa-mem2 → bwa-mem2.avx* dispatch chain, (c) the
+    fg-labs `--meth` path, and (d) the m7i arch queue (m7i.4xlarge, 64 GB)
+    which is where real meth samples also run.
+
+    Usage:
+        snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
+            --config fg_labs_sha=<sha> -- smoke_meth
+    """
+    input:
+        "runs/{sha}/smoke-meth/m7i/rep-1/aligned.bam".format(sha=FG_LABS_SHA),
+        "runs/{sha}/smoke-meth/m7i/rep-1/compare/vs-baseline.json".format(sha=FG_LABS_SHA),

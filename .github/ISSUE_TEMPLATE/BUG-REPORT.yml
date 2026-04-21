@@ -1,0 +1,105 @@
+name: "🐛 Bug Report"
+description: Create a new Issue for a bug.
+title: "A short summary of the bug..."
+labels:
+  - bug
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Please enter an explicit description of your issue.
+      value: |
+        Short and explicit description of the bug...
+
+        The expected behavior is...
+
+        The actual behavior is...
+
+        The cause of this issue might be...
+
+        The fix for this issue might be...
+    validations:
+      required: true
+  - type: input
+    id: related
+    attributes:
+      label: Related Issues
+      description: Related issue IDs
+      placeholder: "#XXXX"
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit SHA
+      description: The version of bwa-mem3-bench you are running (or commit SHA if from main).
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: fg_labs_sha
+    attributes:
+      label: fg-labs/bwa-mem2 SHA
+      description: The fg-labs/bwa-mem2 commit SHA being benchmarked, if relevant.
+      placeholder: abc1234
+    validations:
+      required: false
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Please provide all steps to reproduce your issue.
+      placeholder: |
+        1. Run `pixi run python -m bwa_mem3_bench.cli build --fg-labs-sha ...`
+        2. Run `pixi run python -m bwa_mem3_bench.cli submit --fg-labs-sha ... --target smoke`
+        3. Observe error in coordinator logs
+      render: bash
+    validations:
+      required: true
+  - type: textarea
+    id: input
+    attributes:
+      label: Sample / config
+      description: The sample name(s) (`config/samples.yaml`), arch(es) (`config/archs.yaml`), and any non-default config involved.
+      placeholder: |
+        sample: smoke-1M
+        arch: c8g
+        bucket: my-bucket
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / Error messages
+      description: Paste relevant log/error output if small (e.g. coordinator log, worker job output). For large logs, attach a file or gist.
+      render: bash
+    validations:
+      required: false
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where did this happen?
+      description: What environment exhibited the bug?
+      multiple: true
+      options:
+        - Local (pixi run check / local-smoke.sh)
+        - AWS Batch coordinator
+        - AWS Batch worker
+        - CDK deploy / synth
+        - Docker image build
+        - Other (describe in "Reproduction Steps")
+    validations:
+      required: true
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      description: Have you completed all these steps?
+      options:
+        - label: Read the [`CONTRIBUTING`](../CONTRIBUTING.md) guide
+        - label: Checked there are no existing Issues for this bug
+        - label: Tried reproducing this issue against the latest `main`
+        - label: Provided all information necessary to reproduce this issue
+    validations:
+      required: true

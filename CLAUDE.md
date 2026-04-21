@@ -1,0 +1,201 @@
+# CLAUDE.md
+
+Guidance for Claude Code working in `bwa-mem3-bench`.
+
+## Project
+
+This repo benchmarks **bwa-mem3** — the next-generation bwa-mem2 successor
+in development at [fg-labs/bwa-mem2](https://github.com/fg-labs/bwa-mem2) —
+against upstream `bwa-mem2/bwa-mem2 v2.2.1`. See `README.md` for the public
+design overview and `docs/data-setup.md` for input data sources.
+
+## Repo conventions
+
+- **Python** — Fulcrum style, 100-char lines, ruff + mypy strict, defopt for
+  CLI tools. `pixi run check` must pass.
+- **Rust** — latest stable pinned via `rust-toolchain.toml`, `forbid(unsafe_code)`
+  at the workspace level, `cargo clippy --all-features --all-targets -- -D warnings`
+  and `cargo fmt` must pass.
+- **Commits** — conventional commits (`feat:`, `fix:`, `refactor:`, `docs:`,
+  `test:`, `chore:`, `ci:`). No AI attribution. Stage files by explicit path
+  (no `git add -A`).
+- **Branches** — short, kebab-case, descriptive (e.g. `fix-coordinator-timeout`).
+- **GitHub Actions** — pin by commit SHA with a version comment.
+
+## Running a benchmark end-to-end
+
+All commands are `pixi run python -m bwa_mem3_bench.cli <subcommand>`.
+
+1. **Deploy infrastructure (once)**: `cd cdk && cdk deploy --all`.
+2. **Upload inputs (once per sample)**: `upload-data --what all` — references +
+   fastqs to `s3://<your-bucket>/{references,data}/`. See `docs/data-setup.md`
+   for how to obtain the inputs.
+3. **Render the AWS Batch profile** (once per checkout, or whenever
+   `cdk/outputs.json` changes): `pixi run render-profile`. Reads the rendered
+   ECR URI / bucket / region from `cdk/outputs.json` (or env vars) and writes
+   `workflow/profiles/aws-batch/config.yaml` (gitignored).
+4. **Build + push image**: `build --fg-labs-sha <sha> --image-name <ecr-uri>
+   --push`. **Always required** when `workflow/`, `config/`, `docker/`, or the
+   `bwa_mem3_bench` package changes — those are `COPY`ed into the image.
+5. **Submit coordinator**: `submit --fg-labs-sha <sha> --target smoke|all`.
+   The coordinator is itself a Batch job (queue `bwa-mem3-bench-coordinator`,
+   instance type `c6a.large`/`c6a.xlarge`); it runs snakemake and submits
+   per-rule worker jobs to arch-specific queues.
+6. **Watch**: `watch` (live), or poll via `aws jobs` / `aws logs <id>`.
+7. **Collect + ingest**: `collect --fg-labs-sha <sha>` pulls `runs/<sha>/`
+   from S3 and populates `benchmark.db` (SQLite).
+8. **Promote baseline/golden** (when blessing): `bless-baseline`, `bless-golden`.
+9. **Report**: `bench summary`, `bench regression`, `bench full-report`.
+
+## AWS ops quick reference
+
+- `aws jobs` — active coordinator + worker jobs.
+- `aws describe <job-id>` — details for one job.
+- `aws logs <job-id>` — CloudWatch logs for the coordinator or any worker.
+- `aws kill <job-id>` / `aws kill-all` — terminate; `kill-all` also terminates
+  child workers submitted by a running coordinator.
+- `aws cost` — approximate spot spend per run.
+- `aws cleanup` — deregister orphaned `snakejob-def-*` job definitions.
+
+## Queue routing
+
+- Each arch has a dedicated Batch queue `bwa-mem3-bench-<arch>` wired to a
+  compute environment with `instance_type` from `config/archs.yaml`.
+- Rules pick their queue via `resources.batch_queue = CONFIG.archs[arch].batch_queue`.
+- Our fork of `snakemake-executor-plugin-aws-batch` (see below) reads that
+  resource. Upstream ignores it and sends every job to the profile default.
+
+## Arch-specific baseline support
+
+- `BASELINE_ARCHS` in `workflow/Snakefile` = archs with `platform: linux/amd64`.
+- Upstream `bwa-mem2 v2.2.1` has no ARM SIMD, so `align_baseline` and
+  `compare_vs_baseline` only run on x86 archs. Arm archs run fg-labs only.
+- The `smoke` rule is pinned to `c6a` (cheapest x86) because it needs baseline.
+
+## Docker image caveats
+
+- `--provenance=false` on `docker buildx build` — OCI attestations confuse the
+  ECS agent on Graviton and it ends up pulling the wrong-arch variant.
+- **No `ENTRYPOINT`** — snakemake-registered worker jobs run
+  `/bin/bash -c "..."`; an `ENTRYPOINT ["/bin/bash"]` would make that
+  `/bin/bash /bin/bash -c ...` and bash can't exec itself as a script.
+- `python` → `python3` symlink required; Debian only ships `python3`.
+- `snakemake-storage-plugin-s3==0.3.1` is the last PyPI version whose
+  metadata is compatible with snakemake 8.x. Newer requires
+  `snakemake-interface-storage-plugins>=4.2.3` which needs snakemake 9.
+- `aws-batch-task-timeout: 7200` in the profile — plugin default is 300 s
+  which kills real alignments.
+
+## Our `snakemake-executor-plugin-aws-batch` fork
+
+Lives at <https://github.com/nh13/snakemake-executor-plugin-aws-batch>.
+Pinned in `docker/Dockerfile` and `pixi.toml` by SHA. Carries three
+non-upstream changes:
+1. `resources.batch_queue` per-rule queue override.
+2. `auto_deploy_default_storage_provider=False` — we install the storage
+   plugin in the image instead of on every worker.
+3. `resources.shared_memory_size_mb` → `linuxParameters.sharedMemorySize`
+   on the worker job definition. Needed for `bwa-mem2 shm` to stage the
+   in-memory index in /dev/shm (default 64 MB is too small).
+Bump the pin when we add more fixes.
+
+## Data locations
+
+- See `docs/data-setup.md` for how to obtain the reference genome and
+  benchmark FASTQs and stage them in your own S3 bucket.
+- Local S3 mirror (for offline reproducers):
+  `sync-local [--what references,data|all]` mirrors the configured S3 bucket
+  to the directory at `bwa_mem3_bench.LOCAL_MIRROR_ROOT` (override via the
+  `BWA_MEM3_BENCH_LOCAL_MIRROR` env var).
+
+## Gotchas learned the hard way
+
+- **Never submit a Batch coordinator before the ECR push has fully settled.**
+  Workers pull `:latest` at container start and cache it per host; if ECR's
+  tag pointer update is still propagating, they'll pull the previous image
+  and fail with something that looks unrelated to the build. Verify with
+  `aws ecr describe-images --repository-name bwa-mem3-bench
+  --image-ids imageTag=latest` and match the `imageDigest` to the digest
+  printed at the end of the `docker buildx ... --push` output **before**
+  running `submit`. A "background build completed exit 0" notification is
+  not a push-settled signal.
+- **ECS `:latest` caching has no staleness protection.** Once a worker host
+  has pulled `:latest`, it won't re-pull unless the image pull policy is
+  explicitly `Always`. If you push a new `:latest` and reuse a warm host,
+  it runs the old image. Either terminate Batch EC2 instances between
+  builds, or give each build a unique tag and reference that tag in the
+  rendered `workflow/profiles/aws-batch/config.yaml`.
+- **`rule all` fails the coordinator even with `keep-going: true`** when any
+  one sample's outputs can't be produced. Non-failing samples still
+  complete successfully and their outputs land in S3 — always grep
+  `runs/<sha>/` in S3 before concluding a "FAILED" coordinator was a
+  total loss. The FAILED status just means rule all's aggregate input
+  set was unsatisfiable at the end.
+- **compare-bams does NOT require name-sorted BAMs — only matching record
+  order.** `bwa-mem2` emits records in FASTQ input order, so two runs
+  over the same FASTQ produce records in the same order. The align rules
+  use `samtools view -b` (no sort) and compare-bams walks both streams
+  in lockstep. The old `name_sort` rule was pure waste (~15-25% of
+  per-worker wall). See `tools/compare-bams/src/pair_reader.rs`.
+- **`bwa-mem2 index --meth` peaks at ~130 GB RSS / 148 GB virt** on the
+  human genome. The doubled C→T/G→A reference (~6.4 GB) drives the FMI
+  build memory up. 64 GB and 128 GB hosts both OOM; budget for a 256 GB
+  instance (~30 min build). The upstream README's "~10 GB for human
+  genome" is the **alignment** memory, not the **index build** peak.
+- **bwameth.py invokes literal `bwa-mem2`** from PATH, and the bwa-mem2
+  dispatcher then invokes `bwa-mem2.{avx512bw,avx2,avx,sse41}` (no
+  `.upstream` suffix). Our Docker image installs the suffixed variants
+  only; the Dockerfile creates symlinks `bwa-mem2`, `bwa-mem2.avx2`,
+  `bwa-mem2.avx512bw`, etc. → their `.upstream.*` counterparts so both
+  the bwameth.py shell-out and the dispatcher's stat() find them.
+- **Meth alignment needs `mem_mb >= 48000` and host RAM >= 64 GB.** Loading
+  the 20 GB doubled `.bwameth.c2t.bwt.2bit.64` FMI plus the 6 GB packed
+  reference into bwa-mem2 pushes peak RSS past 30 GB before mapping even
+  starts. Meth samples are pinned to a high-memory arch via
+  `_archs_for_sample()` in `workflow/Snakefile`; `_mem_mb_for()` sets the
+  Batch cgroup to 48000.
+- **Wait for all jobs to reach a terminal state (SUCCEEDED/FAILED) before
+  deleting S3 outputs.** `aws batch terminate-job` (and `aws kill-all`)
+  send SIGTERM to the container — it does NOT synchronously kill the task.
+  A RUNNING meth alignment is a 20-30 min job; once it gets far enough to
+  be producing output, it will continue uploading after you've hit kill.
+  If you wipe `runs/<sha>/` while a doomed worker is mid-upload, the worker
+  will (moments later) write `aligned.bam` into the cleaned prefix, and
+  the next coordinator will see that file and skip re-alignment — silently
+  serving stale output from a killed run. Before any `aws s3 rm`, poll
+  `aws batch list-jobs --job-status {SUBMITTED,PENDING,RUNNABLE,STARTING,RUNNING}`
+  across every project queue and wait for zero.
+- **`aws kill-all` only kills jobs in queues listed in `bwa_mem3_bench.aws_config`.**
+  The `archs` tuple there must stay in sync with the `ARCHS` tuple in
+  `cdk/stacks/batch_stack.py`. If you add or rename an arch queue in CDK,
+  update both; otherwise `kill-all` will silently skip the new queue.
+- **Count pairs from the FASTQ, not from `samtools view -c -f 64` on an
+  aligned BAM.** The aligned BAM's first-of-pair count is inflated by
+  supplementary alignments. `twist-umi.aligned.bam` shows 31.1M but the
+  source twist-umi_1.fastq.gz is actually 7.9M pairs.
+- **Spot capacity varies per AZ.** `InsufficientInstanceCapacity` on
+  `ec2 run-instances` → iterate subnets/AZs in your VPC rather than
+  retrying in the same AZ.
+- **`aws batch list-jobs --query 'jobSummaryList | sort_by(@, &stoppedAt)'`
+  fails with "invalid type: None"** when any listed job has a null
+  `stoppedAt` (e.g., still running). Filter with `[?stoppedAt!=`null`]`
+  before sorting, or skip the sort.
+
+## Known issues
+
+- fg-labs bwa-mem2 @ `690914f`: `mem_reg2aln` assertion on `avx512bw` variant
+  (`src/bwamem.cpp:1795`). Affects c7a/c7i; c6a/c7g/c8g are fine. Tracked at
+  fg-labs/bwa-mem2#25.
+- **c6a / AVX2 MAPQ regression**: 4 of 64,763 reads in smoke-1M differ in
+  MAPQ between fg-labs (AVX2) and upstream v2.2.1 — same position, same
+  CIGAR. Pre-dates PR #26; reproduces on `690914f` too. c7i/c7a/c6a with
+  AVX-512 show 100% concordance. Only PR #17 (`fix(mem-sam-pe):` proper-pair
+  flag) is known to change alignments, and it changes FLAG not MAPQ.
+
+## Running checks
+
+```bash
+pixi run check            # all: rust fmt/clippy/test + python fmt/lint/type/test
+pixi run cargo-test       # rust only
+pixi run py-test          # python only
+```
