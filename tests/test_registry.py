@@ -21,7 +21,7 @@ def test_registry_parses_entries(tmp_path: Path) -> None:
         """
 divergences:
   - id: FG-001
-    pr: fg-labs/bwa-mem2#12
+    pr: fg-labs/bwa-mem3#12
     date: 2025-11-03
     summary: "test fix"
     affected: secondary_alignments
@@ -33,7 +33,7 @@ divergences:
     entry = entries[0]
     assert isinstance(entry, DivergenceEntry)
     assert entry.id == "FG-001"
-    assert entry.pr == "fg-labs/bwa-mem2#12"
+    assert entry.pr == "fg-labs/bwa-mem3#12"
     assert entry.affected == "secondary_alignments"
     assert entry.expected_drift_pct == pytest.approx(0.03)
 

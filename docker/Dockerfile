@@ -52,7 +52,7 @@ RUN if [ "$TARGETARCH" != "arm64" ]; then \
         done; \
     fi
 
-# Build fg-labs bwa-mem2. Fetch all branches so ${FG_LABS_SHA} can point to any
+# Build fg-labs bwa-mem3. Fetch all branches so ${FG_LABS_SHA} can point to any
 # branch (e.g. fg-main) not just the repo's default.
 RUN git clone --recursive ${FG_LABS_REPO} fg-labs && \
     cd fg-labs && \

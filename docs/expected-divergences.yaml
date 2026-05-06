@@ -1,11 +1,11 @@
-# Expected divergences between fg-labs/bwa-mem2 and upstream/bwa-mem2.
+# Expected divergences between fg-labs/bwa-mem3 and upstream/bwa-mem2.
 # Each entry documents an intentional fg-labs behavior change that produces a
 # classifiable drift in aligned-BAM output. The drift report cross-checks
 # observed concordance against the sum of declared expected_drift_pct values.
 divergences: []
 # Example future entry:
 # - id: FG-001
-#   pr: fg-labs/bwa-mem2#12
+#   pr: fg-labs/bwa-mem3#12
 #   date: 2025-11-03
 #   summary: "Fix off-by-one in MAPQ recalibration for secondary alignments"
 #   affected: secondary_alignments

@@ -28,7 +28,7 @@ def submit(  # noqa: PLR0913
     child Batch jobs for each alignment rule.  Developer only needs `batch:SubmitJob`
     — no `iam:PassRole` required.
 
-    :param fg_labs_sha: fg-labs/bwa-mem2 SHA. Must already be built + pushed to ECR.
+    :param fg_labs_sha: fg-labs/bwa-mem3 SHA. Must already be built + pushed to ECR.
     :param target: Snakemake target (e.g. ``smoke``, ``all``, ``baseline_all``).
     :param samples: comma-separated sample subset (empty = all).
     :param archs: comma-separated arch subset (empty = core_arch).

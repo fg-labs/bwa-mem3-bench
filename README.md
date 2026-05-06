@@ -3,7 +3,7 @@
 Benchmarking suite comparing **bwa-mem3** against upstream `bwa-mem2 v2.2.1`.
 bwa-mem3 is the next-generation successor to
 [bwa-mem2](https://github.com/bwa-mem2/bwa-mem2), in active development in
-the [fg-labs/bwa-mem2](https://github.com/fg-labs/bwa-mem2) repository.
+the [fg-labs/bwa-mem3](https://github.com/fg-labs/bwa-mem3) repository.
 Runs on AWS spot across WGS, WES, panel, and methylation datasets on hg38,
 on ARM Neon / x86 AVX2 / x86 AVX-512 instances.
 
@@ -94,7 +94,7 @@ touching AWS; it does **not** exercise the real upstream-vs-fg-labs comparison
 
 - **Upstream bwa-mem2 v2.2.1 does not support ARM64.** The Docker image builds
   `bwa-mem2.upstream` only on `linux/amd64`; on `linux/arm64` that binary is a
-  shim that errors out. fg-labs bwa-mem2 supports both architectures. The
+  shim that errors out. fg-labs bwa-mem3 supports both architectures. The
   arm64 archs (c7g, c8g) therefore run fg-labs only — there is no
   upstream-vs-fork comparison on arm64. This is an ecosystem constraint, not
   a bug in this repo.
