@@ -37,7 +37,7 @@ def build(  # noqa: PLR0913
 ) -> None:
     """Build the bwa-mem3-bench Docker image for a given fg-labs SHA.
 
-    :param fg_labs_sha: fg-labs/bwa-mem2 commit SHA.
+    :param fg_labs_sha: fg-labs/bwa-mem3 commit SHA.
     :param upstream_tag: upstream bwa-mem2 tag to bake in (default v2.2.1).
     :param platforms: comma-separated platforms for buildx.
     :param image_name: image name, sans `:<tag>`. Use an ECR URI to tag for
@@ -71,7 +71,7 @@ def build(  # noqa: PLR0913
         "--build-arg",
         f"UPSTREAM_TAG={upstream_tag}",
         "--build-arg",
-        "FG_LABS_REPO=https://github.com/fg-labs/bwa-mem2",
+        "FG_LABS_REPO=https://github.com/fg-labs/bwa-mem3",
         "--build-arg",
         f"FG_LABS_SHA={fg_labs_sha}",
         "--build-arg",

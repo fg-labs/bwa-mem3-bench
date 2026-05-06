@@ -2,7 +2,7 @@
 # coordinator-entrypoint.sh — run inside the coordinator Batch job.
 #
 # Required environment variables (set by the Batch job definition or overrides):
-#   FG_LABS_SHA   — fg-labs/bwa-mem2 commit SHA; must already be built + pushed to ECR.
+#   FG_LABS_SHA   — fg-labs/bwa-mem3 commit SHA; must already be built + pushed to ECR.
 #   TARGET        — Snakemake target (e.g. smoke, all, baseline_all). Default: smoke.
 #
 # Optional environment variables:

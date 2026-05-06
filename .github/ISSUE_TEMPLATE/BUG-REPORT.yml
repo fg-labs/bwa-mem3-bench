@@ -40,8 +40,8 @@ body:
   - type: input
     id: fg_labs_sha
     attributes:
-      label: fg-labs/bwa-mem2 SHA
-      description: The fg-labs/bwa-mem2 commit SHA being benchmarked, if relevant.
+      label: fg-labs/bwa-mem3 SHA
+      description: The fg-labs/bwa-mem3 commit SHA being benchmarked, if relevant.
       placeholder: abc1234
     validations:
       required: false

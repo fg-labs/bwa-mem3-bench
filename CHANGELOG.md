@@ -14,7 +14,7 @@ Initial public release.
 ### Added
 
 - End-to-end Snakemake workflow comparing **bwa-mem3** (developed in
-  [fg-labs/bwa-mem2](https://github.com/fg-labs/bwa-mem2)) against upstream
+  [fg-labs/bwa-mem3](https://github.com/fg-labs/bwa-mem3)) against upstream
   `bwa-mem2 v2.2.1` across WGS, WES, panel, and methylation samples on hg38.
 - AWS infrastructure as CDK (S3, ECR, IAM, six Batch compute environments
   + queues for `c6a` / `c7a` / `c7g` / `c7i` / `c8g` / `m7i` plus a

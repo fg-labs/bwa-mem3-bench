@@ -5,7 +5,7 @@ Guidance for Claude Code working in `bwa-mem3-bench`.
 ## Project
 
 This repo benchmarks **bwa-mem3** — the next-generation bwa-mem2 successor
-in development at [fg-labs/bwa-mem2](https://github.com/fg-labs/bwa-mem2) —
+in development at [fg-labs/bwa-mem3](https://github.com/fg-labs/bwa-mem3) —
 against upstream `bwa-mem2/bwa-mem2 v2.2.1`. See `README.md` for the public
 design overview and `docs/data-setup.md` for input data sources.
 
@@ -183,9 +183,9 @@ Bump the pin when we add more fixes.
 
 ## Known issues
 
-- fg-labs bwa-mem2 @ `690914f`: `mem_reg2aln` assertion on `avx512bw` variant
+- fg-labs bwa-mem3 @ `690914f`: `mem_reg2aln` assertion on `avx512bw` variant
   (`src/bwamem.cpp:1795`). Affects c7a/c7i; c6a/c7g/c8g are fine. Tracked at
-  fg-labs/bwa-mem2#25.
+  fg-labs/bwa-mem3#25.
 - **c6a / AVX2 MAPQ regression**: 4 of 64,763 reads in smoke-1M differ in
   MAPQ between fg-labs (AVX2) and upstream v2.2.1 — same position, same
   CIGAR. Pre-dates PR #26; reproduces on `690914f` too. c7i/c7a/c6a with

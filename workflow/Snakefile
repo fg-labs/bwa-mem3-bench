@@ -140,7 +140,7 @@ rule smoke:
     """End-to-end AWS smoke across every benchmarked arch.
 
     For each arch in CONFIG.full_archs:
-      - run fg-labs bwa-mem2 on smoke-1M — exercises that
+      - run fg-labs bwa-mem3 on smoke-1M — exercises that
         the arch-specific SIMD build (NEON / AVX2 / AVX-512 / etc.) works on a
         real worker of that instance family.
     Additionally, for every baseline-supported arch (x86):
