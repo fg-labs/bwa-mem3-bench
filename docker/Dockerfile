@@ -61,17 +61,20 @@ RUN git clone --recursive ${FG_LABS_REPO} fg-labs && \
     git submodule update --init --recursive && \
     # Same GCC-12 __rdtsc redefinition fix as upstream (no-op if fg-labs already patched).
     sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true
+# Build fg-labs bwa-mem3. Since fg-labs PR #83, x86 ships a single binary
+# with all five SIMD tiers (sse41/sse42/avx/avx2/avx512bw) compiled in and
+# selected at runtime via in-process dispatch — no more `make multi` launcher
+# + per-tier binaries. ARM is unchanged: still one binary, runtime-detected.
+# The output filename was also renamed `bwa-mem2` → `bwa-mem3` (PR-rename).
+# We install it under the legacy `bwa-mem2.fg-labs` path so the workflow
+# rules that invoke `bwa-mem2.fg-labs mem` keep working untouched.
 RUN cd fg-labs && \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        make arch=arm64 -j"$(nproc)" && \
-        install -Dm755 bwa-mem2 /out/bin/bwa-mem2.fg-labs; \
+        make arch=arm64 -j"$(nproc)"; \
     else \
-        make multi -j"$(nproc)" && \
-        install -Dm755 bwa-mem2 /out/bin/bwa-mem2.fg-labs && \
-        for v in sse41 avx avx2 avx512bw; do \
-            [ -f bwa-mem2.$v ] && install -Dm755 bwa-mem2.$v /out/bin/bwa-mem2.fg-labs.$v || true; \
-        done; \
-    fi
+        make -j"$(nproc)"; \
+    fi && \
+    install -Dm755 bwa-mem3 /out/bin/bwa-mem2.fg-labs
 
 # Build compare-bams.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml /src/

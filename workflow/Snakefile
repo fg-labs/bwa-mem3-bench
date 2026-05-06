@@ -178,9 +178,10 @@ rule smoke:
 rule smoke_meth:
     """Bisulfite-specific smoke. Runs the full meth pipeline end-to-end on a
     ~10K-pair sample — exercises (a) the hg38-meth doubled c2t reference,
-    (b) the bwameth.py → bwa-mem2 → bwa-mem2.avx* dispatch chain, (c) the
-    fg-labs `--meth` path, and (d) the m7i arch queue (m7i.4xlarge, 64 GB)
-    which is where real meth samples also run.
+    (b) the bwameth.py → bwa-mem2 (upstream launcher → bwa-mem2.avx*)
+    dispatch chain, (c) the fg-labs `--meth` path (single binary with
+    in-process SIMD dispatch since PR #83), and (d) the m7i arch queue
+    (m7i.4xlarge, 64 GB) which is where real meth samples also run.
 
     Usage:
         snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
