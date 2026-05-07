@@ -209,6 +209,17 @@ from `arch.baseline_arch` in `config/archs.yaml`:
   fails with "invalid type: None"** when any listed job has a null
   `stoppedAt` (e.g., still running). Filter with `[?stoppedAt!=`null`]`
   before sorting, or skip the sort.
+- **Sapphire Rapids (c7i, m7i) spot pools are ~10-15× noisier than other
+  archs.** Across 56 (run × sample) cells with 3+ reps each, median
+  wall-time CV is c6a 1.4%, c7a 0.8%, c7g 0.8%, c8g 0.9%, c7i 11.1%,
+  m7i 11.5%. Within the same coordinator run, m7i can swing ±20-40%
+  rep-to-rep on the same input; c7i swings ±10-15%. Implication: if
+  you need confident m7i / c7i numbers (e.g. cross-SHA regression
+  detection), bump `--reps` to 5 or higher; 3 reps masks 11% CV with
+  too few samples. AMD (c6a, c7a) and Graviton (c7g, c8g) at 3 reps
+  is fine. Likely cause: AWS spot host quality varies more in those
+  pools, plus m7i specifically shows lower mean_load (840 vs 1119-1293
+  elsewhere), suggesting it also has worse multi-tenant noise.
 
 ## Known issues
 
