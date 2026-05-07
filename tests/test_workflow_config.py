@@ -37,6 +37,19 @@ def test_load_config_returns_expected_archs() -> None:
     assert set(cfg.full_archs) == {"c7g", "c6a", "c7i", "c8g", "c7a", "m7i"}
 
 
+def test_arch_baseline_arch_field() -> None:
+    cfg = load_config(CONFIG_DIR)
+    # AVX-512BW hosts get the avx512bw baseline floor (PR #84).
+    assert cfg.archs["c7a"].baseline_arch == "avx512bw"
+    assert cfg.archs["c7i"].baseline_arch == "avx512bw"
+    assert cfg.archs["m7i"].baseline_arch == "avx512bw"
+    # AVX2-only host stays on avx2.
+    assert cfg.archs["c6a"].baseline_arch == "avx2"
+    # ARM archs ignore the field; empty string = no override.
+    assert cfg.archs["c7g"].baseline_arch == ""
+    assert cfg.archs["c8g"].baseline_arch == ""
+
+
 def test_load_config_returns_expected_defaults() -> None:
     cfg = load_config(CONFIG_DIR)
     assert cfg.bucket == "bwa-mem3-bench"

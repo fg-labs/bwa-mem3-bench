@@ -7,6 +7,12 @@ ARG UPSTREAM_REPO
 ARG UPSTREAM_TAG
 ARG FG_LABS_REPO
 ARG FG_LABS_SHA
+# fg-labs/bwa-mem3 BASELINE_ARCH (PR #84): non-kernel TU compile floor on x86.
+# Empty string = use upstream default (currently `avx2`, portable). Set to
+# `avx512bw` for an AVX-512BW-host-locked image that recovers ~10–15% on hot
+# non-kernel paths on c7a / c7i / m7i. NEON build is unaffected; the make
+# variable is silently ignored on aarch64.
+ARG BASELINE_ARCH=""
 ARG SAMTOOLS_VERSION
 ARG BWA_VERSION
 ARG BWAMETH_VERSION
@@ -72,7 +78,11 @@ RUN cd fg-labs && \
     if [ "$TARGETARCH" = "arm64" ]; then \
         make arch=arm64 -j"$(nproc)"; \
     else \
-        make -j"$(nproc)"; \
+        if [ -n "$BASELINE_ARCH" ]; then \
+            make BASELINE_ARCH="$BASELINE_ARCH" -j"$(nproc)"; \
+        else \
+            make -j"$(nproc)"; \
+        fi; \
     fi && \
     install -Dm755 bwa-mem3 /out/bin/bwa-mem2.fg-labs
 

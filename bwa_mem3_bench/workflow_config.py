@@ -26,6 +26,10 @@ class Arch:
     batch_queue: str
     simd: str
     platform: str
+    # fg-labs/bwa-mem3 BASELINE_ARCH build-arg for this arch's image. Empty
+    # string means "no override" (use the upstream default). See
+    # config/archs.yaml for rationale.
+    baseline_arch: str = ""
 
 
 @dataclass(frozen=True)
@@ -87,6 +91,7 @@ def load_config(config_dir: Path) -> WorkflowConfig:
             batch_queue=data["batch_queue"],
             simd=data["simd"],
             platform=data["platform"],
+            baseline_arch=str(data.get("baseline_arch", "")),
         )
         for name, data in archs_raw["archs"].items()
     }

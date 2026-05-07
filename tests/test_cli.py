@@ -42,3 +42,42 @@ def test_subcommand_stubs_run_in_dry_mode() -> None:
     r = _run(["build", "--fg-labs-sha", "abcdef1", "--dry-run"])
     assert r.returncode == 0, r.stderr
     assert "dry-run" in r.stdout.lower()
+
+
+def test_build_baseline_arch_suffixes_tag_and_passes_build_arg() -> None:
+    """`--baseline-arch avx512bw` appends -avx512bw to the SHA tag, passes
+    the build-arg, and does NOT also tag :latest (would clobber the
+    portable tag with a host-locked variant)."""
+    r = _run(
+        [
+            "build",
+            "--fg-labs-sha",
+            "abcdef1",
+            "--baseline-arch",
+            "avx512bw",
+            "--push",
+            "--dry-run",
+        ]
+    )
+    assert r.returncode == 0, r.stderr
+    out = r.stdout
+    assert "BASELINE_ARCH=avx512bw" in out
+    assert ":abcdef1-avx512bw" in out
+    assert ":latest" not in out
+
+
+def test_build_no_baseline_arch_keeps_latest_tag_on_push() -> None:
+    r = _run(
+        [
+            "build",
+            "--fg-labs-sha",
+            "abcdef1",
+            "--push",
+            "--dry-run",
+        ]
+    )
+    assert r.returncode == 0, r.stderr
+    out = r.stdout
+    assert "BASELINE_ARCH=" in out  # passed as empty string
+    assert ":abcdef1" in out
+    assert ":latest" in out

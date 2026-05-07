@@ -30,6 +30,7 @@ def build(  # noqa: PLR0913
     upstream_tag: str = "v2.2.1",
     platforms: str = "linux/amd64,linux/arm64",
     image_name: str = "bwa-mem3-bench",
+    baseline_arch: str = "",
     push: bool = False,
     load: bool = False,
     also_tag_latest: bool = True,
@@ -42,11 +43,19 @@ def build(  # noqa: PLR0913
     :param platforms: comma-separated platforms for buildx.
     :param image_name: image name, sans `:<tag>`. Use an ECR URI to tag for
         push, e.g. `<account-id>.dkr.ecr.<region>.amazonaws.com/bwa-mem3-bench`.
+    :param baseline_arch: fg-labs/bwa-mem3 ``BASELINE_ARCH`` build-arg
+        (e.g. ``avx2``, ``avx512bw``). Empty string means "no override" — the
+        upstream default is used and the image stays portable across x86
+        SIMD tiers. When set, the image is host-locked to that tier or
+        higher and the SHA tag is suffixed (e.g. ``<sha>-avx512bw``); the
+        portable ``:latest`` tag is NOT updated to avoid clobbering it with
+        a host-locked variant.
     :param push: push to ECR after build (mutually exclusive with --load).
     :param load: load into local docker (single-arch only).
     :param also_tag_latest: when pushing, also tag + push as `:latest`. The
         coordinator Batch job definition references `:latest`, so every new
         image needs it. Default True; set False to only push the SHA tag.
+        Forced False when ``baseline_arch`` is set.
     :param dry_run: print the command without executing.
     """
     if push and load:
@@ -54,6 +63,9 @@ def build(  # noqa: PLR0913
 
     if push:
         _ecr_login(image_name, dry_run=dry_run)
+
+    tag_suffix = f"-{baseline_arch}" if baseline_arch else ""
+    sha_tag = f"{fg_labs_sha}{tag_suffix}"
 
     cmd = [
         "docker",
@@ -75,15 +87,19 @@ def build(  # noqa: PLR0913
         "--build-arg",
         f"FG_LABS_SHA={fg_labs_sha}",
         "--build-arg",
+        f"BASELINE_ARCH={baseline_arch}",
+        "--build-arg",
         "SAMTOOLS_VERSION=1.22.1",
         "--build-arg",
         "BWA_VERSION=0.7.19",
         "--build-arg",
         "BWAMETH_VERSION=0.2.7",
         "--tag",
-        f"{image_name}:{fg_labs_sha}",
+        f"{image_name}:{sha_tag}",
     ]
-    if push and also_tag_latest:
+    # Only update :latest for portable (no-baseline_arch) builds. A host-locked
+    # avx512bw image tagged :latest would crash all c6a workers on next pull.
+    if push and also_tag_latest and not baseline_arch:
         cmd.extend(["--tag", f"{image_name}:latest"])
     if push:
         cmd.append("--push")
