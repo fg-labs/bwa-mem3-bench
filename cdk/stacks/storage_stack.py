@@ -68,12 +68,30 @@ class StorageStack(cdk.Stack):
             # job definition, which requires the tag to be mutable. `:<sha>` tags
             # remain de-facto immutable because commit SHAs don't repeat.
             image_tag_mutability=ecr.TagMutability.MUTABLE,
+            # Multi-arch manifest list pushes leave ~2 untagged sub-manifests
+            # in ECR per release (one per platform — linux/amd64 + linux/arm64).
+            # Reap those aggressively (rule 1) so they don't crowd out the
+            # tagged retention budget (rule 2). Rule priority is stable: rule 1
+            # matches untagged images first; rule 2 only sees what's left.
             lifecycle_rules=[
                 ecr.LifecycleRule(
-                    description="Keep the last 50 images (tagged or untagged)",
-                    max_image_count=50,
+                    rule_priority=1,
+                    description=(
+                        "Expire untagged sub-manifests after 7 days "
+                        "(per-platform pieces of multi-arch lists)"
+                    ),
+                    tag_status=ecr.TagStatus.UNTAGGED,
+                    max_image_age=cdk.Duration.days(7),
+                ),
+                ecr.LifecycleRule(
+                    rule_priority=2,
+                    description=(
+                        "Keep last 30 tagged images (~30 fg-labs SHAs of "
+                        "history including tier-suffixed variants)"
+                    ),
                     tag_status=ecr.TagStatus.ANY,
-                )
+                    max_image_count=30,
+                ),
             ],
         )
 
