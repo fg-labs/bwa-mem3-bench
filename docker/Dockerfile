@@ -96,7 +96,7 @@ RUN cd /src && cargo build --release --bin compare-bams && \
 # without snakemake's `benchmark:` directive. Tricord requires Rust 1.94+, so
 # install a separate stable toolchain rather than retraining 1.85 above. We
 # pin to a published crates.io version for reproducibility; bump as needed.
-ARG TRICORD_VERSION=0.1.0
+ARG TRICORD_VERSION=0.1.2
 RUN rustup toolchain install stable --profile minimal --no-self-update && \
     cargo +stable install --locked --root /out --version "${TRICORD_VERSION}" tricord
 

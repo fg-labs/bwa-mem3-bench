@@ -21,7 +21,7 @@ docker buildx build \
     --build-arg UPSTREAM_TAG="${UPSTREAM_TAG}" \
     --build-arg FG_LABS_REPO=https://github.com/fg-labs/bwa-mem3 \
     --build-arg FG_LABS_SHA="${FG_LABS_SHA}" \
-    --build-arg SAMTOOLS_VERSION=1.22.1 \
+    --build-arg SAMTOOLS_VERSION=1.23.1 \
     --build-arg BWA_VERSION=0.7.19 \
     --build-arg BWAMETH_VERSION=0.2.7 \
     --tag "bwa-mem3-bench:${FG_LABS_SHA}-native" \

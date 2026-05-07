@@ -94,7 +94,7 @@ def build(  # noqa: PLR0913
         "--build-arg",
         f"BASELINE_ARCH={baseline_arch}",
         "--build-arg",
-        "SAMTOOLS_VERSION=1.22.1",
+        "SAMTOOLS_VERSION=1.23.1",
         "--build-arg",
         "BWA_VERSION=0.7.19",
         "--build-arg",
