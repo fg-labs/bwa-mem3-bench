@@ -49,7 +49,12 @@ def build(  # noqa: PLR0913
         SIMD tiers. When set, the image is host-locked to that tier or
         higher and the SHA tag is suffixed (e.g. ``<sha>-avx512bw``); the
         portable ``:latest`` tag is NOT updated to avoid clobbering it with
-        a host-locked variant.
+        a host-locked variant. Currently a no-op for the workflow because
+        every arch in ``config/archs.yaml`` is parked at
+        ``baseline_arch=""`` — empirical data showed the avx512bw variant
+        is not a perf win on this workload (see Phase C report at
+        ``~/work/git/bwa-mem3/avx512-baseline-build/PHASE_C_REPORT.md``).
+        The flag is preserved for re-enablement once upstream lands a fix.
     :param push: push to ECR after build (mutually exclusive with --load).
     :param load: load into local docker (single-arch only).
     :param also_tag_latest: when pushing, also tag + push as `:latest`. The

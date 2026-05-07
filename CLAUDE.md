@@ -89,7 +89,7 @@ All commands are `pixi run python -m bwa_mem3_bench.cli <subcommand>`.
 ## Our `snakemake-executor-plugin-aws-batch` fork
 
 Lives at <https://github.com/nh13/snakemake-executor-plugin-aws-batch>.
-Pinned in `docker/Dockerfile` and `pixi.toml` by SHA. Carries three
+Pinned in `docker/Dockerfile` and `pixi.toml` by SHA. Carries four
 non-upstream changes:
 1. `resources.batch_queue` per-rule queue override.
 2. `auto_deploy_default_storage_provider=False` — we install the storage
@@ -97,7 +97,36 @@ non-upstream changes:
 3. `resources.shared_memory_size_mb` → `linuxParameters.sharedMemorySize`
    on the worker job definition. Needed for `bwa-mem2 shm` to stage the
    in-memory index in /dev/shm (default 64 MB is too small).
+4. `resources.container_image` per-rule image override → SubmitJob's
+   `containerProperties.image`. Used by per-arch image selection (see
+   next section); falls back to the profile's `container-image` when
+   unset.
 Bump the pin when we add more fixes.
+
+## Per-rule (per-arch) image selection
+
+Each Batch worker job can pull a different ECR image, derived per-arch
+from `arch.baseline_arch` in `config/archs.yaml`:
+
+- `Arch.image_uri(ecr_repo_uri, fg_labs_sha)` returns `<ECR>:<sha>` when
+  `baseline_arch == ""` (portable manifest list) or
+  `<ECR>:<sha>-<baseline_arch>` otherwise (host-locked variant).
+- `workflow/Snakefile` exposes a thin `image_for_arch(arch_name)` helper
+  bound to `FG_LABS_SHA` + `aws_config.load().ecr_repo_uri`.
+- `workflow/rules/{align,compare}.smk` rules set
+  `resources.container_image = lambda wc: image_for_arch(wc.arch)`.
+- The plumbing is wired and tested but **every arch is currently parked
+  at `baseline_arch=""`** — empirical data on this workload shows the
+  fg-labs/bwa-mem3 `BASELINE_ARCH=avx512bw` build is consistently
+  slower on Zen 4 (c7a +12-17%) and only mixed/wash on Sapphire Rapids
+  (c7i / m7i), against PR #84's claimed +10-15% gain. See
+  `~/work/git/bwa-mem3/avx512-baseline-build/PHASE_C_REPORT.md` for the
+  full numbers + likely root causes.
+- Build side: `cli build --baseline-arch <tier>` produces the matching
+  ECR tag (`<sha>-<tier>`). When upstream lands an AVX-512 fix, flip
+  the relevant arch's `baseline_arch` field, build that variant via
+  `cli build --baseline-arch avx512bw --push`, re-submit. No further
+  workflow / plugin changes needed.
 
 ## Data locations
 
