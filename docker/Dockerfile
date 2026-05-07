@@ -171,7 +171,7 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     'snakemake>=8.27,<9' \
     'snakemake-interface-storage-plugins>=3.2.4,<4' \
     'snakemake-storage-plugin-s3==0.3.1' \
-    'git+https://github.com/nh13/snakemake-executor-plugin-aws-batch.git@c736516400538a45215a3527fcc20dc07251f245'
+    'git+https://github.com/nh13/snakemake-executor-plugin-aws-batch.git@727782c961e96c2a50f934c526072357a22cdf07'
 
 # Workflow + config so snakemake can find them without a checkout.
 COPY workflow /opt/workflow
