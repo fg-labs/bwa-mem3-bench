@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from bwa_mem3_bench.workflow_config import (
+    Arch,
     WorkflowConfig,
     load_config,
 )
@@ -38,49 +39,51 @@ def test_load_config_returns_expected_archs() -> None:
 
 
 def test_arch_baseline_arch_field() -> None:
+    """Every arch currently uses the portable image (`baseline_arch=""`).
+
+    The per-rule image plumbing is wired end-to-end and tested, but the
+    AVX-512BW image variant produced by `BASELINE_ARCH=avx512bw` is not
+    a perf win on this workload (see Phase C report at
+    ~/work/git/bwa-mem3/avx512-baseline-build/PHASE_C_REPORT.md). When
+    upstream lands a fix, set c7a / c7i / m7i back to "avx512bw" here.
+    """
     cfg = load_config(CONFIG_DIR)
-    # AVX-512BW hosts get the avx512bw baseline floor (fg-labs PR #84).
-    assert cfg.archs["c7a"].baseline_arch == "avx512bw"
-    assert cfg.archs["c7i"].baseline_arch == "avx512bw"
-    assert cfg.archs["m7i"].baseline_arch == "avx512bw"
-    # c6a (AVX2-only) uses the portable tag — AVX2 is the upstream default,
-    # so the bare `<sha>` build already ships an AVX2-baselined binary.
-    assert cfg.archs["c6a"].baseline_arch == ""
-    # ARM archs ignore the field; empty string = no override.
-    assert cfg.archs["c7g"].baseline_arch == ""
-    assert cfg.archs["c8g"].baseline_arch == ""
+    for arch in ("c6a", "c7a", "c7i", "c7g", "c8g", "m7i"):
+        assert cfg.archs[arch].baseline_arch == "", (
+            f"{arch}.baseline_arch should be parked at ''; got "
+            f"{cfg.archs[arch].baseline_arch!r}"
+        )
 
 
 _TEST_ECR = "550079046206.dkr.ecr.us-east-1.amazonaws.com/bwa-mem3-bench"
 _TEST_SHA = "abcdef0"
 
 
-def test_arch_image_uri_avx2_host_uses_portable_tag() -> None:
-    """c6a (AVX2-only) uses the bare `<sha>` portable tag — AVX2 is the
-    upstream BASELINE_ARCH default, so building a separate `<sha>-avx2`
-    image would just duplicate content already in `<sha>`."""
+def test_arch_image_uri_all_archs_use_portable_tag_today() -> None:
+    """Every arch resolves to the bare `<sha>` portable tag right now —
+    matches the parked `baseline_arch=""` config (see test above)."""
     cfg = load_config(CONFIG_DIR)
-    uri = cfg.archs["c6a"].image_uri(ecr_repo_uri=_TEST_ECR, fg_labs_sha=_TEST_SHA)
-    assert uri == f"{_TEST_ECR}:{_TEST_SHA}"
-    assert "-" not in uri.split(":")[-1]
-
-
-def test_arch_image_uri_avx512_hosts_use_avx512bw_suffix() -> None:
-    cfg = load_config(CONFIG_DIR)
-    for arch in ("c7a", "c7i", "m7i"):
-        uri = cfg.archs[arch].image_uri(ecr_repo_uri=_TEST_ECR, fg_labs_sha=_TEST_SHA)
-        assert uri == f"{_TEST_ECR}:{_TEST_SHA}-avx512bw", f"{arch}: {uri}"
-
-
-def test_arch_image_uri_arm_hosts_use_no_suffix() -> None:
-    """ARM archs have empty baseline_arch -> bare <sha> tag (multi-arch
-    manifest list, no host-locking)."""
-    cfg = load_config(CONFIG_DIR)
-    for arch in ("c7g", "c8g"):
+    for arch in ("c6a", "c7a", "c7i", "c7g", "c8g", "m7i"):
         uri = cfg.archs[arch].image_uri(ecr_repo_uri=_TEST_ECR, fg_labs_sha=_TEST_SHA)
         assert uri == f"{_TEST_ECR}:{_TEST_SHA}", f"{arch}: {uri}"
-        # No dash in the tag (would be a tier suffix).
         assert "-" not in uri.split(":")[-1], f"{arch} unexpected suffix in {uri}"
+
+
+def test_arch_image_uri_with_baseline_arch_set_appends_suffix() -> None:
+    """Method-level test: when `baseline_arch` is set on an Arch (e.g.
+    after upstream lands an AVX-512 fix and we flip the config), the
+    image URI gets the matching tag suffix. Constructs an Arch directly
+    so this test stays green even if the production config stays parked."""
+    arch = Arch(
+        name="c7a",
+        instance_type="c7a.4xlarge",
+        batch_queue="q",
+        simd="avx512",
+        platform="linux/amd64",
+        baseline_arch="avx512bw",
+    )
+    uri = arch.image_uri(ecr_repo_uri=_TEST_ECR, fg_labs_sha=_TEST_SHA)
+    assert uri == f"{_TEST_ECR}:{_TEST_SHA}-avx512bw"
 
 
 def test_load_config_returns_expected_defaults() -> None:

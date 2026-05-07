@@ -1,13 +1,21 @@
 # `baseline_arch` selects the fg-labs/bwa-mem3 `BASELINE_ARCH` build-arg used
 # to compile the non-kernel TUs of the single binary on x86 (added by fg-labs
-# PR #84). On an AVX-512BW host, building with `BASELINE_ARCH=avx512bw`
-# recovers ~10–15% on hot non-kernel paths (chain extension, FMI walks, mate
-# scoring) that an AVX2-baseline build leaves unvectorized at 256-bit width.
-# Per-tier kernel objects are still compiled at every tier and runtime-
-# dispatched, so an avx512bw-baselined image is host-locked: it crashes on
-# pre-AVX-512 hardware. Empty string means "no override" — the upstream
-# default (currently `avx2`) is used; safe everywhere x86 with AVX2+. ARM
-# archs ignore the field (NEON has no analogous knob).
+# PR #84). The plumbing is wired end-to-end (`Arch.image_uri` →
+# `resources.container_image` → snakemake-executor-plugin-aws-batch fork),
+# but every arch is currently set to `""` (use the portable `:<sha>` tag).
+#
+# Why parked: empirical data on this workload (3-rep medians on c7a / c7i /
+# m7i, hg38 + 5M-pair samples, fg-labs/bwa-mem3 `316dba62`) shows
+# `BASELINE_ARCH=avx512bw` is consistently slower than the AVX2 default on
+# Zen 4 (c7a +12-17%) and only mixed/wash on Sapphire Rapids (c7i / m7i).
+# PR #84's claimed +10-15% gain doesn't materialize. See
+# `~/work/git/bwa-mem3/avx512-baseline-build/PHASE_C_REPORT.md` for the
+# full numbers and likely root causes.
+#
+# Re-enable per-arch when upstream lands a fix (most likely
+# `-mprefer-vector-width=256` or pragma'd hot loops): set the relevant
+# archs to `avx512bw` here, build the image variant via
+# `cli build --baseline-arch avx512bw --push`, re-run.
 archs:
   c7g:
     instance_type: c7g.4xlarge
@@ -31,7 +39,7 @@ archs:
     batch_queue: bwa-mem3-bench-c7i
     simd: avx512
     platform: linux/amd64
-    baseline_arch: avx512bw
+    baseline_arch: ""
   c8g:
     instance_type: c8g.4xlarge
     batch_queue: bwa-mem3-bench-c8g
@@ -43,7 +51,7 @@ archs:
     batch_queue: bwa-mem3-bench-c7a
     simd: avx512
     platform: linux/amd64
-    baseline_arch: avx512bw
+    baseline_arch: ""
   # m7i: Sapphire Rapids general-purpose (64 GB, 4 GB/vCPU). Same CPU family /
   # AVX-512BW as c7i (32 GB host is too small for meth FMI). Meth samples run
   # here; non-meth samples also run here so meth-vs-non-meth is apples-to-apples
@@ -55,7 +63,7 @@ archs:
     batch_queue: bwa-mem3-bench-m7i
     simd: avx512
     platform: linux/amd64
-    baseline_arch: avx512bw
+    baseline_arch: ""
 
 core_arch: c8g
 full_archs: [c8g, c7g, c6a, c7i, c7a, m7i]
