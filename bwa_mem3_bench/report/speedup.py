@@ -116,14 +116,17 @@ def render_speedup_markdown(
 
     lines.extend(
         [
-            "Two speedup columns:",
+            "Two speedup columns; **`compute_speedup` is the headline metric**:",
             "",
+            "- **`compute_speedup`** — `baseline_compute_s / fg_labs_compute_s` from "
+            "bwa-mem2's `PROCESS()` profiling line. Excludes index loading; "
+            "apples-to-apples kernel speedup, host-state independent.",
             "- **`wall_speedup`** — `baseline_s / fg_labs_s`. End-user-experienced "
             "speedup; includes `bwa-mem2 shm` (fg-labs) and dummy-run page-cache "
-            "prewarm (baseline) so both sides start with a warm index.",
-            "- **`compute_speedup`** — `baseline_compute_s / fg_labs_compute_s` from "
-            "bwa-mem2's `PROCESS()` profiling line. Excludes index loading; this is "
-            "the apples-to-apples kernel speedup, host-state independent.",
+            "prewarm (baseline). Inflated on small samples like `smoke-1M` where "
+            "the baseline's index-load time (~25 s, single-threaded) dominates the "
+            "few seconds of actual mapping work; trust `compute_speedup` as the "
+            "kernel-throughput signal.",
             "",
         ]
     )
@@ -131,12 +134,12 @@ def render_speedup_markdown(
     headers = [
         "sample",
         "arch",
-        "baseline_s",
-        "fg_labs_s",
-        "wall_speedup",
-        "baseline_compute_s",
-        "fg_labs_compute_s",
         "compute_speedup",
+        "wall_speedup",
+        "fg_labs_compute_s",
+        "baseline_compute_s",
+        "fg_labs_s",
+        "baseline_s",
     ]
     aligners = ["---", "---", "---:", "---:", "---:", "---:", "---:", "---:"]
     body_rows: list[str] = []
@@ -147,12 +150,12 @@ def render_speedup_markdown(
                 [
                     str(row.sample),
                     str(row.arch),
-                    _format_seconds(row.baseline_s),
-                    _format_seconds(row.fg_labs_s),
-                    _format_speedup(row.wall_speedup),
-                    _format_seconds(row.baseline_compute_s),
-                    _format_seconds(row.fg_labs_compute_s),
                     _format_speedup(row.compute_speedup),
+                    _format_speedup(row.wall_speedup),
+                    _format_seconds(row.fg_labs_compute_s),
+                    _format_seconds(row.baseline_compute_s),
+                    _format_seconds(row.fg_labs_s),
+                    _format_seconds(row.baseline_s),
                 ]
             )
             + " |"

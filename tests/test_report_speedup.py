@@ -115,8 +115,8 @@ def test_render_speedup_markdown_contains_x_suffix_and_emdash(tmp_path: Path) ->
     assert "Speedup vs upstream bwa-mem2 v2.2.1" in md
     assert FG_LABS_SHA in md
     assert (
-        "| sample | arch | baseline_s | fg_labs_s | wall_speedup | "
-        "baseline_compute_s | fg_labs_compute_s | compute_speedup |"
+        "| sample | arch | compute_speedup | wall_speedup | "
+        "fg_labs_compute_s | baseline_compute_s | fg_labs_s | baseline_s |"
     ) in md
     # Right-aligned numeric columns.
     assert "---:" in md

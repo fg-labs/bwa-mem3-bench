@@ -16,7 +16,8 @@ def _load_trials(db_path: Path, fg_labs_sha: str) -> pd.DataFrame:
         db_path,
         """
         SELECT t.sample, t.arch, t.rep,
-               t.wall_seconds, t.max_rss_mb, t.cpu_time,
+               t.wall_seconds, t.process_seconds, t.index_read_seconds,
+               t.max_rss_mb, t.cpu_time,
                t.io_read_mb, t.io_write_mb,
                c.concordance_pct, c.total AS comp_total
         FROM trials t
@@ -43,9 +44,38 @@ def generate_summary(*, db_path: Path, fg_labs_sha: str, out_md: Path) -> None:
     lines.append("## Performance")
     lines.append("")
     lines.append(
+        "`compute_s` is `bwa-mem2 PROCESS()` (kernel-only, host-state-independent); "
+        "`index_read_s` is the index-load cost. `wall_s` includes both plus pipe / "
+        "samtools overhead — useful as the end-user-experienced number but inflated on "
+        "small samples where index load dominates."
+    )
+    lines.append("")
+    lines.append(
         md_table(
-            ["sample", "arch", "rep", "wall_s", "max_rss_mb", "io_read_mb", "io_write_mb"],
-            df[["sample", "arch", "rep", "wall_seconds", "max_rss_mb", "io_read_mb", "io_write_mb"]]
+            [
+                "sample",
+                "arch",
+                "rep",
+                "wall_s",
+                "compute_s",
+                "index_read_s",
+                "max_rss_mb",
+                "io_read_mb",
+                "io_write_mb",
+            ],
+            df[
+                [
+                    "sample",
+                    "arch",
+                    "rep",
+                    "wall_seconds",
+                    "process_seconds",
+                    "index_read_seconds",
+                    "max_rss_mb",
+                    "io_read_mb",
+                    "io_write_mb",
+                ]
+            ]
             .to_records(index=False)
             .tolist(),
         )
