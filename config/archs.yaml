@@ -20,7 +20,12 @@ archs:
     batch_queue: bwa-mem3-bench-c6a
     simd: avx2
     platform: linux/amd64
-    baseline_arch: avx2
+    # AVX2 is the upstream default in fg-labs/bwa-mem3 main, so the portable
+    # `<sha>` tag (built by `cli build` with no --baseline-arch) already
+    # ships an AVX2-baselined binary. Empty here so c6a workers pull the
+    # bare portable tag instead of a hypothetical `<sha>-avx2` we don't
+    # actually publish.
+    baseline_arch: ""
   c7i:
     instance_type: c7i.4xlarge
     batch_queue: bwa-mem3-bench-c7i

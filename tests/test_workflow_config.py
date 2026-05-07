@@ -39,12 +39,13 @@ def test_load_config_returns_expected_archs() -> None:
 
 def test_arch_baseline_arch_field() -> None:
     cfg = load_config(CONFIG_DIR)
-    # AVX-512BW hosts get the avx512bw baseline floor (PR #84).
+    # AVX-512BW hosts get the avx512bw baseline floor (fg-labs PR #84).
     assert cfg.archs["c7a"].baseline_arch == "avx512bw"
     assert cfg.archs["c7i"].baseline_arch == "avx512bw"
     assert cfg.archs["m7i"].baseline_arch == "avx512bw"
-    # AVX2-only host stays on avx2.
-    assert cfg.archs["c6a"].baseline_arch == "avx2"
+    # c6a (AVX2-only) uses the portable tag — AVX2 is the upstream default,
+    # so the bare `<sha>` build already ships an AVX2-baselined binary.
+    assert cfg.archs["c6a"].baseline_arch == ""
     # ARM archs ignore the field; empty string = no override.
     assert cfg.archs["c7g"].baseline_arch == ""
     assert cfg.archs["c8g"].baseline_arch == ""
@@ -54,10 +55,14 @@ _TEST_ECR = "550079046206.dkr.ecr.us-east-1.amazonaws.com/bwa-mem3-bench"
 _TEST_SHA = "abcdef0"
 
 
-def test_arch_image_uri_avx2_host_uses_avx2_suffix() -> None:
+def test_arch_image_uri_avx2_host_uses_portable_tag() -> None:
+    """c6a (AVX2-only) uses the bare `<sha>` portable tag — AVX2 is the
+    upstream BASELINE_ARCH default, so building a separate `<sha>-avx2`
+    image would just duplicate content already in `<sha>`."""
     cfg = load_config(CONFIG_DIR)
     uri = cfg.archs["c6a"].image_uri(ecr_repo_uri=_TEST_ECR, fg_labs_sha=_TEST_SHA)
-    assert uri == f"{_TEST_ECR}:{_TEST_SHA}-avx2"
+    assert uri == f"{_TEST_ECR}:{_TEST_SHA}"
+    assert "-" not in uri.split(":")[-1]
 
 
 def test_arch_image_uri_avx512_hosts_use_avx512bw_suffix() -> None:
