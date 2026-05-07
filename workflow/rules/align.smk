@@ -154,6 +154,7 @@ rule align_fg_labs:
         batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
         mem_mb = lambda wc: _mem_mb_for(wc.sample),
         shared_memory_size_mb = lambda wc: _shm_size_mb_for(wc.sample),
+        container_image = lambda wc: image_for_arch(wc.arch),
     params:
         threads = CONFIG.threads,
         extra   = lambda wc: _fg_labs_flags(wc.sample),
@@ -210,6 +211,7 @@ rule align_baseline:
     resources:
         batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
         mem_mb = lambda wc: _mem_mb_for(wc.sample),
+        container_image = lambda wc: image_for_arch(wc.arch),
     params:
         threads = CONFIG.threads,
         binary  = lambda wc: _baseline_bwa_bin(wc.sample),

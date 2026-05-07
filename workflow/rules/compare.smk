@@ -32,6 +32,7 @@ rule compare_vs_baseline:
         json = "runs/{sha}/{sample}/{arch}/rep-{rep}/compare/vs-baseline.json",
     resources:
         batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
+        container_image = lambda wc: image_for_arch(wc.arch),
     params:
         ignore_tag_args = lambda wc: _ignore_tag_args(wc.sample),
     shell:
@@ -54,6 +55,7 @@ rule compare_vs_x86:
         json = "runs/{sha}/{sample}/{arch}/rep-{rep}/compare/vs-x86.json",
     resources:
         batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
+        container_image = lambda wc: image_for_arch(wc.arch),
     params:
         ignore_tag_args = lambda wc: _ignore_tag_args(wc.sample),
     shell:
@@ -74,6 +76,7 @@ rule compare_vs_golden:
         json = "runs/{sha}/{sample}/{arch}/rep-{rep}/compare/vs-golden.json",
     resources:
         batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
+        container_image = lambda wc: image_for_arch(wc.arch),
     params:
         ignore_tag_args = lambda wc: _ignore_tag_args(wc.sample),
     shell:

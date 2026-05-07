@@ -50,6 +50,34 @@ def test_arch_baseline_arch_field() -> None:
     assert cfg.archs["c8g"].baseline_arch == ""
 
 
+_TEST_ECR = "550079046206.dkr.ecr.us-east-1.amazonaws.com/bwa-mem3-bench"
+_TEST_SHA = "abcdef0"
+
+
+def test_arch_image_uri_avx2_host_uses_avx2_suffix() -> None:
+    cfg = load_config(CONFIG_DIR)
+    uri = cfg.archs["c6a"].image_uri(ecr_repo_uri=_TEST_ECR, fg_labs_sha=_TEST_SHA)
+    assert uri == f"{_TEST_ECR}:{_TEST_SHA}-avx2"
+
+
+def test_arch_image_uri_avx512_hosts_use_avx512bw_suffix() -> None:
+    cfg = load_config(CONFIG_DIR)
+    for arch in ("c7a", "c7i", "m7i"):
+        uri = cfg.archs[arch].image_uri(ecr_repo_uri=_TEST_ECR, fg_labs_sha=_TEST_SHA)
+        assert uri == f"{_TEST_ECR}:{_TEST_SHA}-avx512bw", f"{arch}: {uri}"
+
+
+def test_arch_image_uri_arm_hosts_use_no_suffix() -> None:
+    """ARM archs have empty baseline_arch -> bare <sha> tag (multi-arch
+    manifest list, no host-locking)."""
+    cfg = load_config(CONFIG_DIR)
+    for arch in ("c7g", "c8g"):
+        uri = cfg.archs[arch].image_uri(ecr_repo_uri=_TEST_ECR, fg_labs_sha=_TEST_SHA)
+        assert uri == f"{_TEST_ECR}:{_TEST_SHA}", f"{arch}: {uri}"
+        # No dash in the tag (would be a tier suffix).
+        assert "-" not in uri.split(":")[-1], f"{arch} unexpected suffix in {uri}"
+
+
 def test_load_config_returns_expected_defaults() -> None:
     cfg = load_config(CONFIG_DIR)
     assert cfg.bucket == "bwa-mem3-bench"

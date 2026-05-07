@@ -31,6 +31,23 @@ class Arch:
     # config/archs.yaml for rationale.
     baseline_arch: str = ""
 
+    def image_uri(self, *, ecr_repo_uri: str, fg_labs_sha: str) -> str:
+        """Fully-qualified ECR image URI for this arch's worker jobs.
+
+        Derived from `baseline_arch`:
+          - empty string  -> ``<ECR>:<sha>``         (portable, multi-arch)
+          - else          -> ``<ECR>:<sha>-<suffix>`` (host-locked variant)
+
+        The build side (``cli build --baseline-arch <tier>``) produces the
+        matching tag; both sides read this dataclass field so they stay in
+        sync. The workflow's per-rule ``resources.container_image`` lambda
+        calls into this method, and our snakemake-executor-plugin-aws-batch
+        fork uses the resource as the SubmitJob job-def's
+        ``containerProperties.image``.
+        """
+        tag = fg_labs_sha + (f"-{self.baseline_arch}" if self.baseline_arch else "")
+        return f"{ecr_repo_uri}:{tag}"
+
 
 @dataclass(frozen=True)
 class WorkflowConfig:

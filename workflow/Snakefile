@@ -33,6 +33,39 @@ REPS_BASELINE = int(config.get("reps_baseline", CONFIG.reps_baseline))
 BASELINE_ONLY = str(config.get("baseline_only", "false")).lower() == "true"
 IMAGE = config.get("image_tag", f"bwa-mem3-bench:{FG_LABS_SHA}")
 
+# ---------------------------------------------------------------------------
+# Per-rule image selection.
+#
+# Each Batch worker pulls a different ECR image based on its arch:
+#   - portable (c7g, c8g): the bare `<sha>` tag — multi-arch manifest list
+#     (linux/amd64 + linux/arm64), `BASELINE_ARCH=avx2` x86 build.
+#   - avx2 (c6a):     `<sha>-avx2` (explicit, same content as portable today).
+#   - avx512bw-locked (c7a, c7i, m7i): `<sha>-avx512bw` — linux/amd64 only,
+#     non-kernel TUs compiled at AVX-512BW for ~10-15% better hot-path perf
+#     on AVX-512 hosts (fg-labs/bwa-mem3 PR #84). Crashes on AVX2-only hosts.
+#
+# The mapping is driven by `arch.baseline_arch` in `config/archs.yaml`. Each
+# rule's `resources.container_image` lambda calls `image_for_arch` below;
+# our snakemake-executor-plugin-aws-batch fork reads the resource and uses
+# it as the SubmitJob job-def's `containerProperties.image`. When unset
+# (e.g. future rules that don't care about arch), the profile's
+# `container-image` falls back. Build-side: `cli build --baseline-arch
+# <tier>` produces the matching ECR tag.
+# ---------------------------------------------------------------------------
+
+from bwa_mem3_bench import aws_config as _aws_config
+
+_ECR_REPO_URI = _aws_config.load().ecr_repo_uri
+
+
+def image_for_arch(arch_name: str) -> str:
+    """Fully-qualified ECR image URI for a worker on `arch_name`."""
+    return CONFIG.archs[arch_name].image_uri(
+        ecr_repo_uri=_ECR_REPO_URI,
+        fg_labs_sha=FG_LABS_SHA,
+    )
+
+
 # Upstream bwa-mem2 v2.2.1 only supports x86. Anything that needs
 # `bwa-mem2.upstream` (align_baseline, compare_vs_baseline) is restricted to
 # baseline-supported archs; arm archs get fg-labs alignments only (and
