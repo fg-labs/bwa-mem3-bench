@@ -50,8 +50,7 @@ def test_arch_baseline_arch_field() -> None:
     cfg = load_config(CONFIG_DIR)
     for arch in ("c6a", "c7a", "c7i", "c7g", "c8g", "m7i"):
         assert cfg.archs[arch].baseline_arch == "", (
-            f"{arch}.baseline_arch should be parked at ''; got "
-            f"{cfg.archs[arch].baseline_arch!r}"
+            f"{arch}.baseline_arch should be parked at ''; got {cfg.archs[arch].baseline_arch!r}"
         )
 
 
