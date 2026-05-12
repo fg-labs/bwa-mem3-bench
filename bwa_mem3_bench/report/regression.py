@@ -1,8 +1,20 @@
-"""`bench regression` — gate vs fg-labs golden (concordance + perf)."""
+"""`bench regression` — gate vs fg-labs golden (concordance + perf).
+
+The report aggregates wall_seconds across reps to per-(sample, arch) medians
+and ranges. A perf delta only fails the gate when the new wall_s range lies
+entirely above the previous range — overlapping ranges are marked `noisy`
+and explicitly do not fail the gate. This keeps Sapphire Rapids spot-pool
+noise (m7i / c7i, ~10-50% CV per CLAUDE.md) from masquerading as a real
+SHA-vs-SHA regression while still catching clean signals on the low-CV
+archs (c6a / c7a / c7g / c8g, ~1% CV).
+"""
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
+
+import pandas as pd
 
 from bwa_mem3_bench.report.tables import md_table
 from bwa_mem3_bench.storage import VS_GOLDEN
@@ -11,6 +23,50 @@ from bwa_mem3_bench.storage.queries import query_df
 CONCORDANCE_THRESHOLD = 99.999
 PERF_REGRESSION_THRESHOLD_PCT = 5.0
 
+# Sample-stdev (ddof=1) is undefined for a single sample; report 0% CV
+# instead of NaN so the markdown table stays tidy.
+_MIN_REPS_FOR_CV = 2
+
+
+def _cv_pct(series: pd.Series) -> float:
+    if len(series) < _MIN_REPS_FOR_CV:
+        return 0.0
+    mean = float(series.mean())
+    if mean == 0:
+        return 0.0
+    return float(series.std(ddof=1) / mean * 100.0)
+
+
+def _aggregate_perf(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["sample", "arch", "n", "median", "min", "max", "cv_pct"])
+    grouped = df.groupby(["sample", "arch"])["wall_seconds"]
+    return pd.DataFrame(
+        {
+            "n": grouped.count(),
+            "median": grouped.median(),
+            "min": grouped.min(),
+            "max": grouped.max(),
+            "cv_pct": grouped.apply(_cv_pct),
+        }
+    ).reset_index()
+
+
+def _classify(
+    delta_pct: float,
+    new_min: float,
+    new_max: float,
+    prev_min: float,
+    prev_max: float,
+) -> str:
+    if math.isnan(delta_pct):
+        return "new_only"
+    if abs(delta_pct) <= PERF_REGRESSION_THRESHOLD_PCT:
+        return "flat"
+    if delta_pct > 0:
+        return "REGRESSION" if new_min > prev_max else "noisy"
+    return "improvement" if new_max < prev_min else "noisy"
+
 
 def check_regression(
     *,
@@ -18,7 +74,13 @@ def check_regression(
     new_sha: str,
     prev_sha: str,
 ) -> tuple[bool, str]:
-    """Return (passes, markdown_report)."""
+    """Return ``(passes, markdown_report)``.
+
+    Perf gating uses per-(sample, arch) median walls. A cell fails only when
+    the median is over the regression threshold AND the new wall_s range
+    lies entirely above the prev wall_s range (no overlap). Concordance is
+    per-rep: any rep below the threshold fails its cell.
+    """
     new_df = query_df(
         db_path,
         """
@@ -40,62 +102,95 @@ def check_regression(
     if new_df.empty:
         return False, f"# Regression gate: FAIL\n\n_No trials for {new_sha}._\n"
 
-    joined = new_df.merge(
-        prev_df,
-        on=["sample", "arch", "rep"],
+    new_perf = _aggregate_perf(new_df)
+    prev_perf = _aggregate_perf(prev_df)
+
+    cells = new_perf.merge(
+        prev_perf,
+        on=["sample", "arch"],
         suffixes=("_new", "_prev"),
         how="left",
     )
-    joined["perf_delta_pct"] = (
-        (joined["wall_seconds_new"] - joined["wall_seconds_prev"]) / joined["wall_seconds_prev"]
+    cells["delta_pct"] = (
+        (cells["median_new"] - cells["median_prev"]) / cells["median_prev"]
     ) * 100.0
+    cells["verdict"] = [
+        _classify(d, nmn, nmx, pmn, pmx)
+        for d, nmn, nmx, pmn, pmx in zip(
+            cells["delta_pct"],
+            cells["min_new"],
+            cells["max_new"],
+            cells["min_prev"],
+            cells["max_prev"],
+            strict=False,
+        )
+    ]
+    cells = cells.sort_values(["arch", "sample"]).reset_index(drop=True)
 
-    concordance_fails = joined[
-        joined["golden_concordance"].notna()
-        & (joined["golden_concordance"] < CONCORDANCE_THRESHOLD)
-    ]
-    perf_fails = joined[
-        joined["perf_delta_pct"].notna()
-        & (joined["perf_delta_pct"] > PERF_REGRESSION_THRESHOLD_PCT)
-    ]
+    conc = (
+        new_df[new_df["golden_concordance"].notna()]
+        .groupby(["sample", "arch"])["golden_concordance"]
+        .min()
+        .reset_index()
+    )
+    concordance_fails = conc[conc["golden_concordance"] < CONCORDANCE_THRESHOLD]
+    perf_fails = cells[cells["verdict"] == "REGRESSION"]
 
     failing = not concordance_fails.empty or not perf_fails.empty
     verdict = "FAIL" if failing else "PASS"
-    lines = [f"# Regression gate: {verdict}", ""]
-    lines.append(f"- Concordance threshold: ≥ {CONCORDANCE_THRESHOLD}%")
-    lines.append(f"- Performance regression threshold: ≤ {PERF_REGRESSION_THRESHOLD_PCT}%")
-    lines.append("")
 
-    lines.append("## Per-trial summary")
-    lines.append("")
-    lines.append(
+    lines: list[str] = [
+        f"# Regression gate: {verdict}",
+        "",
+        f"- Concordance threshold: ≥ {CONCORDANCE_THRESHOLD}%",
+        f"- Performance regression threshold: ≤ {PERF_REGRESSION_THRESHOLD_PCT}%",
+        "- Reps aggregated by median; perf verdict is `REGRESSION` /",
+        "  `improvement` only when the new and prev wall_s ranges do **not**",
+        "  overlap (otherwise `noisy`, which does not fail the gate).",
+        "",
+        "## Per-cell summary",
+        "",
         md_table(
-            ["sample", "arch", "rep", "wall_new", "wall_prev", "delta_%", "golden_conc_%"],
-            joined[
+            [
+                "sample",
+                "arch",
+                "n_new",
+                "n_prev",
+                "new_med_s",
+                "new_cv%",
+                "prev_med_s",
+                "prev_cv%",
+                "delta_%",
+                "verdict",
+            ],
+            cells[
                 [
                     "sample",
                     "arch",
-                    "rep",
-                    "wall_seconds_new",
-                    "wall_seconds_prev",
-                    "perf_delta_pct",
-                    "golden_concordance",
+                    "n_new",
+                    "n_prev",
+                    "median_new",
+                    "cv_pct_new",
+                    "median_prev",
+                    "cv_pct_prev",
+                    "delta_pct",
+                    "verdict",
                 ]
             ]
             .to_records(index=False)
             .tolist(),
-            float_fmt="{:.4f}",
-        )
-    )
-    lines.append("")
+            float_fmt="{:.2f}",
+        ),
+        "",
+    ]
 
     if not concordance_fails.empty:
         lines.append("## Concordance failures")
         lines.append("")
         lines.append(
             md_table(
-                ["sample", "arch", "rep", "golden_concordance"],
-                concordance_fails[["sample", "arch", "rep", "golden_concordance"]]
+                ["sample", "arch", "min_golden_concordance"],
+                concordance_fails[["sample", "arch", "golden_concordance"]]
                 .to_records(index=False)
                 .tolist(),
                 float_fmt="{:.4f}",
@@ -108,11 +203,11 @@ def check_regression(
         lines.append("")
         lines.append(
             md_table(
-                ["sample", "arch", "rep", "perf_delta_pct"],
-                perf_fails[["sample", "arch", "rep", "perf_delta_pct"]]
+                ["sample", "arch", "new_med_s", "prev_med_s", "delta_%"],
+                perf_fails[["sample", "arch", "median_new", "median_prev", "delta_pct"]]
                 .to_records(index=False)
                 .tolist(),
-                float_fmt="{:.4f}",
+                float_fmt="{:.2f}",
             )
         )
         lines.append("")
