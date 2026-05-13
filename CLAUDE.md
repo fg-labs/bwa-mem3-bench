@@ -139,6 +139,39 @@ from `arch.baseline_arch` in `config/archs.yaml`:
 
 ## Gotchas learned the hard way
 
+- **`docker buildx`'s empty `ARG` is set-but-empty, not unset, and that
+  silently breaks Makefile `?=` defaults.** Pre-PR #6 the Dockerfile passed
+  `BASELINE_ARCH="$BASELINE_ARCH"` to `make` only when non-empty and
+  expected upstream's `BASELINE_ARCH ?= avx2` to fire otherwise. It
+  didn't — BuildKit exports `ARG BASELINE_ARCH=""` to the RUN shell as
+  the env var `BASELINE_ARCH=` (set-empty), GNU make's `?=` only fires
+  when unset (not when set-to-empty), so `arch=$(BASELINE_ARCH)`
+  resolved to `arch=` and the build fell through every Makefile branch
+  to the file-level `-msse … -msse4.1` fallback. Every bench x86 image
+  shipped sse41-baselined non-kernel TUs on every AVX2-capable host.
+  Per fg-labs/bwa-mem3 PR #95's multi-arch-deployment doc this costs
+  10-15 % wall on AVX2 hosts; the bench's empirical multi-rep numbers
+  showed -17 to -30 % wall and -22 to -36 % `process_seconds` once
+  fixed (PR #6, c.f. `runs/dc7fcfe…/regression.md` vs `runs/ec67b09…`).
+  Fix: always pass an explicit non-empty value, e.g.
+  `make BASELINE_ARCH="${BASELINE_ARCH:-avx2}"`. The runtime banner
+  added in fg-labs/bwa-mem3 PR #95 (`bwa-mem3 version` → `SIMD floor:
+  <X> / SIMD runtime: <Y>`) makes this trivially diagnosable going
+  forward; grep CloudWatch / `docker run … bwa-mem3 version` and
+  compare the two lines. ARM is unaffected — `arch=arm64` is a separate
+  Makefile path that doesn't use `BASELINE_ARCH`.
+- **A "regression" between two bench SHAs may be a bench-substrate
+  artifact, not a codegen change.** fg-labs/bwa-mem3#92 hypothesised
+  that PR #88's `always_inline` on `FMI_search::backwardExt` regressed
+  Zen 3 by +14–19 % on wgs-5M. Phase 0 reproduction with the
+  byte-identical binary extracted from the bench's own ECR image,
+  run on bare-metal `c6a.4xlarge` with cold I/O, showed flat wall and
+  flat CPU between the suspect pair of SHAs — the regression doesn't
+  exist outside AWS Batch's spot substrate. Before opening a perf
+  issue against fg-labs/bwa-mem3, repro on a bare-metal EC2 host with
+  the exact ECR-extracted binary (see "AWS / EC2 Investigation Hosts"
+  in user CLAUDE.md). If it doesn't repro there, the bug is in our
+  measurement, not in the binary.
 - **Never submit a Batch coordinator before the ECR push has fully settled.**
   Workers pull `:latest` at container start and cache it per host; if ECR's
   tag pointer update is still propagating, they'll pull the previous image
