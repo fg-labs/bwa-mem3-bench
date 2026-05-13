@@ -8,10 +8,22 @@ ARG UPSTREAM_TAG
 ARG FG_LABS_REPO
 ARG FG_LABS_SHA
 # fg-labs/bwa-mem3 BASELINE_ARCH (PR #84): non-kernel TU compile floor on x86.
-# Empty string = use upstream default (currently `avx2`, portable). Set to
-# `avx512bw` for an AVX-512BW-host-locked image that recovers ~10–15% on hot
-# non-kernel paths on c7a / c7i / m7i. NEON build is unaffected; the make
-# variable is silently ignored on aarch64.
+# Empty string = use the bench-fleet floor of `avx2` (matches upstream's own
+# default per fg-labs/bwa-mem3's installation docs and PR #95's multi-arch
+# deployment guide). Set to `avx512bw` for an AVX-512BW-host-locked image that
+# recovers a few % on hot non-kernel paths on c7a / c7i / m7i. NEON build is
+# unaffected; the make variable is silently ignored on aarch64.
+#
+# Subtlety: `docker buildx` exports `ARG BASELINE_ARCH=""` to the RUN shell as
+# the env var `BASELINE_ARCH=` (set-but-empty), and GNU make's `?=` only fires
+# when a variable is *unset*, not when it's set-to-empty. Passing the empty
+# value through to `make` would leave the Makefile's `BASELINE_ARCH ?= avx2`
+# default dormant and silently fall through every `ifeq ($(arch),…)` branch,
+# producing a non-kernel-TU build at `sse41` (Makefile's file-level fallback)
+# instead of `avx2` — a 10–15 % wall-time tax on every AVX2-capable host per
+# fg-labs/bwa-mem3 PR #95's multi-arch deployment doc. The build line below
+# uses `${BASELINE_ARCH:-avx2}` so make always sees an explicit non-empty
+# value.
 ARG BASELINE_ARCH=""
 ARG SAMTOOLS_VERSION
 ARG BWA_VERSION
@@ -23,8 +35,12 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
         libz-dev libbz2-dev liblzma-dev libcurl4-openssl-dev libssl-dev \
         libncurses-dev \
         python3 python3-pip python3-venv \
-        autoconf automake \
+        autoconf automake autoconf-archive libtool \
     && rm -rf /var/lib/apt/lists/*
+# autoconf-archive + libtool aren't strictly required by the current
+# ext/htslib submodule, but they're on upstream's official prereqs list
+# (fg-labs/bwa-mem3 PR #93 → docs/src/getting-started/installation.md) and an
+# htslib bump could start depending on them. Defensive hygiene.
 # NOTE: libdeflate-dev intentionally omitted — bwa-mem2's bundled htslib detects it
 # and uses it, but the bwa-mem2 link step does not add -ldeflate, producing
 # undefined-reference errors at link time. Without libdeflate, htslib falls back
@@ -78,11 +94,7 @@ RUN cd fg-labs && \
     if [ "$TARGETARCH" = "arm64" ]; then \
         make arch=arm64 -j"$(nproc)"; \
     else \
-        if [ -n "$BASELINE_ARCH" ]; then \
-            make BASELINE_ARCH="$BASELINE_ARCH" -j"$(nproc)"; \
-        else \
-            make -j"$(nproc)"; \
-        fi; \
+        make BASELINE_ARCH="${BASELINE_ARCH:-avx2}" -j"$(nproc)"; \
     fi && \
     install -Dm755 bwa-mem3 /out/bin/bwa-mem2.fg-labs
 
