@@ -25,6 +25,15 @@ ARG FG_LABS_SHA
 # uses `${BASELINE_ARCH:-avx2}` so make always sees an explicit non-empty
 # value.
 ARG BASELINE_ARCH=""
+# fg-labs/bwa-mem3 Makefile target. Empty = default (`make` → `bwa-mem3`).
+# Supported alternatives:
+#   lto-build  → `make lto-build` (Link-Time Optimization). Output is
+#                `bwa-mem3.lto`; renamed to the canonical install path
+#                below. Roughly doubles build time. See
+#                fg-labs/bwa-mem3 docs/src/developer-guide/building.md.
+# Used to A/B build-flag perf experiments (LTO, PGO, etc.) against the
+# same fg-labs SHA without re-tagging branches in upstream.
+ARG FG_LABS_MAKE_TARGET=""
 ARG SAMTOOLS_VERSION
 ARG BWA_VERSION
 ARG BWAMETH_VERSION
@@ -91,12 +100,31 @@ RUN git clone --recursive ${FG_LABS_REPO} fg-labs && \
 # We install it under the legacy `bwa-mem2.fg-labs` path so the workflow
 # rules that invoke `bwa-mem2.fg-labs mem` keep working untouched.
 RUN cd fg-labs && \
-    if [ "$TARGETARCH" = "arm64" ]; then \
-        make arch=arm64 -j"$(nproc)"; \
-    else \
-        make BASELINE_ARCH="${BASELINE_ARCH:-avx2}" -j"$(nproc)"; \
-    fi && \
-    install -Dm755 bwa-mem3 /out/bin/bwa-mem2.fg-labs
+    BUILT_BIN=bwa-mem3 && \
+    case "${FG_LABS_MAKE_TARGET:-}" in \
+      "" ) \
+        if [ "$TARGETARCH" = "arm64" ]; then \
+            make arch=arm64 -j"$(nproc)"; \
+        else \
+            make BASELINE_ARCH="${BASELINE_ARCH:-avx2}" -j"$(nproc)"; \
+        fi ;; \
+      lto-build ) \
+        # `make lto-build` produces `bwa-mem3.lto`. LTO_ARCH selects the arch
+        # flag passed to the inner make (Makefile defaults to `native`, which
+        # would resolve to the build host's microarch rather than the bench
+        # target's — set it explicitly so the LTO binary matches the
+        # corresponding non-LTO build on the same arch.
+        if [ "$TARGETARCH" = "arm64" ]; then \
+            make lto-build LTO_ARCH=arm64 -j"$(nproc)"; \
+        else \
+            make lto-build LTO_ARCH="${BASELINE_ARCH:-avx2}" -j"$(nproc)"; \
+        fi && \
+        BUILT_BIN=bwa-mem3.lto ;; \
+      * ) \
+        echo "ERROR: unsupported FG_LABS_MAKE_TARGET=${FG_LABS_MAKE_TARGET} (supported: '' / lto-build)" >&2 ; \
+        exit 1 ;; \
+    esac && \
+    install -Dm755 "$BUILT_BIN" /out/bin/bwa-mem2.fg-labs
 
 # Build compare-bams.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml /src/
