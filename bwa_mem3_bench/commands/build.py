@@ -31,6 +31,7 @@ def build(  # noqa: PLR0913
     platforms: str = "linux/amd64,linux/arm64",
     image_name: str = "bwa-mem3-bench",
     baseline_arch: str = "",
+    make_target: str = "",
     push: bool = False,
     load: bool = False,
     also_tag_latest: bool = True,
@@ -55,21 +56,49 @@ def build(  # noqa: PLR0913
         is not a perf win on this workload (see Phase C report at
         ``~/work/git/bwa-mem3/avx512-baseline-build/PHASE_C_REPORT.md``).
         The flag is preserved for re-enablement once upstream lands a fix.
+    :param make_target: fg-labs/bwa-mem3 Makefile target to invoke when
+        building. Empty (default) runs ``make`` (target ``all``) and installs
+        ``bwa-mem3``. ``lto-build`` runs ``make lto-build`` and installs the
+        resulting ``bwa-mem3.lto`` under the canonical path. The SHA tag is
+        suffixed (e.g. ``<sha>-lto-build``) and ``:latest`` is NOT updated.
+        Used for A/B'ing build-flag perf experiments (LTO, future PGO)
+        against the same fg-labs SHA without re-tagging branches upstream.
+        The matching ``submit --make-target ...`` propagates the suffix to
+        worker image tags.
     :param push: push to ECR after build (mutually exclusive with --load).
     :param load: load into local docker (single-arch only).
     :param also_tag_latest: when pushing, also tag + push as `:latest`. The
         coordinator Batch job definition references `:latest`, so every new
         image needs it. Default True; set False to only push the SHA tag.
-        Forced False when ``baseline_arch`` is set.
+        Forced False when ``baseline_arch`` or ``make_target`` is set — a
+        host-locked or build-variant image tagged ``:latest`` would silently
+        become the default for any submit that didn't specify the matching
+        arg.
     :param dry_run: print the command without executing.
     """
     if push and load:
         raise ValueError("--push and --load are mutually exclusive")
 
+    make_target = make_target.strip()
+    _supported_make_targets = {"", "lto-build"}
+    if make_target not in _supported_make_targets:
+        raise ValueError(
+            f"--make-target must be one of {sorted(_supported_make_targets)}, got {make_target!r}"
+        )
+
     if push:
         _ecr_login(image_name, dry_run=dry_run)
 
-    tag_suffix = f"-{baseline_arch}" if baseline_arch else ""
+    # Suffix order is baseline_arch first, make_target second, so
+    # e.g. `--baseline-arch=avx512bw --make-target=lto-build` produces
+    # `<sha>-avx512bw-lto-build` (matches the order the args appear in
+    # the conceptual build pipeline: arch selection then build flags).
+    suffix_parts: list[str] = []
+    if baseline_arch:
+        suffix_parts.append(baseline_arch)
+    if make_target:
+        suffix_parts.append(make_target)
+    tag_suffix = "-" + "-".join(suffix_parts) if suffix_parts else ""
     sha_tag = f"{fg_labs_sha}{tag_suffix}"
 
     cmd = [
@@ -94,6 +123,8 @@ def build(  # noqa: PLR0913
         "--build-arg",
         f"BASELINE_ARCH={baseline_arch}",
         "--build-arg",
+        f"FG_LABS_MAKE_TARGET={make_target}",
+        "--build-arg",
         "SAMTOOLS_VERSION=1.23.1",
         "--build-arg",
         "BWA_VERSION=0.7.19",
@@ -102,9 +133,11 @@ def build(  # noqa: PLR0913
         "--tag",
         f"{image_name}:{sha_tag}",
     ]
-    # Only update :latest for portable (no-baseline_arch) builds. A host-locked
-    # avx512bw image tagged :latest would crash all c6a workers on next pull.
-    if push and also_tag_latest and not baseline_arch:
+    # Only update :latest for vanilla portable builds. A host-locked avx512bw
+    # image tagged :latest would crash all c6a workers on next pull, and an
+    # LTO (or other build-flag variant) image tagged :latest would silently
+    # become the new "default" for any submit that didn't specify make_target.
+    if push and also_tag_latest and not baseline_arch and not make_target:
         cmd.extend(["--tag", f"{image_name}:latest"])
     if push:
         cmd.append("--push")

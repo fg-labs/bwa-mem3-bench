@@ -27,6 +27,7 @@ def submit(  # noqa: PLR0913
     samples: str = "",
     archs: str = "",
     reps: int = 1,
+    make_target: str = "",
     job_name: str | None = None,
     dry_run: bool = False,
 ) -> None:
@@ -44,7 +45,18 @@ def submit(  # noqa: PLR0913
         actually sweeps every arch), and to ``core_arch`` for everything else
         (so ad-hoc rule invocations stay cheap).
     :param reps: replicate count.
-    :param job_name: Batch job name; defaults to ``<target>-<sha>``.
+    :param make_target: fg-labs/bwa-mem3 Makefile target used at build time.
+        Must match the ``--make-target`` passed to ``build`` for the same SHA.
+        Empty (default) selects the vanilla image tag ``<sha>`` and writes
+        results to ``s3://.../runs/<sha>/``. Non-empty propagates as the
+        ``BUILD_VARIANT`` env var to the coordinator entrypoint, which
+        derives both the worker image tag (``<sha>-<make_target>``) and the
+        snakemake ``fg_labs_sha`` config (``<sha>-<make_target>``) — so the
+        S3 output namespace becomes ``s3://.../runs/<sha>-<make_target>/``
+        and a same-SHA default-build run cannot clobber the variant run's
+        BAMs (or vice versa).
+    :param job_name: Batch job name; defaults to ``<target>-<sha>`` (or
+        ``<target>-<sha>-<make_target>`` when make_target is set).
     :param dry_run: print the ``aws batch submit-job`` command without executing.
     """
     if not archs and target in _FULL_SWEEP_TARGETS:
@@ -60,9 +72,27 @@ def submit(  # noqa: PLR0913
         env_overrides.append({"name": "ARCHS", "value": archs})
     if reps:
         env_overrides.append({"name": "REPS", "value": str(reps)})
+    if make_target:
+        # Coordinator entrypoint derives both `image_tag` (worker image to pull)
+        # and a suffixed `fg_labs_sha` (S3 output namespace + DB primary key)
+        # from `BUILD_VARIANT`. Sending just the variant — not the composed
+        # tag — keeps the two derived values guaranteed-consistent: a future
+        # refactor can change the composition rule in one place instead of
+        # auditing every caller.
+        #
+        # Concretely the coordinator composes:
+        #   IMAGE_TAG     = <fg_labs_sha>-<build_variant>   (tag only, no ECR prefix)
+        #   fg_labs_sha   = <fg_labs_sha>-<build_variant>   (snakemake config)
+        # so workers pull the right image AND write to a non-colliding
+        # `s3://.../runs/<sha>-<variant>/` prefix (otherwise the LTO run
+        # would clobber the baseline run's BAMs for the same SHA).
+        env_overrides.append({"name": "BUILD_VARIANT", "value": make_target})
 
     container_overrides: dict[str, object] = {"environment": env_overrides}
-    name = job_name or f"{target}-{fg_labs_sha}"
+    default_name = (
+        f"{target}-{fg_labs_sha}-{make_target}" if make_target else f"{target}-{fg_labs_sha}"
+    )
+    name = job_name or default_name
 
     cmd = [
         "aws",
