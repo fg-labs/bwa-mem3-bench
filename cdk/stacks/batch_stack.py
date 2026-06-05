@@ -155,17 +155,22 @@ class BatchStack(cdk.Stack):
             self.queues[spec.arch_key] = queue
 
         # ── Coordinator compute environment ──────────────────────────────────
-        # Runs snakemake orchestration inside a container. Multi-instance-type
-        # (c6a.large + c6a.xlarge) improves spot availability without overprovisioning.
-        # No launch template — coordinator has no heavy I/O workload.
+        # Runs snakemake orchestration inside a container. On-demand (not spot):
+        # the coordinator is the single long-lived orchestrator for the whole
+        # benchmark, so a spot reclaim mid-run kills snakemake and forces a
+        # resume. At c6a.large/xlarge on-demand (~$0.08-0.15/hr) the premium over
+        # spot is ~20-40¢ per multi-hour sweep — negligible against the worker
+        # fleet, and well worth the reliability. Multi-instance-type
+        # (c6a.large + c6a.xlarge) improves on-demand availability without
+        # overprovisioning. No launch template — coordinator has no heavy I/O.
         coordinator_ce = batch.ManagedEc2EcsComputeEnvironment(
             self,
             "CoordinatorCe",
             vpc=vpc,
             instance_types=[ec2.InstanceType("c6a.large"), ec2.InstanceType("c6a.xlarge")],
             use_optimal_instance_classes=False,
-            allocation_strategy=batch.AllocationStrategy.SPOT_PRICE_CAPACITY_OPTIMIZED,
-            spot=True,
+            allocation_strategy=batch.AllocationStrategy.BEST_FIT_PROGRESSIVE,
+            spot=False,
             maxv_cpus=8,
             minv_cpus=0,
             instance_role=instance_role,
