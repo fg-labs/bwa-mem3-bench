@@ -1,0 +1,24 @@
+# Release-to-release alignment-change allowances (Gate #2 sign-off).
+#
+# bwa-mem3's output is gated tightly against the last blessed release. Moving the
+# golden forward to a SHA whose alignments differ is a deliberate act: it
+# requires BOTH re-blessing (`bench bless-golden`) AND an entry here recording
+# the intentional change. `bless-golden` refuses to bless a SHA that no entry
+# authorizes (use `--force` only for the very first golden).
+#
+# This is distinct from docs/expected-divergences.yaml, which budgets drift vs
+# upstream bwa-mem2 (Gate #1). Entries here budget drift vs our own prior release.
+#
+# Fields:
+#   to_sha             fg-labs SHA being blessed as the new golden (full or prefix)
+#   pr                 PR that intentionally changed alignment
+#   date               when blessed
+#   summary            what changed and why it's intentional
+#   expected_drift_pct approximate concordance drift vs the previous golden
+allowances: []
+# Example:
+# - to_sha: 44cbaec
+#   pr: fg-labs/bwa-mem3#123
+#   date: 2026-06-07
+#   summary: "v0.2.0: deterministic tie-breaks reorder a small set of equal-score ties"
+#   expected_drift_pct: 0.05
