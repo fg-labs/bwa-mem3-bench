@@ -1,11 +1,13 @@
 """Tests for ingest.walk_run → SQLite."""
 
+import json
 from pathlib import Path
 
 import pytest
 
 from bwa_mem3_bench.storage.ingest import (
     _parse_bwa_stderr,
+    _supp_json,
     baseline_sha_for,
     ingest_baseline,
     ingest_run,
@@ -55,6 +57,29 @@ def test_ingest_creates_run_and_trial_and_comparison(db_path: Path) -> None:
     assert comp == ("vs-baseline", 100.0, 2003, 2003)
 
     conn.close()
+
+
+def test_supp_json_extracts_only_supp_keys() -> None:
+    comp = {
+        "concordance_pct": 99.9996,
+        "by_class": {"pos_diff": {"count": 19}},
+        "supp_query_total": 5123,
+        "supp_baseline_total": 5118,
+        "supp_count_mismatch_templates": 5,
+        "supp_unmatched_pct": 0.0879,
+    }
+    out = _supp_json(comp)
+    assert out is not None
+    assert json.loads(out) == {
+        "supp_query_total": 5123,
+        "supp_baseline_total": 5118,
+        "supp_count_mismatch_templates": 5,
+        "supp_unmatched_pct": 0.0879,
+    }
+
+
+def test_supp_json_none_when_absent() -> None:
+    assert _supp_json({"concordance_pct": 100.0, "by_class": {}}) is None
 
 
 def test_parse_bwa_stderr_extracts_process_and_index_read(tmp_path: Path) -> None:

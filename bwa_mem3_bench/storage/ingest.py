@@ -17,6 +17,25 @@ from bwa_mem3_bench.storage.sqlite import (
 
 _TIMING_MIN_LINES = 2  # header + one data row
 
+# compare-bams supplementary-disagreement fields, stored as a JSON blob in
+# comparisons.supp_json. Absent on older comparison JSON (pre-supp-metrics).
+_SUPP_KEYS = (
+    "total_templates",
+    "supp_query_total",
+    "supp_baseline_total",
+    "supp_count_mismatch_templates",
+    "supp_count_mismatch_pct",
+    "supp_unmatched",
+    "supp_unmatched_pct",
+)
+
+
+def _supp_json(comp: dict[str, Any]) -> str | None:
+    """Extract the supplementary-metric subset of a comparison JSON, or None."""
+    supp = {k: comp[k] for k in _SUPP_KEYS if k in comp}
+    return json.dumps(supp) if supp else None
+
+
 # bwa-mem2's profiling output (printed to stderr by both upstream v2.2.1 and
 # fg-labs in identical format — see src/profiling.cpp). PROCESS() is the
 # total compute time excluding index loading; that's the apples-to-apples
@@ -159,6 +178,7 @@ def ingest_run(
                         total=int(comp.get("total_reads", 0)),
                         concordance_pct=float(comp.get("concordance_pct", 0.0)),
                         by_class_json=json.dumps(comp.get("by_class", {})),
+                        supp_json=_supp_json(comp),
                         commit=False,
                     )
 

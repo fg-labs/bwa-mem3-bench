@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 # Increment this whenever the schema changes in a backward-incompatible way.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;
 
 CREATE TABLE IF NOT EXISTS runs (
     fg_labs_sha     TEXT PRIMARY KEY,
@@ -51,6 +51,10 @@ CREATE TABLE IF NOT EXISTS comparisons (
     total            INTEGER,
     concordance_pct  REAL,
     by_class_json    TEXT,
+    -- JSON blob of compare-bams supplementary-disagreement metrics
+    -- (supp_count_mismatch_pct, supp_unmatched_pct, totals, total_templates).
+    -- NULL for older rows / comparisons produced before compare-bams emitted them.
+    supp_json        TEXT,
     UNIQUE (trial_id, kind)
 );
 
