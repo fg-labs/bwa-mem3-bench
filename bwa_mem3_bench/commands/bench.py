@@ -6,7 +6,9 @@ import sys
 from pathlib import Path
 
 from bwa_mem3_bench import DB_PATH, LOCAL_MIRROR_ROOT, REPO_ROOT
+from bwa_mem3_bench.registry import DEFAULT_REGISTRY_PATH
 from bwa_mem3_bench.report.compare import generate_compare
+from bwa_mem3_bench.report.docs import generate_docs, parse_releases
 from bwa_mem3_bench.report.full_report import generate_full_report
 from bwa_mem3_bench.report.performance import generate_performance
 from bwa_mem3_bench.report.regression import check_regression
@@ -85,6 +87,24 @@ def full_report(*, fg_labs_sha: str, out: Path | None = None) -> None:
     out_dir = out or (LOCAL_MIRROR_ROOT / "runs" / fg_labs_sha / "full-report")
     generate_full_report(db_path=DB_PATH, fg_labs_sha=fg_labs_sha, out_dir=out_dir)
     print(f"wrote {out_dir}/full.md")
+
+
+def docs(*, releases: str, out: Path | None = None) -> None:
+    """Emit mdbook-ready divergence catalog + per-release table for bwa-mem3 docs.
+
+    :param releases: ``label=sha,label=sha`` (e.g. ``v0.2.0=44cbaec,v0.2.1=89bd589``),
+        in display order.
+    :param out: output directory. Defaults to ``runs/docs/``.
+    """
+    out_dir = out or (LOCAL_MIRROR_ROOT / "runs" / "docs")
+    paths = generate_docs(
+        db_path=DB_PATH,
+        releases=parse_releases(releases),
+        registry_path=DEFAULT_REGISTRY_PATH,
+        out_dir=out_dir,
+    )
+    for p in paths:
+        print(f"wrote {p}")
 
 
 def speedup(
