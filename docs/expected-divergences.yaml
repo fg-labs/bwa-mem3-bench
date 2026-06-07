@@ -1,12 +1,61 @@
 # Expected divergences between fg-labs/bwa-mem3 and upstream/bwa-mem2.
+#
 # Each entry documents an intentional fg-labs behavior change that produces a
-# classifiable drift in aligned-BAM output. The drift report cross-checks
-# observed concordance against the sum of declared expected_drift_pct values.
-divergences: []
-# Example future entry:
-# - id: FG-001
-#   pr: fg-labs/bwa-mem3#12
-#   date: 2025-11-03
-#   summary: "Fix off-by-one in MAPQ recalibration for secondary alignments"
-#   affected: secondary_alignments
-#   expected_drift_pct: 0.03
+# classifiable drift in aligned-BAM output vs bwa-mem2 v2.2.1. The regression
+# gate (`bench regression`) sums the `expected_drift_pct` of the entries scoped
+# to each sample and fails a cell only when the OBSERVED concordance drift
+# (100 - concordance_pct) exceeds that declared budget — so known, intentional
+# divergence passes while genuine, unexplained regressions still fail.
+#
+# Fields:
+#   id                 stable identifier
+#   pr                 originating fg-labs/bwa-mem3 PR (or representative one)
+#   date               when the divergence was characterized
+#   summary            what the divergence is and why it exists
+#   affected           coarse class: primary_alignment | meth_alignment |
+#                      supplementary_alignment | secondary_alignment
+#   expected_drift_pct per-cell drift budget contributed by this entry (percent)
+#   samples            samples this budget applies to; omit/empty = all samples
+#
+# Budgets are set just above the empirically observed drift at bwa-mem3
+# `bffae5a` (full bench, all archs x all samples x 5 reps): non-meth primary
+# drift peaks at panel-twist-5M 0.0586%; meth at 1.1227%. Tighten per-sample as
+# the numbers stabilize across releases.
+divergences:
+  - id: FG-PRIMARY-DRIFT
+    pr: fg-labs/bwa-mem3#123
+    date: 2026-06-07
+    summary: >-
+      Per-architecture SIMD score2/MAPQ convergence (#21, #26, #28-#31) and
+      deterministic tie-break ordering (#123) shift MAPQ, CIGAR, or position on a
+      small fraction of primary alignments relative to bwa-mem2 v2.2.1. Where
+      each read maps is preserved; the affected reads differ in placement
+      detail, and the set varies by SIMD architecture.
+    affected: primary_alignment
+    expected_drift_pct: 0.10
+    samples: [wgs-5M, wes-5M, panel-twist-5M, smoke-1M]
+
+  - id: FG-METH-DIVERGENCE
+    pr: fg-labs/bwa-mem3#90
+    date: 2026-06-07
+    summary: >-
+      Bisulfite (--meth) mode against the bwameth.py baseline diverges beyond the
+      ignored YD/XM/XG tag set (Bismark-compatible XR/XG/XM tags and C->T/G->A
+      conversion handling), giving a larger but still-bounded concordance drift
+      on methylation workloads.
+    affected: meth_alignment
+    expected_drift_pct: 1.50
+    samples: [meth-twist-emseq-5M, smoke-meth]
+
+  - id: FG-SUPP-ADDITIONS
+    pr: fg-labs/bwa-mem3#101
+    date: 2026-06-07
+    summary: >-
+      bwa-mem3 emits a small number of additional supplementary (split/chimeric)
+      alignments vs bwa-mem2 v2.2.1 on the default build (e.g. wes-5M: 5123 vs
+      5118). Primary alignments are unchanged. Tracked as a supplementary-count
+      metric (compare-bams supp_count_mismatch / supp_unmatched); it does not
+      affect the primary-concordance drift budget, hence 0.0 here.
+    affected: supplementary_alignment
+    expected_drift_pct: 0.0
+    samples: []

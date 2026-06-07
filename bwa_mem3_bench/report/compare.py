@@ -7,12 +7,11 @@ from pathlib import Path
 
 import pandas as pd
 
+from bwa_mem3_bench.registry import DEFAULT_REGISTRY_PATH as REGISTRY_PATH
 from bwa_mem3_bench.registry import load_registry
 from bwa_mem3_bench.report.tables import md_table
 from bwa_mem3_bench.storage import VS_BASELINE
 from bwa_mem3_bench.storage.queries import query_df
-
-REGISTRY_PATH = Path(__file__).resolve().parents[2] / "docs" / "expected-divergences.yaml"
 
 
 def _load_comparisons(db_path: Path, fg_labs_sha: str, kind: str) -> pd.DataFrame:
