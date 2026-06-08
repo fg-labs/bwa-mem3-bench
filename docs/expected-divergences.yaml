@@ -48,7 +48,11 @@ divergences:
     samples: [meth-twist-emseq-5M, smoke-meth]
 
   - id: FG-SUPP-ADDITIONS
-    pr: fg-labs/bwa-mem3#101
+    # Source PR not yet pinned: these additions are default-on and are NOT the
+    # opt-in --supp-rep-hard-cap path that #101 enables (#101 only lowers MAPQ,
+    # never adds records). Pinning the originating divergence is tracked in
+    # fg-labs/bwa-mem3#127; replace TBD with the real PR once it is bisected.
+    pr: TBD
     date: 2026-06-07
     summary: >-
       bwa-mem3 emits a small number of additional supplementary (split/chimeric)

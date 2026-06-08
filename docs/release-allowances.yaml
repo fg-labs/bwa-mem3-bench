@@ -32,8 +32,9 @@ allowances:
     date: 2026-06-08
     summary: >-
       v0.2.2: deterministic tie-break ordering (fg-labs/bwa-mem3#123) and a
-      handful of additional supplementary alignments (fg-labs/bwa-mem3#101)
-      move a small, bounded fraction of records vs the v0.2.1 golden — wes-5M
+      handful of additional supplementary alignments (default-on; source PR not
+      yet pinned, tracked in fg-labs/bwa-mem3#127) move a small, bounded
+      fraction of records vs the v0.2.1 golden — wes-5M
       99.9996%, wgs-5M 99.9893%, panel-twist-5M 99.9414% primary concordance
       vs bwa-mem2 v2.2.1 (v0.2.1 was 100%), plus +5/+256/+199 supplementary
       records on those samples. Primary placement is preserved; the affected
