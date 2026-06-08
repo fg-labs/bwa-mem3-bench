@@ -42,6 +42,7 @@ def main(argv: list[str] | None = None) -> None:
                 "trend": bench_module.trend,
                 "full-report": bench_module.full_report,
                 "speedup": bench_module.speedup,
+                "docs": bench_module.docs,
             },
             "aws": {
                 "jobs": aws_module.jobs,

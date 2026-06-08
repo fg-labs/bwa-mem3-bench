@@ -1,4 +1,11 @@
-"""`bench regression` — gate vs fg-labs golden (concordance + perf).
+"""`bench regression` — gate a new SHA on concordance + perf.
+
+Three gates:
+  * Gate #1 (vs upstream bwa-mem2): observed concordance drift must stay within
+    the per-sample budget declared in the divergence registry.
+  * Gate #2 (vs the blessed golden / last release): concordance stays tight
+    (>= CONCORDANCE_THRESHOLD) — two fg-labs builds should be ~identical.
+  * Performance: median wall_seconds must not regress past the threshold.
 
 The report aggregates wall_seconds across reps to per-(sample, arch) medians
 and ranges. A perf delta only fails the gate when the new wall_s range lies
@@ -16,12 +23,28 @@ from pathlib import Path
 
 import pandas as pd
 
+from bwa_mem3_bench.registry import (
+    DEFAULT_REGISTRY_PATH,
+    DivergenceEntry,
+    allowed_drift_pct,
+    load_registry,
+)
 from bwa_mem3_bench.report.tables import md_table
-from bwa_mem3_bench.storage import VS_GOLDEN
+from bwa_mem3_bench.storage import VS_BASELINE, VS_GOLDEN
 from bwa_mem3_bench.storage.queries import query_df
 
+# Gate #2 (vs the blessed golden / last release): two fg-labs builds should be
+# ~identical, so this stays tight. Loosening it must be deliberate (re-bless +
+# declared allowance).
 CONCORDANCE_THRESHOLD = 99.999
 PERF_REGRESSION_THRESHOLD_PCT = 5.0
+
+# Gate #1 (vs upstream bwa-mem2): observed drift is gated against the per-sample
+# budget declared in the divergence registry, not a flat threshold — workloads
+# diverge from upstream by intentionally different amounts (exome ~0.0004% vs
+# methylation ~1.1%). MARGIN absorbs float noise; concordance is deterministic
+# per (sample), so it can be tiny.
+DRIFT_MARGIN_PCT = 0.001
 
 # Sample-stdev (ddof=1) is undefined for a single sample; report 0% CV
 # instead of NaN so the markdown table stays tidy.
@@ -68,6 +91,58 @@ def _classify(
     return "improvement" if new_max < prev_min else "noisy"
 
 
+def _baseline_budget(conc_df: pd.DataFrame, registry: list[DivergenceEntry]) -> pd.DataFrame:
+    """Gate #1: compare observed vs-upstream drift against each sample's budget.
+
+    ``conc_df`` has columns ``sample, arch, baseline_concordance`` (min over
+    reps). Returns the same rows plus ``observed_drift_pct``, ``allowed_drift_pct``,
+    and a ``verdict`` of ``ok`` / ``over_budget``. Empty in, empty out.
+    """
+    cols = [
+        "sample",
+        "arch",
+        "baseline_concordance",
+        "observed_drift_pct",
+        "allowed_drift_pct",
+        "verdict",
+    ]
+    if conc_df.empty:
+        return pd.DataFrame(columns=cols)
+    out = conc_df.copy()
+    out["observed_drift_pct"] = 100.0 - out["baseline_concordance"]
+    out["allowed_drift_pct"] = out["sample"].map(lambda s: allowed_drift_pct(registry, s))
+    out["verdict"] = [
+        "over_budget" if obs > allowed + DRIFT_MARGIN_PCT else "ok"
+        for obs, allowed in zip(out["observed_drift_pct"], out["allowed_drift_pct"], strict=False)
+    ]
+    return out.sort_values(["sample", "arch"]).reset_index(drop=True)[cols]
+
+
+def _missing_baseline_cells(
+    db_path: Path, new_df: pd.DataFrame, baseline_conc: pd.DataFrame
+) -> pd.DataFrame:
+    """(sample, arch) cells that should have a vs-baseline comparison but don't.
+
+    "Should" = the cell exists in this run AND has an upstream baseline
+    counterpart (a ``baseline-*`` trial). Intersecting with the baseline run's
+    cells excludes ARM archs, which legitimately have no upstream comparison.
+    """
+    empty = pd.DataFrame(columns=["sample", "arch"])
+    baseline_cells = query_df(
+        db_path,
+        "SELECT DISTINCT sample, arch FROM trials WHERE fg_labs_sha LIKE 'baseline-%'",
+    )
+    if baseline_cells.empty:
+        return empty  # no baseline data to define expectations against
+    new_cells = new_df[["sample", "arch"]].drop_duplicates()
+    expected = new_cells.merge(baseline_cells, on=["sample", "arch"])
+    present = (
+        baseline_conc[["sample", "arch"]].drop_duplicates() if not baseline_conc.empty else empty
+    )
+    merged = expected.merge(present, on=["sample", "arch"], how="left", indicator=True)
+    return merged[merged["_merge"] == "left_only"][["sample", "arch"]].reset_index(drop=True)
+
+
 def check_regression(
     *,
     db_path: Path,
@@ -76,10 +151,12 @@ def check_regression(
 ) -> tuple[bool, str]:
     """Return ``(passes, markdown_report)``.
 
-    Perf gating uses per-(sample, arch) median walls. A cell fails only when
-    the median is over the regression threshold AND the new wall_s range
-    lies entirely above the prev wall_s range (no overlap). Concordance is
-    per-rep: any rep below the threshold fails its cell.
+    Gate #1 (vs upstream): per-(sample) observed drift (100 - vs-baseline
+    concordance) fails when it exceeds the sample's registry budget. Gate #2
+    (vs golden): per-rep vs-golden concordance below the threshold fails its
+    cell. Perf gating uses per-(sample, arch) median walls — a cell fails only
+    when the median is over the regression threshold AND the new wall_s range
+    lies entirely above the prev range (no overlap).
     """
     new_df = query_df(
         db_path,
@@ -136,13 +213,42 @@ def check_regression(
     concordance_fails = conc[conc["golden_concordance"] < CONCORDANCE_THRESHOLD]
     perf_fails = cells[cells["verdict"] == "REGRESSION"]
 
-    failing = not concordance_fails.empty or not perf_fails.empty
+    # Gate #1: vs-upstream drift vs the per-sample registry budget.
+    registry = load_registry(DEFAULT_REGISTRY_PATH)
+    baseline_conc = query_df(
+        db_path,
+        """
+        SELECT t.sample, t.arch, MIN(c.concordance_pct) AS baseline_concordance
+        FROM trials t
+        JOIN comparisons c ON c.trial_id = t.id AND c.kind = ?
+        WHERE t.fg_labs_sha = ?
+        GROUP BY t.sample, t.arch
+        """,
+        params=(VS_BASELINE, new_sha),
+    )
+    budget = _baseline_budget(baseline_conc, registry)
+    budget_fails = budget[budget["verdict"] == "over_budget"]
+
+    # Gate #1 fails *closed*: every cell that has an upstream baseline counterpart
+    # must have produced a vs-baseline comparison. Intersecting the run's cells
+    # with the baseline run's cells excludes ARM archs (no upstream baseline), so
+    # a genuinely-missing x86/meth comparison fails rather than silently passing.
+    missing_baseline = _missing_baseline_cells(db_path, new_df, baseline_conc)
+
+    failing = (
+        not concordance_fails.empty
+        or not perf_fails.empty
+        or not budget_fails.empty
+        or not missing_baseline.empty
+    )
     verdict = "FAIL" if failing else "PASS"
 
     lines: list[str] = [
         f"# Regression gate: {verdict}",
         "",
-        f"- Concordance threshold: ≥ {CONCORDANCE_THRESHOLD}%",
+        f"- Gate #1 (vs upstream): observed drift must stay within the "
+        f"per-sample registry budget (margin {DRIFT_MARGIN_PCT}%).",
+        f"- Gate #2 (vs golden / last release): concordance ≥ {CONCORDANCE_THRESHOLD}%.",
         f"- Performance regression threshold: ≤ {PERF_REGRESSION_THRESHOLD_PCT}%",
         "- Reps aggregated by median; perf verdict is `REGRESSION` /",
         "  `improvement` only when the new and prev wall_s ranges do **not**",
@@ -183,6 +289,61 @@ def check_regression(
         ),
         "",
     ]
+
+    if not budget.empty:
+        lines.append("## Gate #1 — vs-upstream drift vs budget")
+        lines.append("")
+        lines.append(
+            md_table(
+                [
+                    "sample",
+                    "arch",
+                    "baseline_concordance",
+                    "observed_drift_%",
+                    "budget_%",
+                    "verdict",
+                ],
+                budget[
+                    [
+                        "sample",
+                        "arch",
+                        "baseline_concordance",
+                        "observed_drift_pct",
+                        "allowed_drift_pct",
+                        "verdict",
+                    ]
+                ]
+                .to_records(index=False)
+                .tolist(),
+                float_fmt="{:.4f}",
+            )
+        )
+        lines.append("")
+
+    if not missing_baseline.empty:
+        lines.append("## Gate #1 failures — missing vs-baseline comparisons")
+        lines.append("")
+        lines.append(
+            md_table(
+                ["sample", "arch"],
+                missing_baseline[["sample", "arch"]].to_records(index=False).tolist(),
+            )
+        )
+        lines.append("")
+
+    if not budget_fails.empty:
+        lines.append("## Gate #1 failures — unexplained upstream divergence")
+        lines.append("")
+        lines.append(
+            md_table(
+                ["sample", "arch", "observed_drift_%", "budget_%"],
+                budget_fails[["sample", "arch", "observed_drift_pct", "allowed_drift_pct"]]
+                .to_records(index=False)
+                .tolist(),
+                float_fmt="{:.4f}",
+            )
+        )
+        lines.append("")
 
     if not concordance_fails.empty:
         lines.append("## Concordance failures")

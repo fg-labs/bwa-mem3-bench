@@ -7,12 +7,11 @@ from pathlib import Path
 
 import pandas as pd
 
+from bwa_mem3_bench.registry import DEFAULT_REGISTRY_PATH as REGISTRY_PATH
 from bwa_mem3_bench.registry import load_registry
 from bwa_mem3_bench.report.tables import md_table
 from bwa_mem3_bench.storage import VS_BASELINE
 from bwa_mem3_bench.storage.queries import query_df
-
-REGISTRY_PATH = Path(__file__).resolve().parents[2] / "docs" / "expected-divergences.yaml"
 
 
 def _load_comparisons(db_path: Path, fg_labs_sha: str, kind: str) -> pd.DataFrame:
@@ -20,7 +19,7 @@ def _load_comparisons(db_path: Path, fg_labs_sha: str, kind: str) -> pd.DataFram
         db_path,
         """
         SELECT t.sample, t.arch, t.rep, c.concordant, c.total,
-               c.concordance_pct, c.by_class_json
+               c.concordance_pct, c.by_class_json, c.supp_json
         FROM trials t
         JOIN comparisons c ON c.trial_id = t.id
         WHERE t.fg_labs_sha = ? AND c.kind = ?
@@ -72,6 +71,35 @@ def generate_compare(*, db_path: Path, fg_labs_sha: str, out_md: Path) -> None:
             md_table(
                 ["class", "count"],
                 sorted(class_counts.items(), key=lambda kv: kv[1], reverse=True),  # type: ignore[arg-type,return-value]
+            )
+        )
+    lines.append("")
+
+    lines.append("## Supplementary divergence")
+    lines.append("")
+    supp_rows: list[tuple[str, str, int, int, int, float]] = []
+    for sample, arch, j in zip(df["sample"], df["arch"], df["supp_json"], strict=False):
+        supp = json.loads(j) if isinstance(j, str) and j else {}
+        if not supp:
+            continue
+        supp_rows.append(
+            (
+                sample,
+                arch,
+                int(supp.get("supp_query_total", 0)),
+                int(supp.get("supp_baseline_total", 0)),
+                int(supp.get("supp_count_mismatch_templates", 0)),
+                float(supp.get("supp_unmatched_pct", 0.0)),
+            )
+        )
+    if not supp_rows:
+        lines.append("_no supplementary metrics recorded_")
+    else:
+        lines.append(
+            md_table(
+                ["sample", "arch", "supp_query", "supp_baseline", "count_mismatch", "unmatched_%"],
+                supp_rows,
+                float_fmt="{:.4f}",
             )
         )
     lines.append("")
