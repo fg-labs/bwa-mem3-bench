@@ -66,10 +66,14 @@ rule compare_vs_x86:
 
 
 rule compare_vs_golden:
+    # GOLDEN_REF_SHA is the pinned previous-release SHA (Gate #2), from the
+    # `golden_ref_sha` config. The golden is a FIXED reference, not the run's own
+    # SHA — comparing a run to itself would be a vacuous 100%. `rule all` only
+    # requests these outputs when GOLDEN_REF_SHA is set and != the run's SHA.
     input:
         query  = "runs/{sha}/{sample}/{arch}/rep-{rep}/aligned.bam",
         golden = lambda wc: (
-            f"golden/fg-labs-{wc.sha}/{wc.sample}/{wc.arch}/aligned.bam"
+            f"golden/fg-labs-{GOLDEN_REF_SHA}/{wc.sample}/{wc.arch}/aligned.bam"
         ),
         meta   = "runs/{sha}/{sample}/{arch}/rep-{rep}/benchmarks/meta.json",
     output:

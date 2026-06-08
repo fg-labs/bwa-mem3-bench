@@ -9,6 +9,8 @@
 #   ARCHS          — comma-separated arch subset (e.g. c8g,c7g). Empty = core_arch.
 #   REPS           — replicate count. Empty = Snakemake config default.
 #   SAMPLES        — comma-separated sample subset. Empty = all.
+#   GOLDEN_REF_SHA — pinned previous-release SHA for the vs-golden (Gate #2)
+#                    comparison. Empty = vs-golden disabled.
 #   IMAGE_TAG      — Docker image tag passed through to snakemake's
 #                    `image_tag` config. Auto-derived from FG_LABS_SHA only
 #                    when BUILD_VARIANT is set; unset otherwise.
@@ -47,6 +49,7 @@ CONFIG_ARGS="fg_labs_sha=${FG_LABS_SHA}"
 [[ -n "${ARCHS:-}" ]]      && CONFIG_ARGS="${CONFIG_ARGS} archs=${ARCHS}"
 [[ -n "${REPS:-}" ]]       && CONFIG_ARGS="${CONFIG_ARGS} reps=${REPS}"
 [[ -n "${SAMPLES:-}" ]]    && CONFIG_ARGS="${CONFIG_ARGS} samples=${SAMPLES}"
+[[ -n "${GOLDEN_REF_SHA:-}" ]] && CONFIG_ARGS="${CONFIG_ARGS} golden_ref_sha=${GOLDEN_REF_SHA}"
 [[ -n "${IMAGE_TAG:-}" ]]  && CONFIG_ARGS="${CONFIG_ARGS} image_tag=${IMAGE_TAG}"
 
 # Render the Snakemake AWS Batch profile from its template using the

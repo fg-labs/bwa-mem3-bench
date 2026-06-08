@@ -109,3 +109,15 @@ def test_make_target_sets_build_variant_and_job_name() -> None:
     # IMAGE_TAG is NOT set by submit.py — the coordinator derives it.
     assert _captured_env(mock_run.call_args_list, "IMAGE_TAG") is None
     assert _captured_job_name(mock_run.call_args_list) == "smoke-deadbeef-lto-build"
+
+
+def test_golden_ref_sha_sets_env_override_when_provided() -> None:
+    with patch.object(submit_module, "run_cmd") as mock_run:
+        submit_module.submit(fg_labs_sha="newsha", target="all", golden_ref_sha="prevsha")
+    assert _captured_env(mock_run.call_args_list, "GOLDEN_REF_SHA") == "prevsha"
+
+
+def test_golden_ref_sha_absent_by_default() -> None:
+    with patch.object(submit_module, "run_cmd") as mock_run:
+        submit_module.submit(fg_labs_sha="newsha", target="all")
+    assert _captured_env(mock_run.call_args_list, "GOLDEN_REF_SHA") is None

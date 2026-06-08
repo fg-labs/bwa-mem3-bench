@@ -15,10 +15,27 @@
 #   date               when blessed
 #   summary            what changed and why it's intentional
 #   expected_drift_pct approximate concordance drift vs the previous golden
-allowances: []
-# Example:
-# - to_sha: 44cbaec
-#   pr: fg-labs/bwa-mem3#123
-#   date: 2026-06-07
-#   summary: "v0.2.0: deterministic tie-breaks reorder a small set of equal-score ties"
-#   expected_drift_pct: 0.05
+# v0.2.0 is the first blessed golden and is blessed with `--force` (no prior
+# golden to move from, so no allowance is needed or possible).
+allowances:
+  - to_sha: 89bd589db9fcb56279912fa6b23e0831f4916a62
+    pr: fg-labs/bwa-mem3-bench#12
+    date: 2026-06-08
+    summary: >-
+      v0.2.1: no alignment change vs v0.2.0. Both produce byte-identical
+      primary alignments (100% concordance vs bwa-mem2 v2.2.1) and identical
+      supplementary counts on every benchmarked sample; the golden is moved
+      forward only for release continuity, not for a deliberate output change.
+    expected_drift_pct: 0.0
+  - to_sha: bffae5a09267877fe514c458d4956b717bcefb8f
+    pr: fg-labs/bwa-mem3#123
+    date: 2026-06-08
+    summary: >-
+      v0.2.2: deterministic tie-break ordering (fg-labs/bwa-mem3#123) and a
+      handful of additional supplementary alignments (fg-labs/bwa-mem3#101)
+      move a small, bounded fraction of records vs the v0.2.1 golden — wes-5M
+      99.9996%, wgs-5M 99.9893%, panel-twist-5M 99.9414% primary concordance
+      vs bwa-mem2 v2.2.1 (v0.2.1 was 100%), plus +5/+256/+199 supplementary
+      records on those samples. Primary placement is preserved; the affected
+      reads differ only in MAPQ/CIGAR/ordering detail. Intentional, accepted.
+    expected_drift_pct: 0.06
