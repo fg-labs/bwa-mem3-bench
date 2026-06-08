@@ -23,9 +23,17 @@ bless_golden_module = importlib.import_module("bwa_mem3_bench.commands.bless_gol
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_shipped_allowances_file_loads() -> None:
-    # Ships empty; must still parse.
-    assert load_allowances(DEFAULT_ALLOWANCES_PATH) == []
+def test_shipped_allowances_file_loads_and_authorizes_backfill() -> None:
+    # The shipped file records the historical golden sign-offs. v0.2.0 is the
+    # first golden (--force, no entry); v0.2.1 and v0.2.2 are authorized here.
+    entries = load_allowances(DEFAULT_ALLOWANCES_PATH)
+    assert all(isinstance(e, ReleaseAllowance) for e in entries)
+    v021 = "89bd589db9fcb56279912fa6b23e0831f4916a62"
+    v022 = "bffae5a09267877fe514c458d4956b717bcefb8f"
+    assert allowance_for(entries, v021) is not None
+    assert allowance_for(entries, v022) is not None
+    # An un-signed-off SHA (e.g. v0.2.0, the force-blessed first golden) is not.
+    assert allowance_for(entries, "44cbaec301d1fafe2d66ca9085547c5aedf25373") is None
 
 
 def _write(path: Path, body: str) -> Path:
