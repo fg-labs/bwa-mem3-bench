@@ -30,6 +30,10 @@ ARCHS = config.get("archs", CONFIG.core_arch).split(",")
 SAMPLES = config.get("samples", ",".join(CONFIG.samples.keys())).split(",")
 REPS = int(config.get("reps", CONFIG.reps_default))
 REPS_BASELINE = int(config.get("reps_baseline", CONFIG.reps_baseline))
+# Pinned previous-release SHA for the vs-golden (Gate #2) comparison. Empty
+# disables vs-golden — `compare_vs_golden` only fires when this is set, and it
+# reads golden/fg-labs-<GOLDEN_REF_SHA>/ (not the run's own SHA).
+GOLDEN_REF_SHA = config.get("golden_ref_sha", "")
 BASELINE_ONLY = str(config.get("baseline_only", "false")).lower() == "true"
 IMAGE = config.get("image_tag", f"bwa-mem3-bench:{FG_LABS_SHA}")
 
@@ -148,6 +152,23 @@ rule all:
             for sample in SAMPLES
             for arch in _archs_for_sample(sample)
             for rep in range(1, REPS_BASELINE + 1)
+        ],
+        # vs-golden (Gate #2): only when a previous-release golden is pinned, and
+        # never against itself. Compares every aligned cell to the pinned golden.
+        [
+            f"runs/{FG_LABS_SHA}/{sample}/{arch}/rep-{rep}/compare/vs-golden.json"
+            for sample in SAMPLES
+            for arch in _archs_for_sample(sample)
+            for rep in range(1, REPS + 1)
+            if GOLDEN_REF_SHA and GOLDEN_REF_SHA != FG_LABS_SHA
+        ]
+        + [
+            f"runs/{FG_LABS_SHA}/{sample}/{arch}/rep-{rep}/compare/vs-golden.json"
+            for sample in SAMPLES
+            if not _is_meth_sample(sample)
+            for arch in ARM_ARCHS
+            for rep in range(1, REPS + 1)
+            if GOLDEN_REF_SHA and GOLDEN_REF_SHA != FG_LABS_SHA
         ],
 
 

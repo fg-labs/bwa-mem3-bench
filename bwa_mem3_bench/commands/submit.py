@@ -28,6 +28,7 @@ def submit(  # noqa: PLR0913
     archs: str = "",
     reps: int = 1,
     make_target: str = "",
+    golden_ref_sha: str = "",
     job_name: str | None = None,
     dry_run: bool = False,
 ) -> None:
@@ -55,6 +56,10 @@ def submit(  # noqa: PLR0913
         S3 output namespace becomes ``s3://.../runs/<sha>-<make_target>/``
         and a same-SHA default-build run cannot clobber the variant run's
         BAMs (or vice versa).
+    :param golden_ref_sha: pinned previous-release fg-labs SHA to compare against
+        for the vs-golden (Gate #2) dimension. Empty (default) disables vs-golden
+        comparison. When set, ``compare_vs_golden`` reads
+        ``golden/fg-labs-<golden_ref_sha>/`` rather than the run's own SHA.
     :param job_name: Batch job name; defaults to ``<target>-<sha>`` (or
         ``<target>-<sha>-<make_target>`` when make_target is set).
     :param dry_run: print the ``aws batch submit-job`` command without executing.
@@ -72,6 +77,8 @@ def submit(  # noqa: PLR0913
         env_overrides.append({"name": "ARCHS", "value": archs})
     if reps:
         env_overrides.append({"name": "REPS", "value": str(reps)})
+    if golden_ref_sha:
+        env_overrides.append({"name": "GOLDEN_REF_SHA", "value": golden_ref_sha})
     if make_target:
         # Coordinator entrypoint derives both `image_tag` (worker image to pull)
         # and a suffixed `fg_labs_sha` (S3 output namespace + DB primary key)
