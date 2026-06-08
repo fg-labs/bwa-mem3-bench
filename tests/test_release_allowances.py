@@ -1,17 +1,24 @@
 """Tests for the release-allowances registry + bless-golden sign-off guard."""
 
 import importlib
+import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from bwa_mem3_bench.commands.bless_golden import bless_golden
+from bwa_mem3_bench.commands.bless_golden import _parse_s3_bams, bless_golden
 from bwa_mem3_bench.release_allowances import (
     DEFAULT_ALLOWANCES_PATH,
     ReleaseAllowance,
     allowance_for,
     load_allowances,
 )
+
+# Import the module object (not the re-exported function) for patching its
+# `subprocess` / `run_cmd` symbols — `commands/__init__` re-exports the
+# `bless_golden` *function*, which shadows the submodule on attribute access.
+bless_golden_module = importlib.import_module("bwa_mem3_bench.commands.bless_golden")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -97,6 +104,137 @@ def test_bless_force_bypasses_allowance_check(
     # run dir — proving the guard was bypassed rather than the bless succeeding.
     with pytest.raises(FileNotFoundError, match="no local run"):
         bless_golden(fg_labs_sha="deadbeef", allowances_path=empty, force=True, dry_run=True)
+
+
+def test_parse_s3_bams_selects_rep1_and_rewrites_to_golden() -> None:
+    sha = "44cbaec"
+    ls = "\n".join(
+        [
+            f"2026 100 runs/{sha}/wes-5M/c6a/rep-1/aligned.bam",
+            f"2026 100 runs/{sha}/wes-5M/c6a/rep-2/aligned.bam",  # skipped (rep-2)
+            f"2026 50 runs/{sha}/wes-5M/c6a/rep-1/compare/vs-baseline.json",  # skipped
+            f"2026 100 runs/{sha}/wgs-5M/c8g/rep-1/aligned.bam",
+        ]
+    )
+    pairs = _parse_s3_bams(ls, bucket="B", fg_labs_sha=sha)
+    assert pairs == [
+        (
+            f"s3://B/runs/{sha}/wes-5M/c6a/rep-1/aligned.bam",
+            f"s3://B/golden/fg-labs-{sha}/wes-5M/c6a/aligned.bam",
+        ),
+        (
+            f"s3://B/runs/{sha}/wgs-5M/c8g/rep-1/aligned.bam",
+            f"s3://B/golden/fg-labs-{sha}/wgs-5M/c8g/aligned.bam",
+        ),
+    ]
+
+
+def test_bless_from_s3_still_enforces_allowance(tmp_path: Path) -> None:
+    empty = _write(tmp_path / "empty.yaml", "allowances: []\n")
+    with pytest.raises(ValueError, match="refusing to bless"):
+        bless_golden(fg_labs_sha="deadbeef", allowances_path=empty, from_s3=True, dry_run=True)
+
+
+def test_parse_s3_bams_notes_extra_reps_for_blessed_cells(capsys: pytest.CaptureFixture) -> None:
+    sha = "44cbaec"
+    ls = "\n".join(
+        [
+            f"2026 100 runs/{sha}/wes-5M/c6a/rep-1/aligned.bam",
+            f"2026 100 runs/{sha}/wes-5M/c6a/rep-2/aligned.bam",
+            f"2026 100 runs/{sha}/wes-5M/c6a/rep-3/aligned.bam",
+        ]
+    )
+    pairs = _parse_s3_bams(ls, bucket="B", fg_labs_sha=sha)
+    assert len(pairs) == 1  # only rep-1 blessed
+    note = capsys.readouterr().err
+    assert "blessing rep-1 only for wes-5M/c6a" in note
+    assert "ignoring 2 additional rep(s)" in note
+
+
+def test_parse_s3_bams_dry_run_suppresses_extra_rep_note(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    sha = "44cbaec"
+    ls = "\n".join(
+        [
+            f"2026 100 runs/{sha}/wes-5M/c6a/rep-1/aligned.bam",
+            f"2026 100 runs/{sha}/wes-5M/c6a/rep-2/aligned.bam",
+        ]
+    )
+    _parse_s3_bams(ls, bucket="B", fg_labs_sha=sha, dry_run=True)
+    assert capsys.readouterr().err == ""
+
+
+def test_bless_from_s3_authorized_lists_and_copies(tmp_path: Path) -> None:
+    sha = "deadbeef"
+    authorized = _write(
+        tmp_path / "a.yaml",
+        f"""
+allowances:
+  - to_sha: {sha}
+    pr: fg-labs/bwa-mem3#1
+    date: 2026-06-07
+    summary: "intentional"
+    expected_drift_pct: 0.1
+""".strip(),
+    )
+    ls_stdout = "\n".join(
+        [
+            f"2026 100 runs/{sha}/wes-5M/c6a/rep-1/aligned.bam",
+            f"2026 100 runs/{sha}/wgs-5M/c8g/rep-1/aligned.bam",
+        ]
+    )
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=ls_stdout, stderr="")
+    with (
+        patch.object(bless_golden_module.subprocess, "run", return_value=completed) as mock_ls,
+        patch.object(bless_golden_module, "run_cmd") as mock_cp,
+    ):
+        bless_golden(
+            fg_labs_sha=sha, bucket="B", allowances_path=authorized, from_s3=True, dry_run=True
+        )
+    mock_ls.assert_called_once()
+    copied = [call.args[0] for call in mock_cp.call_args_list]
+    assert copied == [
+        [
+            "aws",
+            "s3",
+            "cp",
+            f"s3://B/runs/{sha}/wes-5M/c6a/rep-1/aligned.bam",
+            f"s3://B/golden/fg-labs-{sha}/wes-5M/c6a/aligned.bam",
+        ],
+        [
+            "aws",
+            "s3",
+            "cp",
+            f"s3://B/runs/{sha}/wgs-5M/c8g/rep-1/aligned.bam",
+            f"s3://B/golden/fg-labs-{sha}/wgs-5M/c8g/aligned.bam",
+        ],
+    ]
+
+
+def test_bless_from_s3_surfaces_aws_error(tmp_path: Path) -> None:
+    sha = "deadbeef"
+    authorized = _write(
+        tmp_path / "a.yaml",
+        f"""
+allowances:
+  - to_sha: {sha}
+    pr: fg-labs/bwa-mem3#1
+    date: 2026-06-07
+    summary: "intentional"
+    expected_drift_pct: 0.1
+""".strip(),
+    )
+    failed = subprocess.CompletedProcess(
+        args=[], returncode=255, stdout="", stderr="fatal error: An error occurred (AccessDenied)"
+    )
+    with (
+        patch.object(bless_golden_module.subprocess, "run", return_value=failed),
+        pytest.raises(RuntimeError, match="AccessDenied"),
+    ):
+        bless_golden(
+            fg_labs_sha=sha, bucket="B", allowances_path=authorized, from_s3=True, dry_run=True
+        )
 
 
 def test_bless_allowed_sha_passes_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
