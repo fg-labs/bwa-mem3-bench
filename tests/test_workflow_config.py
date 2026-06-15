@@ -132,3 +132,19 @@ def test_sample_fastq_names_single_returns_r1_only() -> None:
 def test_sample_invalid_layout_raises() -> None:
     with pytest.raises(ValueError, match="layout"):
         _make_sample("bogus")
+
+
+def test_load_config_includes_new_samples() -> None:
+    cfg = load_config(CONFIG_DIR)
+
+    hic = cfg.samples["hic-1M"]
+    assert hic.layout == "paired"
+    assert hic.baseline_tool == "bwa-mem2-upstream"
+    assert hic.reference == "hg38"
+    assert hic.fastq_names == ("r1.fq.gz", "r2.fq.gz")
+
+    sbx = cfg.samples["sbx-1M"]
+    assert sbx.layout == "single"
+    assert sbx.baseline_tool == "bwa-mem2-upstream"
+    assert sbx.reference == "hg38"
+    assert sbx.fastq_names == ("r1.fq.gz",)
