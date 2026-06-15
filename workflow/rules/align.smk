@@ -21,7 +21,7 @@ tear the alignment down cleanly instead of leaking children.
 
 Alignment output is streamed through `samtools view -b` (no sort), so the
 BAM preserves bwa-mem2's FASTQ-input order. `compare-bams` consumes this in
-lockstep order — see tools/compare-bams/src/pair_reader.rs — which avoids
+lockstep order — see tools/compare-bams/src/template_reader.rs — which avoids
 the ~15-25% overhead of a post-alignment sort.
 """
 
@@ -122,17 +122,16 @@ def _ref_inputs(wc) -> list[str]:
     ]
 
 
-def _fastq_input(which: str):
-    """Lambda factory returning one fastq input path (which ∈ {"r1", "r2"}).
+def _query_fastqs(wc):
+    """Ordered list of query-FASTQ input paths for the sample's layout.
 
-    `sample.source` is a bucket-relative key prefix (e.g.
-    `data/wgs/1kg-HG00096/downsampled-5M/`); the snakemake S3 storage plugin
-    joins it with the configured bucket via `default-storage-prefix`.
+    Paired samples -> [r1, r2]; single-end (e.g. SBX) -> [r1]. Paths are
+    bucket-relative so the S3 storage plugin stages them. snakemake expands a
+    list input space-separated in the shell (order preserved), so the same
+    `bwa-mem2 mem ... {input.fastqs}` body serves both layouts.
     """
-    def _inner(wc):
-        sample = CONFIG.samples[wc.sample]
-        return f"{sample.source}{which}.fq.gz"
-    return _inner
+    sample = CONFIG.samples[wc.sample]
+    return [f"{sample.source}{name}" for name in sample.fastq_names]
 
 
 
@@ -140,8 +139,7 @@ def _fastq_input(which: str):
 rule align_fg_labs:
     input:
         ref = _ref_inputs,
-        r1 = _fastq_input("r1"),
-        r2 = _fastq_input("r2"),
+        fastqs = _query_fastqs,
     output:
         bam        = "runs/{sha}/{sample}/{arch}/rep-{rep}/aligned.bam",
         timing     = "runs/{sha}/{sample}/{arch}/rep-{rep}/benchmarks/timing.tsv",
@@ -174,7 +172,7 @@ rule align_fg_labs:
         trap 'bwa-mem2.fg-labs shm -d || true' EXIT
         tricorder --out {output.timing} -- \
             bash -c 'bwa-mem2.fg-labs mem -t {params.threads} {params.extra} \
-                {input.ref[0]} {input.r1} {input.r2} 2>"{output.bwa_stderr}" \
+                {input.ref[0]} {input.fastqs} 2>"{output.bwa_stderr}" \
               | samtools view -@4 -b -o {output.bam} -'
         """
 
@@ -202,8 +200,7 @@ rule align_baseline:
     """
     input:
         ref = _ref_inputs,
-        r1 = _fastq_input("r1"),
-        r2 = _fastq_input("r2"),
+        fastqs = _query_fastqs,
     output:
         bam        = "baseline/{tool_version}/{sample}/{arch}/rep-{rep}/aligned.bam",
         timing     = "baseline/{tool_version}/{sample}/{arch}/rep-{rep}/benchmarks/timing.tsv",
@@ -244,12 +241,12 @@ rule align_baseline:
             # so the same PROCESS()/Index read time parser works.
             tricorder --out {output.timing} -- \
                 bash -c 'bwameth.py --threads {params.threads} --reference {input.ref[0]} \
-                    {input.r1} {input.r2} 2>"{output.bwa_stderr}" \
+                    {input.fastqs} 2>"{output.bwa_stderr}" \
                   | samtools view -@4 -b -o {output.bam} -'
         else
             tricorder --out {output.timing} -- \
                 bash -c '{params.binary} mem -t {params.threads} \
-                    {input.ref[0]} {input.r1} {input.r2} 2>"{output.bwa_stderr}" \
+                    {input.ref[0]} {input.fastqs} 2>"{output.bwa_stderr}" \
                   | samtools view -@4 -b -o {output.bam} -'
         fi
         """
