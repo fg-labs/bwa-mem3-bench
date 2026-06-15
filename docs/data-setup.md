@@ -149,6 +149,29 @@ FASTQ pair from an equivalent kit — the benchmark measures relative
 throughput between bwa-mem2 builds, not sample-specific behaviour, so the
 exact provenance does not affect the comparison.
 
+### `hic-1M` — HG002 Hi-C (Zenodo)
+
+1M Hi-C read pairs (2×151 bp, paired-end), HG002.
+
+- **Source:** Zenodo record <https://zenodo.org/records/19703025>, DOI `10.5281/zenodo.19703025` (CC BY 4.0, Heng Li). File pair `HG002.HiC-1M_{1,2}.fq.gz`.
+- **Local root:** set `BWA_MEM3_BENCH_ZENODO_ROOT` to the directory holding the two files (default `/Volumes/scratch-00001/data/zenodo-19703025`).
+- **Staging:** already 1M pairs — no downsample. `upload-data --what hic-1M` uploads them verbatim to `data/hic/hg002-1M/{r1,r2}.fq.gz`.
+
+### `sbx-1M` — HG002 Roche SBX (single-end)
+
+~1M single-end Roche SBX (Sequencing by eXpansion) reads, 50–974 bp (median ~224), HG002.
+
+- **Source:** Roche SBX HG002 BAM at `2026/HG002.bam` under `BWA_MEM3_BENCH_SBX_ROOT` (default `/Volumes/scratch-00001/data/sbx`).
+- **Staging:** `upload-data --what sbx-1M` subsamples primary reads genome-wide and converts to a single FASTQ:
+
+  ```sh
+  samtools view -h -F 0x900 -s 42.001166 <SBX_ROOT>/2026/HG002.bam \
+    | samtools fastq -0 sbx-1M.fq.gz -
+  ```
+
+  `-F 0x900` keeps primary reads only (secondary + supplementary dropped); **duplicates (0x400) are intentionally kept** as real reads to align. The fraction `0.001166 = 1,000,000 / ~858M primary` (874.2M idxstats records minus ~1.9% supplementary). Uploaded to `data/sbx/hg002-1M/r1.fq.gz`.
+- **Recompute the fraction** if the source BAM changes: `frac = 1_000_000 / $(samtools view -c -F 0x900 <bam>)`.
+
 ### Stage and upload
 
 `bwa_mem3_bench.cli upload-data` deterministically downsamples the source
