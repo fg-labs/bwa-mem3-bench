@@ -6,6 +6,7 @@ import pytest
 
 from bwa_mem3_bench.workflow_config import (
     Arch,
+    Sample,
     WorkflowConfig,
     load_config,
 )
@@ -104,3 +105,30 @@ def test_sample_compare_options_default_empty() -> None:
     cfg = load_config(CONFIG_DIR)
     sample = cfg.samples["wgs-5M"]
     assert sample.compare_options == {}
+
+
+def _make_sample(layout: str = "paired") -> Sample:
+    return Sample(
+        name="t",
+        baseline_tool="bwa-mem2-upstream",
+        reference="hg38",
+        source="data/x/hg002-1M/",
+        layout=layout,
+    )
+
+
+def test_sample_layout_defaults_to_paired() -> None:
+    assert _make_sample().layout == "paired"
+
+
+def test_sample_fastq_names_paired_returns_r1_r2() -> None:
+    assert _make_sample("paired").fastq_names == ("r1.fq.gz", "r2.fq.gz")
+
+
+def test_sample_fastq_names_single_returns_r1_only() -> None:
+    assert _make_sample("single").fastq_names == ("r1.fq.gz",)
+
+
+def test_sample_invalid_layout_raises() -> None:
+    with pytest.raises(ValueError, match="layout"):
+        _make_sample("bogus")

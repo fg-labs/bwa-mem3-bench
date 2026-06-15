@@ -15,8 +15,28 @@ class Sample:
     baseline_tool: str
     reference: str
     source: str
+    # "paired" (r1+r2 FASTQs) or "single" (r1 only, e.g. single-end SBX reads).
+    layout: str = "paired"
     fg_labs_flags: list[str] = field(default_factory=list)
     compare_options: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.layout not in ("paired", "single"):
+            raise ValueError(
+                f"sample {self.name!r} has invalid layout {self.layout!r}; "
+                f"expected 'paired' or 'single'"
+            )
+
+    @property
+    def fastq_names(self) -> tuple[str, ...]:
+        """Ordered query-FASTQ basenames for this sample's layout.
+
+        Paired -> (r1, r2); single-end -> (r1,). The align rules join these with
+        ``source`` to build the ordered ``fastqs`` input list.
+        """
+        if self.layout == "single":
+            return ("r1.fq.gz",)
+        return ("r1.fq.gz", "r2.fq.gz")
 
 
 @dataclass(frozen=True)
@@ -97,6 +117,7 @@ def load_config(config_dir: Path) -> WorkflowConfig:
             baseline_tool=data["baseline_tool"],
             reference=data["reference"],
             source=source,
+            layout=data.get("layout", "paired"),
             fg_labs_flags=list(data.get("fg_labs_flags", [])),
             compare_options=dict(data.get("compare_options", {})),
         )
