@@ -1,6 +1,6 @@
 """Source → destination maps for uploading benchmark inputs.
 
-Source paths are configured per-host via two env vars:
+Source paths are configured per-host via env vars:
 
 * ``BWA_MEM3_BENCH_VENDOR_ROOT`` — directory holding raw vendor FASTQs (e.g.
   ``twist-umi_{1,2}.fastq.gz``). Defaults to ``./vendor-fastqs`` under the
@@ -10,6 +10,11 @@ Source paths are configured per-host via two env vars:
 * ``BWA_MEM3_BENCH_STAGE_ROOT`` — scratch directory for downsampled FASTQs
   written by ``upload-data``. Defaults to ``./data-stage`` under the repo
   root.
+* ``BWA_MEM3_BENCH_ZENODO_ROOT`` — local mirror of the Zenodo HG002 dataset
+  (DOI 10.5281/zenodo.19703025; HiC/long-read FASTQs, CC BY 4.0, Heng Li).
+  Defaults to ``/Volumes/scratch-00001/data/zenodo-19703025``.
+* ``BWA_MEM3_BENCH_SBX_ROOT`` — root of the Roche SBX BAM tree.
+  Defaults to ``/Volumes/scratch-00001/data/sbx``.
 
 See ``docs/data-setup.md`` for how to obtain the source FASTQs.
 """
@@ -24,15 +29,23 @@ from bwa_mem3_bench import REPO_ROOT
 
 SCRATCH_ROOT = Path(os.environ.get("BWA_MEM3_BENCH_VENDOR_ROOT", str(REPO_ROOT / "vendor-fastqs")))
 STAGE_ROOT = Path(os.environ.get("BWA_MEM3_BENCH_STAGE_ROOT", str(REPO_ROOT / "data-stage")))
+# HG002 Zenodo mirror (HiC/long-read FASTQs; CC BY 4.0, Heng Li) and the Roche
+# SBX BAM tree. Both live outside the vendor/stage roots above.
+ZENODO_ROOT = Path(
+    os.environ.get("BWA_MEM3_BENCH_ZENODO_ROOT", "/Volumes/scratch-00001/data/zenodo-19703025")
+)
+SBX_ROOT = Path(os.environ.get("BWA_MEM3_BENCH_SBX_ROOT", "/Volumes/scratch-00001/data/sbx"))
 
 
 @dataclass(frozen=True)
 class DataSource:
     sample: str
-    source_r1: Path
-    source_r2: Path
+    source_r1: Path  # local FASTQ to upload as r1.fq.gz (staged from BAM if source_bam set)
     dest_prefix: str  # e.g. "data/wgs/1kg-HG00096/downsampled-5M/"
+    source_r2: Path | None = None  # None => single-end
     downsample_every_nth: int | None = None  # None = full file
+    source_bam: Path | None = None  # single-end: convert this BAM -> source_r1 FASTQ
+    subsample_frac: float | None = None  # samtools view -s 42.<frac> when staging from BAM
 
 
 def sample_sources(bucket: str) -> dict[str, DataSource]:
@@ -92,5 +105,21 @@ def sample_sources(bucket: str) -> dict[str, DataSource]:
             source_r2=vendor / "twist-emseq_2.fastq.gz",
             dest_prefix="data/smoke-meth/10K/",
             downsample_every_nth=1500,  # 15.6M pairs / 1500 ≈ 10.4K
+        ),
+        "hic-1M": DataSource(
+            sample="hic-1M",
+            source_r1=ZENODO_ROOT / "HG002.HiC-1M_1.fq.gz",
+            source_r2=ZENODO_ROOT / "HG002.HiC-1M_2.fq.gz",
+            dest_prefix="data/hic/hg002-1M/",
+            # Already 1M pairs (2x151) — no downsample.
+        ),
+        "sbx-1M": DataSource(
+            sample="sbx-1M",
+            # source_r1 is the staged single-end FASTQ produced from source_bam.
+            source_r1=STAGE_ROOT / "sbx-1M.fq.gz",
+            dest_prefix="data/sbx/hg002-1M/",
+            source_bam=SBX_ROOT / "2026/HG002.bam",
+            # 1_000_000 / ~858M primary reads (874.2M records - ~1.9% supplementary).
+            subsample_frac=0.001166,
         ),
     }

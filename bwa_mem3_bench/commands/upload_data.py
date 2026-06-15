@@ -25,6 +25,9 @@ def _upload_sample(sample: str, bucket: str, *, dry_run: bool) -> None:
     dest = f"s3://{bucket}/{src.dest_prefix}"
 
     if src.downsample_every_nth is not None:
+        # Paired-end only: downsample requires both r1 and r2.
+        if src.source_r2 is None:
+            raise ValueError(f"sample '{sample}' has downsample_every_nth but no source_r2")
         n = src.downsample_every_nth
         r1_ds = src.source_r1.with_name(src.source_r1.name.replace(".fastq.gz", f".ds{n}.fastq.gz"))
         r2_ds = src.source_r2.with_name(src.source_r2.name.replace(".fastq.gz", f".ds{n}.fastq.gz"))
@@ -40,9 +43,17 @@ def _upload_sample(sample: str, bucket: str, *, dry_run: bool) -> None:
             run_cmd(["bash", "-c", cmd], dry_run=dry_run)
         run_cmd(["aws", "s3", "cp", str(r1_ds), dest + "r1.fq.gz"], dry_run=dry_run)
         run_cmd(["aws", "s3", "cp", str(r2_ds), dest + "r2.fq.gz"], dry_run=dry_run)
-    else:
+    elif src.source_bam is not None:
+        # Single-end from BAM: staging is handled by Task 5 (BAM→FASTQ conversion).
+        # source_r1 is the pre-staged FASTQ written by that step; upload it as-is.
+        run_cmd(["aws", "s3", "cp", str(src.source_r1), dest + "r1.fq.gz"], dry_run=dry_run)
+    elif src.source_r2 is not None:
+        # Paired-end, no downsample: upload both FASTQs directly.
         run_cmd(["aws", "s3", "cp", str(src.source_r1), dest + "r1.fq.gz"], dry_run=dry_run)
         run_cmd(["aws", "s3", "cp", str(src.source_r2), dest + "r2.fq.gz"], dry_run=dry_run)
+    else:
+        # Single-end FASTQ: upload r1 only.
+        run_cmd(["aws", "s3", "cp", str(src.source_r1), dest + "r1.fq.gz"], dry_run=dry_run)
 
 
 def upload_data(
