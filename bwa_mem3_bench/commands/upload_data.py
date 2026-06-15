@@ -36,6 +36,7 @@ def _upload_sample(sample: str, bucket: str, *, dry_run: bool) -> None:
             if dst_fq.exists():
                 continue
             cmd = (
+                f"set -o pipefail; "
                 f"gunzip -c {shlex.quote(str(src_fq))} | "
                 f"mawk 'NR % (4*{n}) <= 4 && NR % (4*{n}) > 0' | "
                 f"gzip > {shlex.quote(str(dst_fq))}"
@@ -44,8 +45,25 @@ def _upload_sample(sample: str, bucket: str, *, dry_run: bool) -> None:
         run_cmd(["aws", "s3", "cp", str(r1_ds), dest + "r1.fq.gz"], dry_run=dry_run)
         run_cmd(["aws", "s3", "cp", str(r2_ds), dest + "r2.fq.gz"], dry_run=dry_run)
     elif src.source_bam is not None:
-        # Single-end from BAM: staging is handled by Task 5 (BAM→FASTQ conversion).
-        # source_r1 is the pre-staged FASTQ written by that step; upload it as-is.
+        # Single-end: subsample primary reads genome-wide from a coordinate-sorted
+        # BAM and convert to one gzipped FASTQ, then upload as r1.fq.gz.
+        #   -F 0x900 drops secondary (0x100) + supplementary (0x800) -> primary only
+        #           (duplicates 0x400 are intentionally KEPT — real reads to align).
+        #   -s 42.<frac> seeds a reproducible subsample (seed 42, matching the
+        #           42.013/42.049 downsample convention).
+        #   samtools fastq -0 captures unpaired (flag-0) reads — the SBX case.
+        if src.subsample_frac is None:
+            raise ValueError(f"sample '{sample}' has source_bam but no subsample_frac")
+        src.source_r1.parent.mkdir(parents=True, exist_ok=True)
+        if not src.source_r1.exists():
+            seed_frac = 42 + src.subsample_frac
+            cmd = (
+                f"set -o pipefail; "
+                f"samtools view -h -F 0x900 -s {seed_frac:.6f} "
+                f"{shlex.quote(str(src.source_bam))} "
+                f"| samtools fastq -0 {shlex.quote(str(src.source_r1))} -"
+            )
+            run_cmd(["bash", "-c", cmd], dry_run=dry_run)
         run_cmd(["aws", "s3", "cp", str(src.source_r1), dest + "r1.fq.gz"], dry_run=dry_run)
     elif src.source_r2 is not None:
         # Paired-end, no downsample: upload both FASTQs directly.
