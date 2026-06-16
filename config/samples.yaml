@@ -69,7 +69,8 @@ samples:
 
   # ~1M Roche SBX reads (HG002, single-end, 50-974 bp, median ~224). Novel
   # mid-length single-end read class; staged by subsampling a coordinate-sorted
-  # SBX BAM to FASTQ. See docs/data-setup.md.
+  # SBX BAM to FASTQ. Source: Roche Axelios "xoos" GIAB webinar BAMs
+  # (CC BY-NC 4.0 — NON-COMMERCIAL). See docs/data-setup.md.
   sbx-1M:
     baseline_tool: bwa-mem2-upstream
     reference: hg38

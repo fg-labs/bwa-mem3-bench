@@ -161,7 +161,8 @@ exact provenance does not affect the comparison.
 
 ~1M single-end Roche SBX (Sequencing by eXpansion) reads, 50–974 bp (median ~224), HG002.
 
-- **Source:** Roche SBX HG002 BAM. Set `BWA_MEM3_BENCH_SBX_ROOT` to the directory holding the SBX BAM tree (defaults to `./sbx-bams` under the repo root); the sample reads `<SBX_ROOT>/2026/HG002.bam`.
+- **Source:** Roche SBX (Axelios "xoos") GIAB demonstration data — dataset "091025 Webinar GIAB BAMs BWA Non Downsampled" ("Genomic dataset containing 091025-Webinar-GIAB-BAMs-BWA-Non-Downsampled data"), from <https://roche-axelios.gitbook.io/xoos/tutorials/measuring-error-rate-for-sbx-duplex-data>. **License: CC BY-NC 4.0 (Attribution-NonCommercial), Roche** — note this is *non-commercial* use only, unlike the CC BY 4.0 Hi-C data above.
+- **Local root:** download the HG002 SBX BAM, then set `BWA_MEM3_BENCH_SBX_ROOT` to the directory holding the SBX BAM tree (defaults to `./sbx-bams` under the repo root); the sample reads `<SBX_ROOT>/2026/HG002.bam`.
 - **Staging:** `upload-data --what sbx-1M` subsamples primary reads genome-wide and converts to a single FASTQ:
 
   ```sh
