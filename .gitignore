@@ -20,6 +20,8 @@ runs/
 local-mirror/
 vendor-fastqs/
 data-stage/
+zenodo-fastqs/
+sbx-bams/
 .DS_Store
 
 # CDK

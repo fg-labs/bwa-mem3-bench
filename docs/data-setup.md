@@ -154,14 +154,14 @@ exact provenance does not affect the comparison.
 1M Hi-C read pairs (2×151 bp, paired-end), HG002.
 
 - **Source:** Zenodo record <https://zenodo.org/records/19703025>, DOI `10.5281/zenodo.19703025` (CC BY 4.0, Heng Li). File pair `HG002.HiC-1M_{1,2}.fq.gz`.
-- **Local root:** set `BWA_MEM3_BENCH_ZENODO_ROOT` to the directory holding the two files (default `/Volumes/scratch-00001/data/zenodo-19703025`).
+- **Local root:** download the two files, then set `BWA_MEM3_BENCH_ZENODO_ROOT` to the directory holding them (defaults to `./zenodo-fastqs` under the repo root).
 - **Staging:** already 1M pairs — no downsample. `upload-data --what hic-1M` uploads them verbatim to `data/hic/hg002-1M/{r1,r2}.fq.gz`.
 
 ### `sbx-1M` — HG002 Roche SBX (single-end)
 
 ~1M single-end Roche SBX (Sequencing by eXpansion) reads, 50–974 bp (median ~224), HG002.
 
-- **Source:** Roche SBX HG002 BAM at `2026/HG002.bam` under `BWA_MEM3_BENCH_SBX_ROOT` (default `/Volumes/scratch-00001/data/sbx`).
+- **Source:** Roche SBX HG002 BAM. Set `BWA_MEM3_BENCH_SBX_ROOT` to the directory holding the SBX BAM tree (defaults to `./sbx-bams` under the repo root); the sample reads `<SBX_ROOT>/2026/HG002.bam`.
 - **Staging:** `upload-data --what sbx-1M` subsamples primary reads genome-wide and converts to a single FASTQ:
 
   ```sh

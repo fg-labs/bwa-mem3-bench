@@ -10,11 +10,11 @@ Source paths are configured per-host via env vars:
 * ``BWA_MEM3_BENCH_STAGE_ROOT`` — scratch directory for downsampled FASTQs
   written by ``upload-data``. Defaults to ``./data-stage`` under the repo
   root.
-* ``BWA_MEM3_BENCH_ZENODO_ROOT`` — local mirror of the Zenodo HG002 dataset
+* ``BWA_MEM3_BENCH_ZENODO_ROOT`` — directory holding the Zenodo HG002 dataset
   (DOI 10.5281/zenodo.19703025; HiC/long-read FASTQs, CC BY 4.0, Heng Li).
-  Defaults to ``/Volumes/scratch-00001/data/zenodo-19703025``.
-* ``BWA_MEM3_BENCH_SBX_ROOT`` — root of the Roche SBX BAM tree.
-  Defaults to ``/Volumes/scratch-00001/data/sbx``.
+  Defaults to ``./zenodo-fastqs`` under the repo root.
+* ``BWA_MEM3_BENCH_SBX_ROOT`` — directory holding the Roche SBX BAM tree.
+  Defaults to ``./sbx-bams`` under the repo root.
 
 See ``docs/data-setup.md`` for how to obtain the source FASTQs.
 """
@@ -29,12 +29,11 @@ from bwa_mem3_bench import REPO_ROOT
 
 SCRATCH_ROOT = Path(os.environ.get("BWA_MEM3_BENCH_VENDOR_ROOT", str(REPO_ROOT / "vendor-fastqs")))
 STAGE_ROOT = Path(os.environ.get("BWA_MEM3_BENCH_STAGE_ROOT", str(REPO_ROOT / "data-stage")))
-# HG002 Zenodo mirror (HiC/long-read FASTQs; CC BY 4.0, Heng Li) and the Roche
-# SBX BAM tree. Both live outside the vendor/stage roots above.
-ZENODO_ROOT = Path(
-    os.environ.get("BWA_MEM3_BENCH_ZENODO_ROOT", "/Volumes/scratch-00001/data/zenodo-19703025")
-)
-SBX_ROOT = Path(os.environ.get("BWA_MEM3_BENCH_SBX_ROOT", "/Volumes/scratch-00001/data/sbx"))
+# HG002 Zenodo dataset (HiC/long-read FASTQs; CC BY 4.0, Heng Li) and the Roche
+# SBX BAM tree. Repo-relative defaults; point the env vars at the real data on
+# each host (see docs/data-setup.md).
+ZENODO_ROOT = Path(os.environ.get("BWA_MEM3_BENCH_ZENODO_ROOT", str(REPO_ROOT / "zenodo-fastqs")))
+SBX_ROOT = Path(os.environ.get("BWA_MEM3_BENCH_SBX_ROOT", str(REPO_ROOT / "sbx-bams")))
 
 
 @dataclass(frozen=True)
