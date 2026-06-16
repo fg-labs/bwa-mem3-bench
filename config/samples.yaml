@@ -55,6 +55,13 @@ samples:
     source: data/hic/hg002-1M/
     layout: paired
     fg_labs_flags: []
+    # Hi-C's huge insert distribution makes mate-rescue reference windows
+    # enormous (~17 kb); at the default 10M-base chunk x 16 threads this OOMs
+    # the 28 GB cgroup on ARM workers. -K shrinks the per-batch base count so
+    # fewer mate-SW windows are in flight at once (peak RSS 27.8 GB -> 21 GB),
+    # with no effect on alignment results. Applied to both fg-labs and upstream
+    # baseline (mem_flags) so vs-baseline / vs-x86 concordance stays symmetric.
+    mem_flags: ["-K", "1000000"]
 
   # ~1M Roche SBX reads (HG002, single-end, 50-974 bp, median ~224). Novel
   # mid-length single-end read class; staged by subsampling a coordinate-sorted

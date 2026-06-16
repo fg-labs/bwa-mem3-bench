@@ -148,3 +148,12 @@ def test_load_config_includes_new_samples() -> None:
     assert sbx.baseline_tool == "bwa-mem2-upstream"
     assert sbx.reference == "hg38"
     assert sbx.fastq_names == ("r1.fq.gz",)
+
+
+def test_mem_flags_default_empty_and_hic_uses_K() -> None:
+    cfg = load_config(CONFIG_DIR)
+    # Default: comparison-neutral mem_flags are empty for ordinary samples.
+    assert cfg.samples["wgs-5M"].mem_flags == []
+    assert cfg.samples["sbx-1M"].mem_flags == []
+    # hic-1M pins a smaller per-batch base count (-K) to cap peak RSS on ARM.
+    assert cfg.samples["hic-1M"].mem_flags == ["-K", "1000000"]

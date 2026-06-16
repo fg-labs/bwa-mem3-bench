@@ -18,6 +18,12 @@ class Sample:
     # "paired" (r1+r2 FASTQs) or "single" (r1 only, e.g. single-end SBX reads).
     layout: str = "paired"
     fg_labs_flags: list[str] = field(default_factory=list)
+    # `mem` flags applied to BOTH the fg-labs and the upstream-baseline `mem`
+    # invocations (NOT bwameth). Unlike `fg_labs_flags` (fg-labs-only), these
+    # are comparison-neutral and must go to both sides to keep concordance
+    # apples-to-apples. Used by `hic-1M` for `-K` (smaller per-batch base count)
+    # to cap peak RSS — Hi-C's huge mate-rescue windows otherwise OOM the cgroup.
+    mem_flags: list[str] = field(default_factory=list)
     compare_options: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -119,6 +125,7 @@ def load_config(config_dir: Path) -> WorkflowConfig:
             source=source,
             layout=data.get("layout", "paired"),
             fg_labs_flags=list(data.get("fg_labs_flags", [])),
+            mem_flags=list(data.get("mem_flags", [])),
             compare_options=dict(data.get("compare_options", {})),
         )
 

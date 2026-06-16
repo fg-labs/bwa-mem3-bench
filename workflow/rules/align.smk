@@ -37,6 +37,15 @@ def _fg_labs_flags(sample_name: str) -> str:
     return " ".join(CONFIG.samples[sample_name].fg_labs_flags)
 
 
+def _mem_flags(sample_name: str) -> str:
+    """`mem` flags applied to BOTH fg-labs and upstream baseline (not bwameth).
+
+    Comparison-neutral knobs (e.g. `-K` for Hi-C, to cap peak RSS) that must be
+    symmetric across the two aligners so concordance stays apples-to-apples.
+    """
+    return " ".join(CONFIG.samples[sample_name].mem_flags)
+
+
 def _baseline_bwa_bin(sample_name: str) -> str:
     """Which baseline aligner to invoke. `bwa-mem2.upstream` by default; `bwameth.py` for meth."""
     if CONFIG.samples[sample_name].baseline_tool == "bwameth":
@@ -156,6 +165,7 @@ rule align_fg_labs:
     params:
         threads = CONFIG.threads,
         extra   = lambda wc: _fg_labs_flags(wc.sample),
+        mem_flags = lambda wc: _mem_flags(wc.sample),
         # `bwa-mem2 mem --meth` auto-appends `.bwameth.c2t` to the given prefix
         # to find its index sidecars. `bwa-mem2 shm` does not — it loads the
         # literal prefix's index. So for meth runs the shm prefix has to be
@@ -170,10 +180,19 @@ rule align_fg_labs:
         mkdir -p $(dirname {output.bam}) $(dirname {output.timing})
         bwa-mem2.fg-labs shm {params.shm_prefix}
         trap 'bwa-mem2.fg-labs shm -d || true' EXIT
+        # `set -o pipefail` inside the inner bash -c so an aligner that dies
+        # (e.g. OOM-killed -> SIGKILL, exit 137) fails the pipeline instead of
+        # samtools silently exiting 0 on the partial header stream and caching a
+        # header-only BAM as a "successful" alignment.
         tricorder --out {output.timing} -- \
-            bash -c 'bwa-mem2.fg-labs mem -t {params.threads} {params.extra} \
+            bash -c 'set -o pipefail; bwa-mem2.fg-labs mem -t {params.threads} {params.mem_flags} {params.extra} \
                 {input.ref[0]} {input.fastqs} 2>"{output.bwa_stderr}" \
               | samtools view -@4 -b -o {output.bam} -'
+        # Defense in depth: reject a header-only BAM even if the aligner exited 0.
+        if [ "$(samtools view -c {output.bam})" -eq 0 ]; then
+            echo "ERROR: {output.bam} has 0 alignment records (aligner crashed/OOM?)" >&2
+            exit 1
+        fi
         """
 
 
@@ -212,6 +231,7 @@ rule align_baseline:
     params:
         threads = CONFIG.threads,
         binary  = lambda wc: _baseline_bwa_bin(wc.sample),
+        mem_flags = lambda wc: _mem_flags(wc.sample),
         # Index sidecar prefix to warm. Meth samples use the doubled-c2t
         # prefix so the c2t-suffixed index files (which `mem --meth` and
         # `bwameth.py` actually read) get cached.
@@ -239,14 +259,23 @@ rule align_baseline:
             touch {input.ref[0]}.bwameth.c2t* || true
             # bwameth.py wraps bwa-mem2; bwa's stderr passes through unchanged
             # so the same PROCESS()/Index read time parser works.
+            # `set -o pipefail`: a SIGKILL'd aligner must fail the pipeline, not
+            # let samtools exit 0 on a partial header stream (see align_fg_labs).
             tricorder --out {output.timing} -- \
-                bash -c 'bwameth.py --threads {params.threads} --reference {input.ref[0]} \
+                bash -c 'set -o pipefail; bwameth.py --threads {params.threads} --reference {input.ref[0]} \
                     {input.fastqs} 2>"{output.bwa_stderr}" \
                   | samtools view -@4 -b -o {output.bam} -'
         else
+            # `mem_flags` (e.g. -K for Hi-C) applied here too so the baseline
+            # matches the fg-labs invocation and concordance stays symmetric.
             tricorder --out {output.timing} -- \
-                bash -c '{params.binary} mem -t {params.threads} \
+                bash -c 'set -o pipefail; {params.binary} mem -t {params.threads} {params.mem_flags} \
                     {input.ref[0]} {input.fastqs} 2>"{output.bwa_stderr}" \
                   | samtools view -@4 -b -o {output.bam} -'
+        fi
+        # Defense in depth: reject a header-only BAM even if the aligner exited 0.
+        if [ "$(samtools view -c {output.bam})" -eq 0 ]; then
+            echo "ERROR: {output.bam} has 0 alignment records (aligner crashed/OOM?)" >&2
+            exit 1
         fi
         """
