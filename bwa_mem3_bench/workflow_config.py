@@ -20,9 +20,10 @@ class Sample:
     fg_labs_flags: list[str] = field(default_factory=list)
     # `mem` flags applied to BOTH the fg-labs and the upstream-baseline `mem`
     # invocations (NOT bwameth). Unlike `fg_labs_flags` (fg-labs-only), these
-    # are comparison-neutral and must go to both sides to keep concordance
-    # apples-to-apples. Used by `hic-1M` for `-K` (smaller per-batch base count)
-    # to cap peak RSS — Hi-C's huge mate-rescue windows otherwise OOM the cgroup.
+    # change the alignment and so must go to both sides to keep concordance
+    # apples-to-apples. Used by `hic-1M` for canonical Hi-C flags (`-5 -S -P`),
+    # which disable the (Hi-C-inappropriate) mate rescue that otherwise blows up
+    # the mate-SW reference windows and OOMs the cgroup.
     mem_flags: list[str] = field(default_factory=list)
     compare_options: dict[str, Any] = field(default_factory=dict)
 
@@ -97,6 +98,25 @@ class WorkflowConfig:
     data_prefix: str
 
 
+def _as_str_list(sample_name: str, key: str, value: Any) -> list[str]:
+    """Validate a YAML flag value is a ``list[str]`` before coercion.
+
+    ``list(...)`` on a bare YAML scalar (e.g. ``mem_flags: -5``) silently
+    splits the string into characters (``['-', '5']``), corrupting the
+    alignment arguments. Reject anything that is not already a list of
+    strings so a misconfiguration fails loudly at load time.
+
+    :param sample_name: sample the flags belong to (for the error message).
+    :param key: config key being validated (e.g. ``"mem_flags"``).
+    :param value: raw value read from YAML.
+    :return: the value as a ``list[str]``.
+    :raises ValueError: if ``value`` is not a list of strings.
+    """
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ValueError(f"sample {sample_name!r} `{key}` must be a list of strings; got {value!r}")
+    return list(value)
+
+
 def _read_yaml(path: Path) -> dict[str, Any]:
     with path.open("r") as fh:
         result: dict[str, Any] = yaml.safe_load(fh)
@@ -124,8 +144,8 @@ def load_config(config_dir: Path) -> WorkflowConfig:
             reference=data["reference"],
             source=source,
             layout=data.get("layout", "paired"),
-            fg_labs_flags=list(data.get("fg_labs_flags", [])),
-            mem_flags=list(data.get("mem_flags", [])),
+            fg_labs_flags=_as_str_list(name, "fg_labs_flags", data.get("fg_labs_flags", [])),
+            mem_flags=_as_str_list(name, "mem_flags", data.get("mem_flags", [])),
             compare_options=dict(data.get("compare_options", {})),
         )
 

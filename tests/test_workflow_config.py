@@ -8,6 +8,7 @@ from bwa_mem3_bench.workflow_config import (
     Arch,
     Sample,
     WorkflowConfig,
+    _as_str_list,
     load_config,
 )
 
@@ -150,10 +151,32 @@ def test_load_config_includes_new_samples() -> None:
     assert sbx.fastq_names == ("r1.fq.gz",)
 
 
-def test_mem_flags_default_empty_and_hic_uses_K() -> None:
+def test_mem_flags_default_empty_and_hic_uses_canonical_hic_flags() -> None:
     cfg = load_config(CONFIG_DIR)
-    # Default: comparison-neutral mem_flags are empty for ordinary samples.
+    # mem_flags are empty for ordinary samples (no alignment-mode change).
     assert cfg.samples["wgs-5M"].mem_flags == []
     assert cfg.samples["sbx-1M"].mem_flags == []
-    # hic-1M pins a smaller per-batch base count (-K) to cap peak RSS on ARM.
-    assert cfg.samples["hic-1M"].mem_flags == ["-K", "1000000"]
+    # hic-1M uses canonical Hi-C flags (-5 -S -P): skip mate rescue/pairing,
+    # smallest-coord split as primary. Disabling mate rescue also removes the
+    # huge mate-SW windows that OOM'd ARM workers.
+    assert cfg.samples["hic-1M"].mem_flags == ["-5", "-S", "-P"]
+
+
+def test_as_str_list_accepts_list_of_strings() -> None:
+    assert _as_str_list("s", "mem_flags", ["-5", "-S"]) == ["-5", "-S"]
+
+
+def test_as_str_list_accepts_empty_default() -> None:
+    assert _as_str_list("s", "mem_flags", []) == []
+
+
+def test_as_str_list_rejects_scalar_string() -> None:
+    # A bare YAML string would be silently split into ['-', '5'] by list();
+    # the loader must reject it instead.
+    with pytest.raises(ValueError, match="mem_flags"):
+        _as_str_list("s", "mem_flags", "-5")
+
+
+def test_as_str_list_rejects_non_string_elements() -> None:
+    with pytest.raises(ValueError, match="fg_labs_flags"):
+        _as_str_list("s", "fg_labs_flags", [1, 2])
