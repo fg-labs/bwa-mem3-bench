@@ -43,9 +43,9 @@ def test_arch_baseline_arch_field() -> None:
 
     The per-rule image plumbing is wired end-to-end and tested, but the
     AVX-512BW image variant produced by `BASELINE_ARCH=avx512bw` is not
-    a perf win on this workload (see Phase C report at
-    ~/work/git/bwa-mem3/avx512-baseline-build/PHASE_C_REPORT.md). When
-    upstream lands a fix, set c7a / c7i / m7i back to "avx512bw" here.
+    a perf win on this workload (per the fg-labs/bwa-mem3 AVX-512
+    baseline-build Phase C benchmarking). When upstream lands a fix,
+    set c7a / c7i / m7i back to "avx512bw" here.
     """
     cfg = load_config(CONFIG_DIR)
     for arch in ("c6a", "c7a", "c7i", "c7g", "c8g", "m7i"):

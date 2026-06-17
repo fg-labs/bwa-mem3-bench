@@ -53,9 +53,9 @@ def build(  # noqa: PLR0913
         a host-locked variant. Currently a no-op for the workflow because
         every arch in ``config/archs.yaml`` is parked at
         ``baseline_arch=""`` — empirical data showed the avx512bw variant
-        is not a perf win on this workload (see Phase C report at
-        ``~/work/git/bwa-mem3/avx512-baseline-build/PHASE_C_REPORT.md``).
-        The flag is preserved for re-enablement once upstream lands a fix.
+        is not a perf win on this workload (see the fg-labs/bwa-mem3 AVX-512
+        baseline-build Phase C benchmarking). The flag is preserved for
+        re-enablement once upstream lands a fix.
     :param make_target: fg-labs/bwa-mem3 Makefile target to invoke when
         building. Empty (default) runs ``make`` (target ``all``) and installs
         ``bwa-mem3``. ``lto-build`` runs ``make lto-build`` and installs the
