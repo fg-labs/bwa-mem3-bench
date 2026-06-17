@@ -8,9 +8,9 @@
 # m7i, hg38 + 5M-pair samples, fg-labs/bwa-mem3 `316dba62`) shows
 # `BASELINE_ARCH=avx512bw` is consistently slower than the AVX2 default on
 # Zen 4 (c7a +12-17%) and only mixed/wash on Sapphire Rapids (c7i / m7i).
-# PR #84's claimed +10-15% gain doesn't materialize. See
-# `~/work/git/bwa-mem3/avx512-baseline-build/PHASE_C_REPORT.md` for the
-# full numbers and likely root causes.
+# PR #84's claimed +10-15% gain doesn't materialize. See the fg-labs/bwa-mem3
+# AVX-512 baseline-build Phase C benchmarking for the full numbers and likely
+# root causes.
 #
 # Re-enable per-arch when upstream lands a fix (most likely
 # `-mprefer-vector-width=256` or pragma'd hot loops): set the relevant

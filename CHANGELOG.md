@@ -51,8 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   slower across all 5M-pair samples than the AVX2 default; c7i / m7i
   mixed/wash). PR #84's claimed +10-15% gain doesn't materialize on
   this workload — see `docs/superpowers/specs/2026-05-07-per-rule-image-design.md`
-  and the Phase C report at
-  `~/work/git/bwa-mem3/avx512-baseline-build/PHASE_C_REPORT.md`.
+  and the fg-labs/bwa-mem3 AVX-512 baseline-build Phase C benchmarking.
 - `samtools` bumped 1.22.1 → 1.23.1 (new ref stats, `--min-depth`,
   UMI support in `samtools fastq`/`import`, fixes); `tricord` bumped
   0.1.0 → 0.1.2 (per-tick TSV trace via `--trace <PATH>`).

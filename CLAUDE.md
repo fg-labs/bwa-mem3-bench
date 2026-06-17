@@ -119,9 +119,9 @@ from `arch.baseline_arch` in `config/archs.yaml`:
   at `baseline_arch=""`** — empirical data on this workload shows the
   fg-labs/bwa-mem3 `BASELINE_ARCH=avx512bw` build is consistently
   slower on Zen 4 (c7a +12-17%) and only mixed/wash on Sapphire Rapids
-  (c7i / m7i), against PR #84's claimed +10-15% gain. See
-  `~/work/git/bwa-mem3/avx512-baseline-build/PHASE_C_REPORT.md` for the
-  full numbers + likely root causes.
+  (c7i / m7i), against PR #84's claimed +10-15% gain. The fg-labs/bwa-mem3
+  AVX-512 baseline-build Phase C benchmarking has the full numbers + likely
+  root causes.
 - Build side: `cli build --baseline-arch <tier>` produces the matching
   ECR tag (`<sha>-<tier>`). When upstream lands an AVX-512 fix, flip
   the relevant arch's `baseline_arch` field, build that variant via
