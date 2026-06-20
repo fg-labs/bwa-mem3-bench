@@ -44,3 +44,36 @@ samples:
     fg_labs_flags: ["--meth"]
     compare_options:
       ignore_tags: ["YD", "XM", "XG"]
+
+  # 1M Hi-C read pairs (HG002, 2x151 PE). Chimeric / long-range-mate structure
+  # produces heavy supplementary alignments — exercises the supplementary
+  # disagreement metrics in compare-bams. Source: Zenodo 10.5281/zenodo.19703025
+  # (CC BY 4.0, Heng Li). See docs/data-setup.md.
+  hic-1M:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/hic/hg002-1M/
+    layout: paired
+    fg_labs_flags: []
+    # Canonical Hi-C alignment (Arima/Juicer/Omni-C use `bwa mem -SP5`):
+    #   -S skip mate rescue, -P skip pairing, -5 take the smallest-coordinate
+    #   split as primary. Hi-C reads are chimeric ligation products, so the
+    #   normal insert-distribution-based mate rescue is biologically wrong AND
+    #   is what produced the ~17 kb mate-SW reference windows that OOM-killed
+    #   the aligner inside the 28 GB cgroup on ARM workers. -SP removes that
+    #   path entirely (peak RSS ~21 GB; eliminates the ballooning failure mode
+    #   rather than just shrinking it). Applied to both fg-labs and the upstream
+    #   baseline (mem_flags) since -5SP is NOT concordance-neutral vs plain mem,
+    #   so both sides must use it to keep vs-baseline / vs-x86 apples-to-apples.
+    mem_flags: ["-5", "-S", "-P"]
+
+  # ~1M Roche SBX reads (HG002, single-end, 50-974 bp, median ~224). Novel
+  # mid-length single-end read class; staged by subsampling a coordinate-sorted
+  # SBX BAM to FASTQ. Source: Roche Axelios "xoos" GIAB webinar BAMs
+  # (CC BY-NC 4.0 — NON-COMMERCIAL). See docs/data-setup.md.
+  sbx-1M:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/sbx/hg002-1M/
+    layout: single
+    fg_labs_flags: []

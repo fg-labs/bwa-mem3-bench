@@ -6,7 +6,9 @@ import pytest
 
 from bwa_mem3_bench.workflow_config import (
     Arch,
+    Sample,
     WorkflowConfig,
+    _as_str_list,
     load_config,
 )
 
@@ -104,3 +106,77 @@ def test_sample_compare_options_default_empty() -> None:
     cfg = load_config(CONFIG_DIR)
     sample = cfg.samples["wgs-5M"]
     assert sample.compare_options == {}
+
+
+def _make_sample(layout: str = "paired") -> Sample:
+    return Sample(
+        name="t",
+        baseline_tool="bwa-mem2-upstream",
+        reference="hg38",
+        source="data/x/hg002-1M/",
+        layout=layout,
+    )
+
+
+def test_sample_layout_defaults_to_paired() -> None:
+    assert _make_sample().layout == "paired"
+
+
+def test_sample_fastq_names_paired_returns_r1_r2() -> None:
+    assert _make_sample("paired").fastq_names == ("r1.fq.gz", "r2.fq.gz")
+
+
+def test_sample_fastq_names_single_returns_r1_only() -> None:
+    assert _make_sample("single").fastq_names == ("r1.fq.gz",)
+
+
+def test_sample_invalid_layout_raises() -> None:
+    with pytest.raises(ValueError, match="layout"):
+        _make_sample("bogus")
+
+
+def test_load_config_includes_new_samples() -> None:
+    cfg = load_config(CONFIG_DIR)
+
+    hic = cfg.samples["hic-1M"]
+    assert hic.layout == "paired"
+    assert hic.baseline_tool == "bwa-mem2-upstream"
+    assert hic.reference == "hg38"
+    assert hic.fastq_names == ("r1.fq.gz", "r2.fq.gz")
+
+    sbx = cfg.samples["sbx-1M"]
+    assert sbx.layout == "single"
+    assert sbx.baseline_tool == "bwa-mem2-upstream"
+    assert sbx.reference == "hg38"
+    assert sbx.fastq_names == ("r1.fq.gz",)
+
+
+def test_mem_flags_default_empty_and_hic_uses_canonical_hic_flags() -> None:
+    cfg = load_config(CONFIG_DIR)
+    # mem_flags are empty for ordinary samples (no alignment-mode change).
+    assert cfg.samples["wgs-5M"].mem_flags == []
+    assert cfg.samples["sbx-1M"].mem_flags == []
+    # hic-1M uses canonical Hi-C flags (-5 -S -P): skip mate rescue/pairing,
+    # smallest-coord split as primary. Disabling mate rescue also removes the
+    # huge mate-SW windows that OOM'd ARM workers.
+    assert cfg.samples["hic-1M"].mem_flags == ["-5", "-S", "-P"]
+
+
+def test_as_str_list_accepts_list_of_strings() -> None:
+    assert _as_str_list("s", "mem_flags", ["-5", "-S"]) == ["-5", "-S"]
+
+
+def test_as_str_list_accepts_empty_default() -> None:
+    assert _as_str_list("s", "mem_flags", []) == []
+
+
+def test_as_str_list_rejects_scalar_string() -> None:
+    # A bare YAML string would be silently split into ['-', '5'] by list();
+    # the loader must reject it instead.
+    with pytest.raises(ValueError, match="mem_flags"):
+        _as_str_list("s", "mem_flags", "-5")
+
+
+def test_as_str_list_rejects_non_string_elements() -> None:
+    with pytest.raises(ValueError, match="fg_labs_flags"):
+        _as_str_list("s", "fg_labs_flags", [1, 2])

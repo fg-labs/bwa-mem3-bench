@@ -149,6 +149,30 @@ FASTQ pair from an equivalent kit — the benchmark measures relative
 throughput between bwa-mem2 builds, not sample-specific behaviour, so the
 exact provenance does not affect the comparison.
 
+### `hic-1M` — HG002 Hi-C (Zenodo)
+
+1M Hi-C read pairs (2×151 bp, paired-end), HG002.
+
+- **Source:** Zenodo record <https://zenodo.org/records/19703025>, DOI `10.5281/zenodo.19703025` (CC BY 4.0, Heng Li). File pair `HG002.HiC-1M_{1,2}.fq.gz`.
+- **Local root:** download the two files, then set `BWA_MEM3_BENCH_ZENODO_ROOT` to the directory holding them (defaults to `./zenodo-fastqs` under the repo root).
+- **Staging:** already 1M pairs — no downsample. `upload-data --what hic-1M` uploads them verbatim to `data/hic/hg002-1M/{r1,r2}.fq.gz`.
+
+### `sbx-1M` — HG002 Roche SBX (single-end)
+
+~1M single-end Roche SBX (Sequencing by eXpansion) reads, 50–974 bp (median ~224), HG002.
+
+- **Source:** Roche SBX (Axelios "xoos") GIAB demonstration data — dataset "091025 Webinar GIAB BAMs BWA Non Downsampled" ("Genomic dataset containing 091025-Webinar-GIAB-BAMs-BWA-Non-Downsampled data"), from <https://roche-axelios.gitbook.io/xoos/tutorials/measuring-error-rate-for-sbx-duplex-data>. **License: CC BY-NC 4.0 (Attribution-NonCommercial), Roche** — note this is *non-commercial* use only, unlike the CC BY 4.0 Hi-C data above.
+- **Local root:** download the HG002 SBX BAM, then set `BWA_MEM3_BENCH_SBX_ROOT` to the directory holding the SBX BAM tree (defaults to `./sbx-bams` under the repo root); the sample reads `<SBX_ROOT>/2026/HG002.bam`.
+- **Staging:** `upload-data --what sbx-1M` subsamples primary reads genome-wide and converts to a single FASTQ:
+
+  ```sh
+  samtools view -h -F 0x900 -s 42.001166 <SBX_ROOT>/2026/HG002.bam \
+    | samtools fastq -0 sbx-1M.fq.gz -
+  ```
+
+  `-F 0x900` keeps primary reads only (secondary + supplementary dropped); **duplicates (0x400) are intentionally kept** as real reads to align. The fraction `0.001166 = 1,000,000 / ~858M primary` (874.2M idxstats records minus ~1.9% supplementary). Uploaded to `data/sbx/hg002-1M/r1.fq.gz`.
+- **Recompute the fraction** if the source BAM changes: `frac = 1_000_000 / $(samtools view -c -F 0x900 <bam>)`.
+
 ### Stage and upload
 
 `bwa_mem3_bench.cli upload-data` deterministically downsamples the source

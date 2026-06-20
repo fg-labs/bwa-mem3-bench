@@ -21,7 +21,7 @@ tear the alignment down cleanly instead of leaking children.
 
 Alignment output is streamed through `samtools view -b` (no sort), so the
 BAM preserves bwa-mem2's FASTQ-input order. `compare-bams` consumes this in
-lockstep order — see tools/compare-bams/src/pair_reader.rs — which avoids
+lockstep order — see tools/compare-bams/src/template_reader.rs — which avoids
 the ~15-25% overhead of a post-alignment sort.
 """
 
@@ -35,6 +35,15 @@ BASELINE_BINARY = os.environ.get("BASELINE_BINARY", "bwa-mem2.upstream")
 
 def _fg_labs_flags(sample_name: str) -> str:
     return " ".join(CONFIG.samples[sample_name].fg_labs_flags)
+
+
+def _mem_flags(sample_name: str) -> str:
+    """`mem` flags applied to BOTH fg-labs and upstream baseline (not bwameth).
+
+    Comparison-neutral knobs (e.g. `-K` for Hi-C, to cap peak RSS) that must be
+    symmetric across the two aligners so concordance stays apples-to-apples.
+    """
+    return " ".join(CONFIG.samples[sample_name].mem_flags)
 
 
 def _baseline_bwa_bin(sample_name: str) -> str:
@@ -122,17 +131,16 @@ def _ref_inputs(wc) -> list[str]:
     ]
 
 
-def _fastq_input(which: str):
-    """Lambda factory returning one fastq input path (which ∈ {"r1", "r2"}).
+def _query_fastqs(wc):
+    """Ordered list of query-FASTQ input paths for the sample's layout.
 
-    `sample.source` is a bucket-relative key prefix (e.g.
-    `data/wgs/1kg-HG00096/downsampled-5M/`); the snakemake S3 storage plugin
-    joins it with the configured bucket via `default-storage-prefix`.
+    Paired samples -> [r1, r2]; single-end (e.g. SBX) -> [r1]. Paths are
+    bucket-relative so the S3 storage plugin stages them. snakemake expands a
+    list input space-separated in the shell (order preserved), so the same
+    `bwa-mem2 mem ... {input.fastqs}` body serves both layouts.
     """
-    def _inner(wc):
-        sample = CONFIG.samples[wc.sample]
-        return f"{sample.source}{which}.fq.gz"
-    return _inner
+    sample = CONFIG.samples[wc.sample]
+    return [f"{sample.source}{name}" for name in sample.fastq_names]
 
 
 
@@ -140,8 +148,7 @@ def _fastq_input(which: str):
 rule align_fg_labs:
     input:
         ref = _ref_inputs,
-        r1 = _fastq_input("r1"),
-        r2 = _fastq_input("r2"),
+        fastqs = _query_fastqs,
     output:
         bam        = "runs/{sha}/{sample}/{arch}/rep-{rep}/aligned.bam",
         timing     = "runs/{sha}/{sample}/{arch}/rep-{rep}/benchmarks/timing.tsv",
@@ -158,6 +165,7 @@ rule align_fg_labs:
     params:
         threads = CONFIG.threads,
         extra   = lambda wc: _fg_labs_flags(wc.sample),
+        mem_flags = lambda wc: _mem_flags(wc.sample),
         # `bwa-mem2 mem --meth` auto-appends `.bwameth.c2t` to the given prefix
         # to find its index sidecars. `bwa-mem2 shm` does not — it loads the
         # literal prefix's index. So for meth runs the shm prefix has to be
@@ -172,10 +180,19 @@ rule align_fg_labs:
         mkdir -p $(dirname {output.bam}) $(dirname {output.timing})
         bwa-mem2.fg-labs shm {params.shm_prefix}
         trap 'bwa-mem2.fg-labs shm -d || true' EXIT
+        # `set -o pipefail` inside the inner bash -c so an aligner that dies
+        # (e.g. OOM-killed -> SIGKILL, exit 137) fails the pipeline instead of
+        # samtools silently exiting 0 on the partial header stream and caching a
+        # header-only BAM as a "successful" alignment.
         tricorder --out {output.timing} -- \
-            bash -c 'bwa-mem2.fg-labs mem -t {params.threads} {params.extra} \
-                {input.ref[0]} {input.r1} {input.r2} 2>"{output.bwa_stderr}" \
+            bash -c 'set -o pipefail; bwa-mem2.fg-labs mem -t {params.threads} {params.mem_flags} {params.extra} \
+                {input.ref[0]} {input.fastqs} 2>"{output.bwa_stderr}" \
               | samtools view -@4 -b -o {output.bam} -'
+        # Defense in depth: reject a header-only BAM even if the aligner exited 0.
+        if [ "$(samtools view -c {output.bam})" -eq 0 ]; then
+            echo "ERROR: {output.bam} has 0 alignment records (aligner crashed/OOM?)" >&2
+            exit 1
+        fi
         """
 
 
@@ -202,8 +219,7 @@ rule align_baseline:
     """
     input:
         ref = _ref_inputs,
-        r1 = _fastq_input("r1"),
-        r2 = _fastq_input("r2"),
+        fastqs = _query_fastqs,
     output:
         bam        = "baseline/{tool_version}/{sample}/{arch}/rep-{rep}/aligned.bam",
         timing     = "baseline/{tool_version}/{sample}/{arch}/rep-{rep}/benchmarks/timing.tsv",
@@ -215,6 +231,7 @@ rule align_baseline:
     params:
         threads = CONFIG.threads,
         binary  = lambda wc: _baseline_bwa_bin(wc.sample),
+        mem_flags = lambda wc: _mem_flags(wc.sample),
         # Index sidecar prefix to warm. Meth samples use the doubled-c2t
         # prefix so the c2t-suffixed index files (which `mem --meth` and
         # `bwameth.py` actually read) get cached.
@@ -242,14 +259,23 @@ rule align_baseline:
             touch {input.ref[0]}.bwameth.c2t* || true
             # bwameth.py wraps bwa-mem2; bwa's stderr passes through unchanged
             # so the same PROCESS()/Index read time parser works.
+            # `set -o pipefail`: a SIGKILL'd aligner must fail the pipeline, not
+            # let samtools exit 0 on a partial header stream (see align_fg_labs).
             tricorder --out {output.timing} -- \
-                bash -c 'bwameth.py --threads {params.threads} --reference {input.ref[0]} \
-                    {input.r1} {input.r2} 2>"{output.bwa_stderr}" \
+                bash -c 'set -o pipefail; bwameth.py --threads {params.threads} --reference {input.ref[0]} \
+                    {input.fastqs} 2>"{output.bwa_stderr}" \
                   | samtools view -@4 -b -o {output.bam} -'
         else
+            # `mem_flags` (e.g. -K for Hi-C) applied here too so the baseline
+            # matches the fg-labs invocation and concordance stays symmetric.
             tricorder --out {output.timing} -- \
-                bash -c '{params.binary} mem -t {params.threads} \
-                    {input.ref[0]} {input.r1} {input.r2} 2>"{output.bwa_stderr}" \
+                bash -c 'set -o pipefail; {params.binary} mem -t {params.threads} {params.mem_flags} \
+                    {input.ref[0]} {input.fastqs} 2>"{output.bwa_stderr}" \
                   | samtools view -@4 -b -o {output.bam} -'
+        fi
+        # Defense in depth: reject a header-only BAM even if the aligner exited 0.
+        if [ "$(samtools view -c {output.bam})" -eq 0 ]; then
+            echo "ERROR: {output.bam} has 0 alignment records (aligner crashed/OOM?)" >&2
+            exit 1
         fi
         """
