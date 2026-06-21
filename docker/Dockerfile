@@ -50,10 +50,14 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 # ext/htslib submodule, but they're on upstream's official prereqs list
 # (fg-labs/bwa-mem3 PR #93 → docs/src/getting-started/installation.md) and an
 # htslib bump could start depending on them. Defensive hygiene.
-# NOTE: libdeflate-dev intentionally omitted — bwa-mem2's bundled htslib detects it
+# NOTE: libdeflate-dev is intentionally NOT installed here, before the upstream
+# bwa-mem2 v2.2.1 build below. Upstream's bundled htslib auto-detects libdeflate
 # and uses it, but the bwa-mem2 link step does not add -ldeflate, producing
-# undefined-reference errors at link time. Without libdeflate, htslib falls back
-# to zlib only, which is sufficient for our use case.
+# undefined-reference errors at link time. fg-labs/bwa-mem3 main, by contrast,
+# requires libdeflate directly (src/fast_reader.c #include <libdeflate.h>,
+# links -ldeflate). So libdeflate-dev is installed in a dedicated RUN *between*
+# the upstream and fg-labs builds (see below) — present for fg-labs, absent for
+# upstream. The runtime stage ships libdeflate0 for the resulting dynamic link.
 
 # Install Rust toolchain (pinned to match rust-toolchain.toml).
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
@@ -82,6 +86,15 @@ RUN if [ "$TARGETARCH" != "arm64" ]; then \
             [ -f bwa-mem2.$v ] && install -Dm755 bwa-mem2.$v /out/bin/bwa-mem2.upstream.$v || true; \
         done; \
     fi
+
+# libdeflate-dev for the fg-labs/bwa-mem3 build only. Installed AFTER the
+# upstream bwa-mem2 build above (which breaks if htslib links libdeflate) and
+# BEFORE the fg-labs build below (which requires <libdeflate.h> + -ldeflate via
+# src/fast_reader.c, added on main by the content-detecting FASTQ reader fast
+# path). The runtime stage already ships libdeflate0 for the dynamic link.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libdeflate-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 # Build fg-labs bwa-mem3. Fetch all branches so ${FG_LABS_SHA} can point to any
 # branch (e.g. fg-main) not just the repo's default.

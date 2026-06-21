@@ -40,3 +40,19 @@ allowances:
       records on those samples. Primary placement is preserved; the affected
       reads differ only in MAPQ/CIGAR/ordering detail. Intentional, accepted.
     expected_drift_pct: 0.06
+
+  - to_sha: a02fcb446574d5b5d03abdbf73c9b129deead2d4
+    pr: fg-labs/bwa-mem3#135
+    date: 2026-06-21
+    summary: >-
+      v0.3.0: essentially no alignment change vs the v0.2.2 golden despite 32
+      commits, mostly per-ISA Smith-Waterman tuning (#149/#160/#161/#162/#166)
+      plus the 8-bit banded-SW path (#140), Gotoh extension-gap derivation
+      (#141), and SMEM int16->int32 widening (#142). Primary concordance vs the
+      v0.2.2 golden is 100.00000% on wgs-5M / wes-5M / smoke-1M / meth on every
+      arch; panel-twist-5M is 99.99997% — exactly 2 of 7,913,324 reads differ,
+      CIGAR-only (same position, same MAPQ), identical on all six archs and with
+      identical supplementary counts. The shipped v0.3.0 tag (c78c8fe) is a
+      docs/version-only commit on top of this benchmarked binary. Intentional,
+      accepted.
+    expected_drift_pct: 0.00003

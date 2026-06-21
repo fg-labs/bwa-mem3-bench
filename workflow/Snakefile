@@ -58,8 +58,20 @@ IMAGE = config.get("image_tag", f"bwa-mem3-bench:{FG_LABS_SHA}")
 # ---------------------------------------------------------------------------
 
 from bwa_mem3_bench import aws_config as _aws_config
+from bwa_mem3_bench.golden import golden_backed_samples
 
-_ECR_REPO_URI = _aws_config.load().ecr_repo_uri
+_AWS = _aws_config.load()
+_ECR_REPO_URI = _AWS.ecr_repo_uri
+
+# Samples the pinned golden actually contains. A golden blessed before a sample
+# existed (e.g. the v0.2.2 golden predates hic-1M / sbx-1M) lacks that sample's
+# BAM, so requesting vs-golden for it would make `rule all` unsatisfiable. We
+# scope vs-golden to this set. Empty unless a golden is pinned (no S3 call then).
+GOLDEN_SAMPLES = (
+    golden_backed_samples(_AWS.bucket, GOLDEN_REF_SHA)
+    if GOLDEN_REF_SHA and GOLDEN_REF_SHA != FG_LABS_SHA
+    else frozenset()
+)
 
 
 def image_for_arch(arch_name: str) -> str:
@@ -153,14 +165,15 @@ rule all:
             for arch in _archs_for_sample(sample)
             for rep in range(1, REPS_BASELINE + 1)
         ],
-        # vs-golden (Gate #2): only when a previous-release golden is pinned, and
-        # never against itself. Compares every aligned cell to the pinned golden.
+        # vs-golden (Gate #2): only when a previous-release golden is pinned,
+        # never against itself, and only for samples the golden contains (see
+        # GOLDEN_SAMPLES — a golden predating a sample has no BAM to compare to).
         [
             f"runs/{FG_LABS_SHA}/{sample}/{arch}/rep-{rep}/compare/vs-golden.json"
             for sample in SAMPLES
             for arch in _archs_for_sample(sample)
             for rep in range(1, REPS + 1)
-            if GOLDEN_REF_SHA and GOLDEN_REF_SHA != FG_LABS_SHA
+            if GOLDEN_REF_SHA and GOLDEN_REF_SHA != FG_LABS_SHA and sample in GOLDEN_SAMPLES
         ]
         + [
             f"runs/{FG_LABS_SHA}/{sample}/{arch}/rep-{rep}/compare/vs-golden.json"
@@ -168,7 +181,7 @@ rule all:
             if not _is_meth_sample(sample)
             for arch in ARM_ARCHS
             for rep in range(1, REPS + 1)
-            if GOLDEN_REF_SHA and GOLDEN_REF_SHA != FG_LABS_SHA
+            if GOLDEN_REF_SHA and GOLDEN_REF_SHA != FG_LABS_SHA and sample in GOLDEN_SAMPLES
         ],
 
 
