@@ -20,7 +20,9 @@
 # Budgets are set just above the empirically observed drift at bwa-mem3
 # `bffae5a` (full bench, all archs x all samples x 5 reps): non-meth primary
 # drift peaks at panel-twist-5M 0.0586%; meth at 1.1227%. Tighten per-sample as
-# the numbers stabilize across releases.
+# the numbers stabilize across releases. The hic-1M / sbx-1M sample classes were
+# added later (bench #14) and first characterized at `a02fcb4` (v0.3.0): primary
+# drift hic-1M 0.0032%, sbx-1M 0.0004% — both well inside the 0.10% primary tier.
 divergences:
   - id: FG-PRIMARY-DRIFT
     pr: fg-labs/bwa-mem3#123
@@ -30,10 +32,12 @@ divergences:
       deterministic tie-break ordering (#123) shift MAPQ, CIGAR, or position on a
       small fraction of primary alignments relative to bwa-mem2 v2.2.1. Where
       each read maps is preserved; the affected reads differ in placement
-      detail, and the set varies by SIMD architecture.
+      detail, and the set varies by SIMD architecture. Applies equally to the
+      Hi-C (hic-1M, -5SP) and single-end SBX (sbx-1M) read classes — same
+      mechanism, drift well under the budget.
     affected: primary_alignment
     expected_drift_pct: 0.10
-    samples: [wgs-5M, wes-5M, panel-twist-5M, smoke-1M]
+    samples: [wgs-5M, wes-5M, panel-twist-5M, smoke-1M, hic-1M, sbx-1M]
 
   - id: FG-METH-DIVERGENCE
     pr: fg-labs/bwa-mem3#90
