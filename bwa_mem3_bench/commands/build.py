@@ -5,6 +5,8 @@ from __future__ import annotations
 import subprocess
 
 from bwa_mem3_bench import REPO_ROOT
+from bwa_mem3_bench import holodeck_ref as _pinned_holodeck_ref
+from bwa_mem3_bench import holodeck_repo as _pinned_holodeck_repo
 from bwa_mem3_bench import minibwa_sha as _pinned_minibwa_sha
 from bwa_mem3_bench.commands._run import run_cmd
 
@@ -29,6 +31,7 @@ def build(  # noqa: PLR0913
     *,
     fg_labs_sha: str,
     minibwa_sha: str | None = None,
+    holodeck_ref: str | None = None,
     upstream_tag: str = "v2.2.1",
     platforms: str = "linux/amd64,linux/arm64",
     image_name: str = "bwa-mem3-bench",
@@ -47,6 +50,10 @@ def build(  # noqa: PLR0913
         ``docker/build-arg-defaults.env`` (which must match the vendored
         ``vendor/minibwa`` submodule commit — the real source of truth).
         Pass explicitly only to override the label.
+    :param holodeck_ref: fg-labs/holodeck git ref the image cargo-installs
+        ``holodeck`` from (the truth simulator + ``holodeck eval``). Defaults to
+        the canonical pin in ``docker/build-arg-defaults.env``. Pass explicitly
+        to build against a different holodeck commit.
     :param upstream_tag: upstream bwa-mem2 tag to bake in (default v2.2.1).
     :param platforms: comma-separated platforms for buildx.
     :param image_name: image name, sans `:<tag>`. Use an ECR URI to tag for
@@ -96,6 +103,13 @@ def build(  # noqa: PLR0913
     # Default the MINIBWA_SHA label to the canonical pin (build-arg-defaults.env)
     # so a plain `build` matches the vendored submodule without an explicit flag.
     resolved_minibwa_sha = minibwa_sha or _pinned_minibwa_sha()
+
+    # Default the holodeck git ref to the canonical pin (build-arg-defaults.env);
+    # the Dockerfile cargo-installs `holodeck` from this ref of the public repo.
+    resolved_holodeck_ref = holodeck_ref or _pinned_holodeck_ref()
+    # The repo URL is always read from the same pin source so a change to
+    # build-arg-defaults.env can't leave build() sending a stale repository.
+    resolved_holodeck_repo = _pinned_holodeck_repo()
 
     # minibwa is vendored as a git submodule (private repo, can't clone in
     # the Dockerfile). Confirm it has been populated before invoking buildx.
@@ -153,6 +167,10 @@ def build(  # noqa: PLR0913
         "BWAMETH_VERSION=0.2.7",
         "--build-arg",
         f"MINIBWA_SHA={resolved_minibwa_sha}",
+        "--build-arg",
+        f"HOLODECK_REPO={resolved_holodeck_repo}",
+        "--build-arg",
+        f"HOLODECK_REF={resolved_holodeck_ref}",
         "--tag",
         f"{image_name}:{sha_tag}",
     ]
