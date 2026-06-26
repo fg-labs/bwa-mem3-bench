@@ -17,6 +17,15 @@ def _upload_reference(bucket: str, *, dry_run: bool) -> None:
     run_cmd(["bash", str(script), bucket], dry_run=dry_run)
 
 
+def _upload_minibwa_index(bucket: str, *, dry_run: bool) -> None:
+    """Invoke scripts/upload_reference.sh with the hg38-minibwa selector.
+
+    Used only on the local-only `private/minibwa-bench` branch.
+    """
+    script = REPO_ROOT / "scripts/upload_reference.sh"
+    run_cmd(["bash", str(script), bucket, "hg38-minibwa"], dry_run=dry_run)
+
+
 def _upload_sample(sample: str, bucket: str, *, dry_run: bool) -> None:
     srcs = sample_sources(bucket)
     if sample not in srcs:
@@ -86,15 +95,18 @@ def upload_data(
     holding the Broad hg38 bundle (``Homo_sapiens_assembly38.fasta`` plus
     bwa-mem2 indexes); see ``docs/data-setup.md``.
 
-    :param what: one of `all`, `references`, `data`, or a single sample name.
+    :param what: one of `all`, `references`, `data`, `minibwa-index`, or a
+        single sample name.
     :param bucket: destination S3 bucket. Defaults to the bucket from
         ``cdk/outputs.json`` (or the ``BWA_MEM3_BENCH_S3_BUCKET`` env var).
     :param dry_run: print commands only.
     """
     if what in ("all", "references"):
         _upload_reference(bucket, dry_run=dry_run)
+    if what in ("all", "minibwa-index"):
+        _upload_minibwa_index(bucket, dry_run=dry_run)
     if what in ("all", "data"):
         for sample in sample_sources(bucket):
             _upload_sample(sample, bucket, dry_run=dry_run)
-    elif what not in ("all", "references", "data"):
+    elif what not in ("all", "references", "data", "minibwa-index"):
         _upload_sample(what, bucket, dry_run=dry_run)

@@ -1,0 +1,3 @@
+[submodule "vendor/minibwa"]
+	path = vendor/minibwa
+	url = https://github.com/lh3/minibwa

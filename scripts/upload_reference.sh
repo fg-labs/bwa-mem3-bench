@@ -8,11 +8,14 @@
 # hg38 bundle and build the indexes.
 #
 # <which> is one of:
-#   hg38       — standard bwa-mem2 index (default)
-#   hg38-meth  — bwameth.c2t doubled reference + bwa-mem2 index (build with
-#                `bwa-mem2 index --meth <fasta>`; peaks ~150 GB RAM during
-#                FMI construction — use a 256 GB instance.)
-#   all        — both
+#   hg38         — standard bwa-mem2 index (default)
+#   hg38-meth    — bwameth.c2t doubled reference + bwa-mem2 index (build with
+#                  `bwa-mem2 index --meth <fasta>`; peaks ~150 GB RAM during
+#                  FMI construction — use a 256 GB instance.)
+#   hg38-minibwa — minibwa-format hg38 index (build with `minibwa index <fasta>`;
+#                  produces .l2b + .mbw sidecars). Used only on the local-only
+#                  `private/minibwa-bench` branch.
+#   all          — all of the above
 set -euo pipefail
 
 BUCKET="${1:?usage: $0 <bucket> [hg38|hg38-meth|all]; set REF_ROOT=/path/to/Homo_sapiens_assembly38}"
@@ -62,6 +65,23 @@ _upload_hg38_meth() {
         "${REF_ROOT}/" "${dest}"
 }
 
+_upload_hg38_minibwa() {
+    # minibwa index produces two sidecars: .l2b and .mbw. The plain .fasta is
+    # already uploaded by _upload_hg38; minibwa only needs its own sidecars
+    # alongside the existing bwa-mem2 ones in references/hg38/. Used only on
+    # the local-only `private/minibwa-bench` branch.
+    local dest="s3://${BUCKET}/references/hg38/"
+    if [[ ! -f "${REF_ROOT}/${FASTA_NAME}.l2b" ]]; then
+        echo "error: minibwa index (${FASTA_NAME}.l2b) missing." >&2
+        echo "build with: minibwa index ${REF_ROOT}/${FASTA_NAME}" >&2
+        exit 1
+    fi
+    aws s3 sync --exclude '*' \
+        --include "${FASTA_NAME}.l2b" \
+        --include "${FASTA_NAME}.mbw" \
+        "${REF_ROOT}/" "${dest}"
+}
+
 if [[ ! -f "${REF_ROOT}/${FASTA_NAME}" ]]; then
     echo "error: ${REF_ROOT}/${FASTA_NAME} not found" >&2
     echo "override REF_ROOT if the Broad hg38 bundle lives elsewhere" >&2
@@ -69,8 +89,9 @@ if [[ ! -f "${REF_ROOT}/${FASTA_NAME}" ]]; then
 fi
 
 case "${WHICH}" in
-    hg38)       _upload_hg38 ;;
-    hg38-meth)  _upload_hg38_meth ;;
-    all)        _upload_hg38; _upload_hg38_meth ;;
-    *)          echo "error: unknown <which>=${WHICH}" >&2; exit 2 ;;
+    hg38)         _upload_hg38 ;;
+    hg38-meth)    _upload_hg38_meth ;;
+    hg38-minibwa) _upload_hg38_minibwa ;;
+    all)          _upload_hg38; _upload_hg38_meth; _upload_hg38_minibwa ;;
+    *)            echo "error: unknown <which>=${WHICH}" >&2; exit 2 ;;
 esac

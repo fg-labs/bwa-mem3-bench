@@ -41,6 +41,15 @@ benchmark.db-shm
 # Internal session notes / plans (kept out of public repo).
 docs/superpowers/
 
+# Local-only (private/minibwa-bench branch): ad-hoc clone of fg-labs/bwa-mem3
+# for local profiling work. The submodule equivalent (vendor/minibwa) IS
+# tracked.
+vendor/bwa-mem2/
+vendor/bwa-mem3/
+# Per-phase timing TSVs / flamegraph artifacts produced during the perf
+# investigation; never want these in the repo.
+profile/
+
 # IDE
 .idea/
 .vscode/

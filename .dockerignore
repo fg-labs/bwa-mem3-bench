@@ -1,0 +1,39 @@
+# Keep host-built artifacts out of the docker build context. The Dockerfile
+# COPYs vendor/minibwa as source, then `make`s inside the per-arch builder.
+# Stale .o/.a/binary from a host `make` (e.g. macOS arm64 Mach-O) would
+# satisfy `make` mtime checks and ship as a wrong-arch binary. Exclude them.
+vendor/minibwa/*.o
+vendor/minibwa/*.a
+vendor/minibwa/minibwa
+vendor/minibwa/*.dSYM
+vendor/minibwa/.git
+
+# Local-only vendor clones (gitignored): full bwa-mem2 / bwa-mem3 source trees
+# kept for host profiling work. They are NOT build inputs (only vendor/minibwa
+# is COPYed), so exclude them from the context to avoid a needless upload and
+# any leak of local-only source.
+vendor/bwa-mem2/
+vendor/bwa-mem3/
+
+# Local build / cache directories that should never enter the image.
+.snakemake/
+target/
+.pixi/
+local-mirror/
+runs/
+baseline/
+golden/
+data/
+benchmark.db
+
+# Tooling caches.
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+__pycache__/
+*.pyc
+
+# Editor / VCS scratch.
+.git
+.gitmodules
+.DS_Store

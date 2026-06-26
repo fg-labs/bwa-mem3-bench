@@ -68,6 +68,17 @@ def test_target_smoke_does_not_auto_fill_archs() -> None:
     assert _captured_archs(mock_run.call_args_list) is None
 
 
+def test_target_minibwa_auto_fills_archs() -> None:
+    """``minibwa`` / ``minibwa_smoke`` iterate MINIBWA_ARCHS (= ARCHS minus m7i),
+    so they must auto-fill the full sweep; m7i is filtered out in the Snakefile."""
+    for target in ("minibwa", "minibwa_smoke"):
+        with patch.object(submit_module, "run_cmd") as mock_run:
+            submit_module.submit(fg_labs_sha="deadbeef", target=target)
+        archs = _captured_archs(mock_run.call_args_list)
+        assert archs is not None, f"expected ARCHS env override for target={target}"
+        assert {"c6a", "c7i", "c7a", "c7g", "c8g"} <= set(archs.split(","))
+
+
 def test_explicit_archs_override_wins_for_full_sweep_target() -> None:
     """Explicit ``--archs`` always takes precedence over the auto-fill."""
     with patch.object(submit_module, "run_cmd") as mock_run:

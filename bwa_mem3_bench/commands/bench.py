@@ -111,6 +111,7 @@ def speedup(
     *,
     fg_labs_sha: str,
     upstream_tag: str | None = None,
+    minibwa_sha: str | None = None,
     out: Path | None = None,
 ) -> None:
     """Emit the headline speedup table (fg-labs vs upstream baseline).
@@ -121,6 +122,9 @@ def speedup(
     :param fg_labs_sha: fg-labs SHA whose trials to compare.
     :param upstream_tag: upstream bwa-mem2 tag (e.g. ``v2.2.1``). Defaults to
         the value in ``config/defaults.yaml``.
+    :param minibwa_sha: when given, add ``minibwa_speedup`` / ``minibwa_s``
+        columns comparing against the ``minibwa-<sha>`` trials ingested by
+        ``cli collect`` (the pinned SHA is in ``docker/build-arg-defaults.env``).
     :param out: optional path to write the markdown to.
     """
     tag = _resolve_upstream_tag(upstream_tag)
@@ -129,6 +133,7 @@ def speedup(
         fg_labs_sha=fg_labs_sha,
         upstream_tag=tag,
         out_md=out,
+        minibwa_sha=minibwa_sha,
     )
     if out is None:
         print(text)

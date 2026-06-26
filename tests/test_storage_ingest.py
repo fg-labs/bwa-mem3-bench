@@ -10,9 +10,29 @@ from bwa_mem3_bench.storage.ingest import (
     _supp_json,
     baseline_sha_for,
     ingest_baseline,
+    ingest_minibwa,
     ingest_run,
+    minibwa_sha_for,
 )
 from bwa_mem3_bench.storage.sqlite import connect
+
+_TIMING_HEADER = "s\th:m:s\tmax_rss\tmax_vms\tmax_uss\tmax_pss\tio_in\tio_out\tmean_load\tcpu_time"
+
+
+def _write_minibwa_trial(root: Path, sha: str, cell: tuple[str, str, int], wall: float) -> None:
+    """Create a synthetic `minibwa/<sha>/<sample>/<arch>/rep-<n>/` timing tree.
+
+    ``cell`` is the ``(sample, arch, rep)`` triple.
+    """
+    sample, arch, rep = cell
+    bench = root / sha / sample / arch / f"rep-{rep}" / "benchmarks"
+    bench.mkdir(parents=True, exist_ok=True)
+    (bench / "timing.minibwa.tsv").write_text(
+        f"{_TIMING_HEADER}\n"
+        f"{wall:.3f}\t0:00:{int(wall):02d}\t1024.50\t2048.00\t900.00\t950.00\t"
+        "200.75\t50.25\t380.00\t75.00\n"
+    )
+
 
 FIXTURE = Path(__file__).parent / "fixtures" / "synthetic_run"
 BASELINE_FIXTURE = Path(__file__).parent / "fixtures" / "synthetic_baseline"
@@ -194,4 +214,77 @@ def test_ingest_baseline_missing_tool_returns_zero(db_path: Path) -> None:
     assert n == 0
     runs = conn.execute("SELECT COUNT(*) FROM runs").fetchone()
     assert runs == (0,)
+    conn.close()
+
+
+_MINIBWA_SHA = "a8cf4d336613672213dd2df89e9fe9cbc041c31e"
+EXPECTED_MINIBWA_TRIALS = 3  # 2 reps c8g + 1 rep c7i
+
+
+def test_minibwa_sha_for_prefixes() -> None:
+    assert minibwa_sha_for("abc123") == "minibwa-abc123"
+
+
+def test_ingest_minibwa_inserts_synthetic_sha_trials(db_path: Path, tmp_path: Path) -> None:
+    minibwa_root = tmp_path / "minibwa"
+    _write_minibwa_trial(minibwa_root, _MINIBWA_SHA, ("wes-5M", "c8g", 1), 30.0)
+    _write_minibwa_trial(minibwa_root, _MINIBWA_SHA, ("wes-5M", "c8g", 2), 31.0)
+    _write_minibwa_trial(minibwa_root, _MINIBWA_SHA, ("wes-5M", "c7i", 1), 40.0)
+
+    conn = connect(db_path)
+    n = ingest_minibwa(conn, minibwa_root=minibwa_root, minibwa_sha=_MINIBWA_SHA)
+    assert n == EXPECTED_MINIBWA_TRIALS
+
+    synthetic = minibwa_sha_for(_MINIBWA_SHA)
+    run = conn.execute(
+        "SELECT fg_labs_sha, status FROM runs WHERE fg_labs_sha = ?",
+        (synthetic,),
+    ).fetchone()
+    assert run == (synthetic, "minibwa")
+
+    rows = conn.execute(
+        "SELECT sample, arch, rep, wall_seconds, process_seconds FROM trials "
+        "WHERE fg_labs_sha = ? ORDER BY arch, rep",
+        (synthetic,),
+    ).fetchall()
+    # minibwa has no PROCESS() line → process_seconds is NULL.
+    assert rows == [
+        ("wes-5M", "c7i", 1, 40.0, None),
+        ("wes-5M", "c8g", 1, 30.0, None),
+        ("wes-5M", "c8g", 2, 31.0, None),
+    ]
+
+    # Wall-time-only probe: no comparisons created.
+    comp_count = conn.execute(
+        """
+        SELECT COUNT(*) FROM comparisons c
+        JOIN trials t ON t.id = c.trial_id
+        WHERE t.fg_labs_sha = ?
+        """,
+        (synthetic,),
+    ).fetchone()
+    assert comp_count == (0,)
+    conn.close()
+
+
+def test_ingest_minibwa_idempotent(db_path: Path, tmp_path: Path) -> None:
+    minibwa_root = tmp_path / "minibwa"
+    _write_minibwa_trial(minibwa_root, _MINIBWA_SHA, ("smoke-1M", "c8g", 1), 5.0)
+
+    conn = connect(db_path)
+    ingest_minibwa(conn, minibwa_root=minibwa_root, minibwa_sha=_MINIBWA_SHA)
+    ingest_minibwa(conn, minibwa_root=minibwa_root, minibwa_sha=_MINIBWA_SHA)
+    total = conn.execute(
+        "SELECT COUNT(*) FROM trials WHERE fg_labs_sha = ?",
+        (minibwa_sha_for(_MINIBWA_SHA),),
+    ).fetchone()
+    assert total == (1,)
+    conn.close()
+
+
+def test_ingest_minibwa_missing_sha_returns_zero(db_path: Path, tmp_path: Path) -> None:
+    conn = connect(db_path)
+    n = ingest_minibwa(conn, minibwa_root=tmp_path / "minibwa", minibwa_sha=_MINIBWA_SHA)
+    assert n == 0
+    assert conn.execute("SELECT COUNT(*) FROM runs").fetchone() == (0,)
     conn.close()
