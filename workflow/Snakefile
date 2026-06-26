@@ -126,8 +126,9 @@ localrules:
 
 
 def _is_meth_sample(sample_name: str) -> bool:
-    sample = CONFIG.samples[sample_name]
-    return sample.baseline_tool == "bwameth" or "--meth" in sample.fg_labs_flags
+    # Single meth predicate — delegates to Sample.is_meth (config-validated to
+    # agree with the sample's reference; see Sample.__post_init__).
+    return CONFIG.samples[sample_name].is_meth
 
 
 def _archs_for_sample(sample_name: str) -> list:

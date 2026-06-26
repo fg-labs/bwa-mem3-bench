@@ -135,6 +135,57 @@ def test_sample_invalid_layout_raises() -> None:
         _make_sample("bogus")
 
 
+def test_sample_is_meth_predicate() -> None:
+    """`is_meth` is the single meth predicate: true iff the bwameth baseline or
+    an fg-labs `--meth` flag is in play."""
+    assert _make_sample().is_meth is False  # bwa-mem2-upstream / no --meth
+    assert (
+        Sample(name="t", baseline_tool="bwameth", reference="hg38-meth", source="s/").is_meth
+        is True
+    )
+    assert (
+        Sample(
+            name="t",
+            baseline_tool="bwa-mem2-upstream",
+            reference="hg38-meth",
+            source="s/",
+            fg_labs_flags=["--meth"],
+        ).is_meth
+        is True
+    )
+
+
+def test_sample_meth_reference_invariant_enforced() -> None:
+    """A meth sample MUST use a `-meth` reference and a non-meth sample MUST NOT
+    — so reference-staging (keyed on the reference) and the `--meth` exec flag
+    (keyed on `is_meth`) can never desync from a hand-edited config."""
+    # meth tool but plain reference -> reject
+    with pytest.raises(ValueError, match="meth"):
+        Sample(name="t", baseline_tool="bwameth", reference="hg38", source="s/")
+    # --meth flag but plain reference -> reject
+    with pytest.raises(ValueError, match="meth"):
+        Sample(
+            name="t",
+            baseline_tool="bwa-mem2-upstream",
+            reference="hg38",
+            source="s/",
+            fg_labs_flags=["--meth"],
+        )
+    # non-meth tool but meth reference -> reject
+    with pytest.raises(ValueError, match="meth"):
+        Sample(name="t", baseline_tool="bwa-mem2-upstream", reference="hg38-meth", source="s/")
+    # consistent configs are accepted
+    Sample(name="t", baseline_tool="bwameth", reference="hg38-meth", source="s/")
+    Sample(name="t", baseline_tool="bwa-mem2-upstream", reference="hg38", source="s/")
+
+
+def test_config_samples_satisfy_meth_invariant() -> None:
+    """Every shipped sample already satisfies the meth/reference invariant."""
+    cfg = load_config(CONFIG_DIR)
+    for sample in cfg.samples.values():
+        assert sample.is_meth == sample.reference.endswith("-meth"), sample.name
+
+
 def test_load_config_includes_new_samples() -> None:
     cfg = load_config(CONFIG_DIR)
 
