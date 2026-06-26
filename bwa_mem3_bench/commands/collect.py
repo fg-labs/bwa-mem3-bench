@@ -7,7 +7,7 @@ from pathlib import Path
 
 from bwa_mem3_bench import DB_PATH, LOCAL_MIRROR_ROOT, REPO_ROOT, aws_config
 from bwa_mem3_bench.commands._run import run_cmd
-from bwa_mem3_bench.storage.ingest import ingest_baseline, ingest_run
+from bwa_mem3_bench.storage.ingest import ingest_baseline, ingest_minibwa, ingest_run
 from bwa_mem3_bench.storage.sqlite import connect
 from bwa_mem3_bench.workflow_config import load_config
 
@@ -47,19 +47,23 @@ def collect(
     """
     runs_root = LOCAL_MIRROR_ROOT / "runs"
     baseline_root = LOCAL_MIRROR_ROOT / "baseline"
+    minibwa_root = LOCAL_MIRROR_ROOT / "minibwa"
     run_dir = runs_root / fg_labs_sha
 
     if dry_run:
         _sync_prefix(f"s3://{bucket}/runs/{fg_labs_sha}/", str(run_dir), dry_run=True)
         _sync_prefix(f"s3://{bucket}/baseline/", str(baseline_root), dry_run=True)
+        _sync_prefix(f"s3://{bucket}/minibwa/", str(minibwa_root), dry_run=True)
         if ingest:
             print(f"[dry-run] ingest {run_dir} → {DB_PATH}")
         return
 
     run_dir.mkdir(parents=True, exist_ok=True)
     baseline_root.mkdir(parents=True, exist_ok=True)
+    minibwa_root.mkdir(parents=True, exist_ok=True)
     _sync_prefix(f"s3://{bucket}/runs/{fg_labs_sha}/", str(run_dir), dry_run=False)
     _sync_prefix(f"s3://{bucket}/baseline/", str(baseline_root), dry_run=False)
+    _sync_prefix(f"s3://{bucket}/minibwa/", str(minibwa_root), dry_run=False)
 
     if ingest:
         conn = connect(DB_PATH)
@@ -81,8 +85,31 @@ def collect(
                         f"ingested {m} baseline trials (bwa-mem2-{tool_version}) into {DB_PATH}",
                         file=sys.stderr,
                     )
+
+            # Ingest every minibwa SHA present in the synced cache. Each
+            # `minibwa/<sha>/` subtree is an independent tool pin; discovering
+            # them here (rather than threading a single SHA) means `collect`
+            # picks up whatever minibwa runs exist without extra arguments.
+            for sha in _minibwa_shas(minibwa_root):
+                k = ingest_minibwa(conn, minibwa_root=minibwa_root, minibwa_sha=sha)
+                if k:
+                    print(
+                        f"ingested {k} minibwa trials (minibwa-{sha}) into {DB_PATH}",
+                        file=sys.stderr,
+                    )
         finally:
             conn.close()
+
+
+def _minibwa_shas(minibwa_root: Path) -> list[str]:
+    """Discover minibwa SHAs present under the synced `minibwa/` mirror.
+
+    Each immediate subdirectory is a `<minibwa_sha>/` cache tree. Returns an
+    empty list when the mirror is absent (no minibwa runs collected yet).
+    """
+    if not minibwa_root.is_dir():
+        return []
+    return sorted(d.name for d in minibwa_root.iterdir() if d.is_dir())
 
 
 def _baseline_tool_versions() -> list[str]:

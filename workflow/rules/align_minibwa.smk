@@ -1,0 +1,99 @@
+"""Rule to run lh3/minibwa and emit an unsorted BAM.
+
+Mirrors `align_baseline` in shape (untimed page-cache prewarm, tricord-timed
+subprocess, `samtools view -b` output) but uses minibwa's index format
+(`.l2b` + `.mbw` sidecars) instead of the bwa-mem2 FMI.
+
+Caching model — keyed on the minibwa SHA, not the fg-labs SHA. minibwa is an
+independent third tool whose output depends only on its own source pin, so its
+results live under a dedicated `minibwa/<minibwa_sha>/` cache prefix (exactly
+as the upstream baseline lives under `baseline/bwa-mem2-<tag>/`). A re-run for
+a new fg-labs SHA reuses the cached minibwa BAMs/timings via the S3 storage
+plugin; only bumping `MINIBWA_SHA` (i.e. the vendored submodule) invalidates
+them and forces a re-alignment.
+
+Warm-symmetric timing — the timed region must exclude index load so the
+minibwa-vs-bwa-mem3 number reflects mapping work, not cold mmap fault-in.
+`align_fg_labs` excludes load via `bwa-mem2 shm`; `align_baseline` via a
+`cat`-into-page-cache prewarm. minibwa has no shm command and mmaps its index
+directly, so we mirror the baseline's prewarm: `cat` the `.l2b` + `.mbw`
+sidecars to /dev/null (untimed, before tricorder) so their pages are resident
+when the timed `minibwa map` run faults them in. Without this, minibwa would
+eat its cold index load inside the timed region while bwa-mem3 does not —
+apples-to-oranges, biased against minibwa, and sensitive to EBS throughput.
+
+Output equivalency vs bwa-mem2 is intentionally not measured (no compare-bams
+against these BAMs) — we are after wall time only.
+
+Used only on the local-only `minibwa-bench` branch.
+"""
+
+
+def _minibwa_ref_inputs(wc) -> list[str]:
+    """S3-relative paths to the minibwa-format reference sidecars.
+
+    Returned relative to the snakemake default-storage-prefix so the S3
+    storage plugin stages them before the shell body runs. The first entry
+    is always the plain .fasta; the shell references it via ``{input.ref[0]}``.
+    minibwa auto-appends ``.l2b``/``.mbw`` to the prefix it is given.
+    """
+    sample = CONFIG.samples[wc.sample]
+    ref = sample.reference
+    fasta_name = CONFIG.references[ref]["fasta_name"]
+    base = f"references/{ref}/{fasta_name}"
+    return [
+        base,  # plain .fasta — must be index 0 (path passed to minibwa)
+        f"{base}.l2b",
+        f"{base}.mbw",
+    ]
+
+
+rule align_minibwa:
+    input:
+        ref = _minibwa_ref_inputs,
+        fastqs = _query_fastqs,
+    output:
+        bam            = "minibwa/{minibwa_sha}/{sample}/{arch}/rep-{rep}/aligned.minibwa.bam",
+        timing         = "minibwa/{minibwa_sha}/{sample}/{arch}/rep-{rep}/benchmarks/timing.minibwa.tsv",
+        minibwa_stderr = "minibwa/{minibwa_sha}/{sample}/{arch}/rep-{rep}/benchmarks/minibwa.stderr.log",
+    resources:
+        batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
+        mem_mb = 28000,
+        container_image = lambda wc: image_for_arch(wc.arch),
+    params:
+        threads = CONFIG.threads,
+    shell:
+        # minibwa `map` emits SAM by default (since lh3/minibwa r387; `-f`
+        # selects PAF). The index prefix is the plain .fasta path
+        # (input.ref[0]); minibwa auto-appends .l2b/.mbw to find the sidecars.
+        # `{input.fastqs}` expands to [r1, r2] for paired samples or [r1] for
+        # single-end (e.g. SBX) — minibwa's CLI accepts either.
+        #
+        # Untimed page-cache prewarm: cat the .l2b/.mbw index sidecars to
+        # /dev/null so their pages are resident before the timed run — keeps
+        # the timed region symmetric with align_fg_labs (shm) / align_baseline
+        # (cat prewarm). `|| true` keeps the rule alive on a missing file
+        # (worst case: cold cache, still correct).
+        #
+        # Stderr is tee'd to BOTH the rule's output file (uploaded to S3 on
+        # success) AND the worker's stderr (captured by CloudWatch). The
+        # CloudWatch copy survives even when snakemake removes the rule's
+        # outputs on failure — essential for diagnosing failed runs.
+        # `set -o pipefail` inside the inner bash -c so a SIGKILL'd aligner
+        # (e.g. OOM, exit 137) fails the pipeline instead of samtools exiting
+        # 0 on a partial header stream and caching a header-only BAM.
+        r"""
+        set -euo pipefail
+        mkdir -p $(dirname {output.bam}) $(dirname {output.timing})
+        cat {input.ref[1]} {input.ref[2]} > /dev/null 2>/dev/null || true
+        tricorder --out {output.timing} -- \
+            bash -c 'set -o pipefail; minibwa map -t {params.threads} \
+                {input.ref[0]} {input.fastqs} \
+                2> >(tee "{output.minibwa_stderr}" >&2) \
+              | samtools view -@4 -b -o {output.bam} -'
+        # Defense in depth: reject a header-only BAM even if minibwa exited 0.
+        if [ "$(samtools view -c {output.bam})" -eq 0 ]; then
+            echo "ERROR: {output.bam} has 0 alignment records (minibwa crashed/OOM?)" >&2
+            exit 1
+        fi
+        """

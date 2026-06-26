@@ -16,8 +16,10 @@ COORDINATOR_JOB_DEF = _cfg.coordinator_job_definition
 # Targets whose `rule <target>` definition iterates over ARCHS (the Snakefile's
 # user-overridable arch list, defaulting to `core_arch`). Without explicit
 # --archs these silently shrink to a one-arch sweep, which is almost never the
-# intent for these targets — both are "every arch" rules.
-_FULL_SWEEP_TARGETS = frozenset({"all", "baseline_all"})
+# intent for these targets — they are all "every arch" rules. The minibwa
+# targets iterate MINIBWA_ARCHS (= ARCHS minus m7i), so passing full_archs is
+# correct: m7i is filtered out in the Snakefile.
+_FULL_SWEEP_TARGETS = frozenset({"all", "baseline_all", "minibwa", "minibwa_smoke"})
 
 
 def submit(  # noqa: PLR0913

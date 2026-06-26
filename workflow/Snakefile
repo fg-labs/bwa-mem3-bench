@@ -58,6 +58,7 @@ IMAGE = config.get("image_tag", f"bwa-mem3-bench:{FG_LABS_SHA}")
 # ---------------------------------------------------------------------------
 
 from bwa_mem3_bench import aws_config as _aws_config
+from bwa_mem3_bench import minibwa_sha as _minibwa_sha
 from bwa_mem3_bench.golden import golden_backed_samples
 
 _AWS = _aws_config.load()
@@ -88,17 +89,28 @@ def image_for_arch(arch_name: str) -> str:
 # eventually compare_vs_golden once a golden exists).
 BASELINE_ARCHS = [a for a in ARCHS if CONFIG.archs[a].platform == "linux/amd64"]
 ARM_ARCHS = [a for a in ARCHS if CONFIG.archs[a].platform == "linux/arm64"]
+# Archs the minibwa probe runs on (private/minibwa-bench branch only). Drops
+# m7i, which exists in full_archs only for meth-FMI memory headroom — minibwa
+# has no meth path. Every other arch in the user's selection is kept so
+# per-SIMD differences stay visible.
+MINIBWA_ARCHS = [a for a in ARCHS if a != "m7i"]
+# Pinned lh3/minibwa SHA (canonical source: docker/build-arg-defaults.env).
+# minibwa cache outputs live under `minibwa/<MINIBWA_SHA>/...`, so they are
+# only re-aligned when the vendored submodule (and this SHA) is bumped.
+MINIBWA_SHA = _minibwa_sha()
 
 RUNS_DIR = Path(f"runs/{FG_LABS_SHA}")
 
 wildcard_constraints:
-    sample = "[A-Za-z0-9_-]+",
-    arch   = "[a-z0-9]+",
-    rep    = r"\d+"
+    sample      = "[A-Za-z0-9_-]+",
+    arch        = "[a-z0-9]+",
+    rep         = r"\d+",
+    minibwa_sha = "[0-9a-f]+"
 
 include: "rules/align.smk"
 include: "rules/compare.smk"
 include: "rules/benchmark.smk"
+include: "rules/align_minibwa.smk"
 
 
 # Aggregator targets have no shell body, so they always run on the coordinator.
@@ -108,6 +120,8 @@ localrules:
     baseline_all,
     smoke,
     smoke_meth,
+    minibwa,
+    minibwa_smoke,
     emit_meta,
 
 
@@ -257,3 +271,63 @@ rule smoke_meth:
     input:
         "runs/{sha}/smoke-meth/m7i/rep-1/aligned.bam".format(sha=FG_LABS_SHA),
         "runs/{sha}/smoke-meth/m7i/rep-1/compare/vs-baseline.json".format(sha=FG_LABS_SHA),
+
+
+rule minibwa_smoke:
+    """End-to-end AWS smoke for the minibwa pipeline. Runs lh3/minibwa on
+    smoke-1M across every non-meth arch (1 rep each). Exercises the full
+    minibwa path — vendored-submodule build, S3 `.l2b`/`.mbw` index staging,
+    index prewarm, tricorder timing, `samtools view -b` — without paying for
+    the 5M-pair workload. The smoke also validates that the S3-resident
+    minibwa index is format-compatible with the pinned `MINIBWA_SHA`.
+
+    Outputs are cached under `minibwa/<MINIBWA_SHA>/...` (keyed on the minibwa
+    SHA, not the fg-labs SHA), so this only re-runs when `MINIBWA_SHA` changes.
+
+    Usage:
+        snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
+            -- minibwa_smoke
+    """
+    input:
+        [
+            f"minibwa/{MINIBWA_SHA}/smoke-1M/{a}/rep-1/aligned.minibwa.bam"
+            for a in MINIBWA_ARCHS
+        ],
+
+
+rule minibwa:
+    """Opt-in target: run lh3/minibwa as a runtime probe alongside the
+    bwa-mem2 benchmark surface, across every non-meth arch.
+
+    Sample × arch × rep matrix:
+      - smoke-1M, 1 rep, all non-meth archs (build / sanity)
+      - wgs-5M + wes-5M, REPS each, all non-meth archs (per-arch runtime
+        signal; both are standard paired-end so they exercise the same
+        comparison surface as the bwa-mem3 wgs/wes rows)
+
+    Outputs are cached under `minibwa/<MINIBWA_SHA>/<sample>/<arch>/rep-<r>/`
+    (aligned.minibwa.bam + benchmarks/timing.minibwa.tsv +
+    benchmarks/minibwa.stderr.log), keyed on the minibwa SHA so a re-run for a
+    new fg-labs SHA reuses them and only a `MINIBWA_SHA` bump re-aligns. No
+    compare-bams runs against these BAMs (wall time only); `cli collect`
+    ingests the timing TSVs into benchmark.db as the `minibwa` tool dimension.
+
+    The x86 archs run minibwa's SSE4.2 build while bwa-mem3 runs AVX2/AVX-512,
+    so x86 rows include an ISA-maturity gap (minibwa AVX is upstream WIP); the
+    NEON archs (c7g/c8g) are the clean same-ISA algorithmic comparison.
+
+    Usage:
+        snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
+            -- minibwa
+    """
+    input:
+        [
+            f"minibwa/{MINIBWA_SHA}/smoke-1M/{a}/rep-1/aligned.minibwa.bam"
+            for a in MINIBWA_ARCHS
+        ],
+        [
+            f"minibwa/{MINIBWA_SHA}/{sample}/{a}/rep-{r}/aligned.minibwa.bam"
+            for sample in ("wgs-5M", "wes-5M")
+            for a in MINIBWA_ARCHS
+            for r in range(1, REPS + 1)
+        ],

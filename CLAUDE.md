@@ -272,3 +272,75 @@ pixi run check            # all: rust fmt/clippy/test + python fmt/lint/type/tes
 pixi run cargo-test       # rust only
 pixi run py-test          # python only
 ```
+
+## minibwa integration (`minibwa-bench`)
+
+Adds [`lh3/minibwa`](https://github.com/lh3/minibwa) to the benchmark suite as
+a third aligner — a wall-time-only probe alongside fg-labs bwa-mem3 and the
+upstream bwa-mem2 baseline. Produces a defensible minibwa-vs-bwa-mem3 speed
+comparison across architectures.
+
+### What's added
+
+- **Submodule**: `vendor/minibwa` pinned at
+  `a8cf4d336613672213dd2df89e9fe9cbc041c31e` (lh3/minibwa master, r387).
+  Populate with `git submodule update --init` (requires lh3/minibwa access —
+  repo is private). The canonical SHA also lives in
+  `docker/build-arg-defaults.env` (`MINIBWA_SHA`) and is read by
+  `bwa_mem3_bench.minibwa_sha()` for cache-path keying and ingest; **keep the
+  two in sync** (bump the submodule, then the env file).
+- **Docker**: builder stage `COPY`s `vendor/minibwa` and `make`s it. Single
+  binary `/usr/local/bin/minibwa`; ksw2 uses NEON on arm64 (via `s2n-lite.h`)
+  and SSE4.2 on x86 — **minibwa has no AVX path yet** (upstream WIP), so x86
+  rows compare SSE4.2-minibwa against AVX2/AVX-512-bwa-mem3. No SIMD `sed`
+  patch: the GCC-12 `s2n-lite.h` NEON type mismatch earlier pins needed was
+  fixed upstream at this pin.
+- **CLI**: `build` takes an optional `--minibwa-sha` (defaults to the
+  `build-arg-defaults.env` pin) and fails fast if `vendor/minibwa/Makefile`
+  is missing.
+- **Index**: minibwa's `Homo_sapiens_assembly38.fasta.{l2b,mbw}` sidecars
+  live in `s3://<bucket>/references/hg38/` alongside the bwa-mem2 ones
+  (`upload-data --what minibwa-index`, or copied from
+  `s3://fg-alignment-indexes/Homo_sapiens_assembly38/`). Format-compatible
+  with the pinned SHA; the smoke validates this.
+- **Workflow**: `workflow/rules/align_minibwa.smk` defines `align_minibwa`
+  (untimed `.l2b`/`.mbw` page-cache prewarm — symmetric with `align_baseline`
+  so the timed region excludes index load — then tricord-timed `minibwa map
+  ... | samtools view -b`; `map` emits SAM by default since r387). Outputs are
+  **cached by minibwa SHA**, not fg-labs SHA: they land under
+  `minibwa/<minibwa_sha>/<sample>/<arch>/rep-<r>/` (mirroring the
+  `baseline/bwa-mem2-<tag>/` cache), so a re-run for a new fg-labs SHA reuses
+  them and **only a `MINIBWA_SHA` bump re-aligns**.
+- **Targets**: `rule minibwa_smoke` (smoke-1M × MINIBWA_ARCHS × 1 rep) and
+  `rule minibwa` (smoke-1M 1 rep + `{wgs-5M, wes-5M}` × MINIBWA_ARCHS × REPS).
+  `MINIBWA_ARCHS` = all archs except `m7i` (meth-only).
+- **Ingest + report**: `cli collect` syncs the `minibwa/` prefix and ingests
+  `timing.minibwa.tsv` into `benchmark.db` as the `minibwa` tool dimension
+  (synthetic SHA `minibwa-<sha>`). `bench speedup --minibwa-sha <sha>` adds
+  `minibwa_speedup` (= `fg_labs_s / minibwa_s`, `>1` = minibwa faster) and
+  `minibwa_s` columns. NEON archs (c7g/c8g) are the clean same-ISA comparison;
+  x86 carries the SSE4.2-vs-AVX ISA-maturity gap.
+
+### Submit recipe
+
+```bash
+git submodule update --init                    # populate vendor/minibwa
+pixi run python -m bwa_mem3_bench.cli build --fg-labs-sha <fg-sha> \
+    --image-name <ecr> --push                  # MINIBWA_SHA defaults to the pin
+pixi run python -m bwa_mem3_bench.cli submit --fg-labs-sha <fg-sha> --target minibwa_smoke
+# then, once the smoke passes:
+pixi run python -m bwa_mem3_bench.cli submit --fg-labs-sha <fg-sha> --target minibwa
+pixi run python -m bwa_mem3_bench.cli collect --fg-labs-sha <fg-sha>
+pixi run python -m bwa_mem3_bench.cli bench speedup --fg-labs-sha <fg-sha> \
+    --minibwa-sha a8cf4d336613672213dd2df89e9fe9cbc041c31e
+```
+
+### Intentionally NOT integrated
+
+- No `compare_*` rule — output equivalency is out of scope (wall time only).
+- No meth support — minibwa's `--meth` is a separate path; m7i is excluded
+  from `MINIBWA_ARCHS`.
+- No Hi-C / SBX single-end rows in the default `minibwa` target — `wgs-5M` and
+  `wes-5M` (standard paired-end) carry the headline cross-arch signal; the
+  rule itself handles single-end via `_query_fastqs` if a target adds it.
+

@@ -34,6 +34,11 @@ ARG BASELINE_ARCH=""
 # Used to A/B build-flag perf experiments (LTO, PGO, etc.) against the
 # same fg-labs SHA without re-tagging branches in upstream.
 ARG FG_LABS_MAKE_TARGET=""
+# minibwa is private (lh3); we vendor it as a git submodule at vendor/minibwa
+# instead of cloning at build time. MINIBWA_SHA is recorded for traceability
+# (image label / docs) but is not used by the build itself — the source pin
+# is whatever the submodule commit points at.
+ARG MINIBWA_SHA
 ARG SAMTOOLS_VERSION
 ARG BWA_VERSION
 ARG BWAMETH_VERSION
@@ -145,6 +150,23 @@ COPY tools/compare-bams /src/tools/compare-bams
 RUN cd /src && cargo build --release --bin compare-bams && \
     install -Dm755 /src/target/release/compare-bams /out/bin/compare-bams
 
+# Build lh3/minibwa from the vendored submodule (vendor/minibwa, populated on
+# the host via `git submodule update --init`). Single binary; ksw2 has a
+# portable SIMD layer (NEON on arm64 via s2n-lite.h, SSE4.2 on x86 — minibwa
+# has no AVX path yet). The submodule pin captures the source SHA; MINIBWA_SHA
+# is set only as a build-arg label for the resulting image.
+#
+# The aarch64 GCC-12 s2n-lite.h type-mismatch on _mm_add_epi32 / _mm_sub_epi32
+# (unsigned vaddq_u32 reinterpreted via signed vreinterpretq_u8_s32) that
+# earlier pins needed a sed patch for was fixed upstream as of the pinned SHA
+# (s2n-lite.h now uses vaddq_s32/vsubq_s32 consistently), so no patch is
+# applied — the source builds cleanly on GCC 12+ for both arches.
+COPY vendor/minibwa /build/minibwa
+RUN cd /build/minibwa && \
+    make clean && \
+    make -j"$(nproc)" && \
+    install -Dm755 minibwa /out/bin/minibwa
+
 # Install tricorder (fg-labs/tricord) for benchmarking the alignment subprocess
 # without snakemake's `benchmark:` directive. Tricord requires Rust 1.94+, so
 # install a separate stable toolchain rather than retraining 1.85 above. We
@@ -229,6 +251,11 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 # Workflow + config so snakemake can find them without a checkout.
 COPY workflow /opt/workflow
 COPY config /opt/config
+# build-arg-defaults.env carries the canonical MINIBWA_SHA, which the Snakefile
+# reads at parse time via bwa_mem3_bench.minibwa_sha() (REPO_ROOT is /opt in the
+# image). Without it every coordinator run — not just minibwa targets — would
+# fail to parse the Snakefile.
+COPY docker/build-arg-defaults.env /opt/docker/build-arg-defaults.env
 
 # Coordinator entrypoint: reads FG_LABS_SHA + TARGET env vars and invokes snakemake.
 # NOTE: no ENTRYPOINT — snakemake-registered worker jobs run `/bin/bash -c "..."`.

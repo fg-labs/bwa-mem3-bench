@@ -273,3 +273,96 @@ def ingest_baseline(
 
     conn.commit()
     return count
+
+
+# minibwa trials share the `trials` table with fg-labs and baseline trials,
+# distinguished by a synthetic `fg_labs_sha` of `minibwa-<minibwa_sha>`. This
+# keeps a single query path; `bench speedup --minibwa-sha` joins on it.
+MINIBWA_SHA_PREFIX = "minibwa-"
+
+
+def minibwa_sha_for(minibwa_sha: str) -> str:
+    """Return the synthetic `fg_labs_sha` used for minibwa trials of `minibwa_sha`."""
+    return f"{MINIBWA_SHA_PREFIX}{minibwa_sha}"
+
+
+def ingest_minibwa(
+    conn: sqlite3.Connection,
+    *,
+    minibwa_root: Path,
+    minibwa_sha: str,
+) -> int:
+    """Walk `<minibwa_root>/<minibwa_sha>/<sample>/<arch>/rep-<n>/` and populate DB.
+
+    minibwa trials are stored in the existing `trials` table with a synthetic
+    `fg_labs_sha` of `minibwa-<minibwa_sha>` so all existing queries keep
+    working. minibwa is a wall-time-only probe — there is no `compare/*.json`,
+    and its stderr is a different format than bwa-mem2's so no `PROCESS()` /
+    index-read time is parsed. Only `benchmarks/timing.minibwa.tsv` (the
+    tricorder TSV, same schema as `timing.tsv`) and optional
+    `benchmarks/meta.json` are read.
+
+    Returns the number of trial rows upserted; 0 (without raising) if the
+    minibwa tree for `minibwa_sha` is missing, since minibwa runs are optional
+    inputs to ``cli collect``.
+
+    :param conn: SQLite connection.
+    :param minibwa_root: local mirror of the S3 ``minibwa/`` prefix (i.e.
+        ``LOCAL_MIRROR_ROOT / "minibwa"``).
+    :param minibwa_sha: vendored lh3/minibwa commit SHA.
+    """
+    sha_dir = minibwa_root / minibwa_sha
+    if not sha_dir.is_dir():
+        return 0
+
+    synthetic_sha = minibwa_sha_for(minibwa_sha)
+    upsert_run(conn, fg_labs_sha=synthetic_sha, status="minibwa", commit=False)
+
+    count = 0
+    for sample_dir in sorted(d for d in sha_dir.iterdir() if d.is_dir()):
+        sample = sample_dir.name
+        for arch_dir in sorted(d for d in sample_dir.iterdir() if d.is_dir()):
+            arch = arch_dir.name
+            for rep_dir in sorted(d for d in arch_dir.iterdir() if d.is_dir()):
+                if not rep_dir.name.startswith("rep-"):
+                    continue
+                rep = int(rep_dir.name.split("-", 1)[1])
+
+                timing_path = rep_dir / "benchmarks" / "timing.minibwa.tsv"
+                meta_path = rep_dir / "benchmarks" / "meta.json"
+                if not timing_path.exists():
+                    continue
+                timing = _parse_timing_tsv(timing_path)
+                meta: dict[str, Any] = _parse_json_file(meta_path) if meta_path.exists() else {}
+
+                upsert_trial(
+                    conn,
+                    fg_labs_sha=synthetic_sha,
+                    sample=sample,
+                    arch=arch,
+                    rep=rep,
+                    wall_seconds=float(timing.get("s", 0.0)),
+                    max_rss_mb=float(timing.get("max_rss", 0.0)),
+                    cpu_time=float(timing.get("cpu_time", 0.0)),
+                    io_read_mb=float(timing.get("io_in", 0.0)),
+                    io_write_mb=float(timing.get("io_out", 0.0)),
+                    mean_load=float(timing.get("mean_load", 0.0)),
+                    reads_processed=0,
+                    instance_type=(
+                        str(meta.get("instance_type")) if meta.get("instance_type") else None
+                    ),
+                    availability_zone=(
+                        str(meta.get("availability_zone"))
+                        if meta.get("availability_zone")
+                        else None
+                    ),
+                    spot_price=None,
+                    status="ok",
+                    process_seconds=None,
+                    index_read_seconds=None,
+                    commit=False,
+                )
+                count += 1
+
+    conn.commit()
+    return count

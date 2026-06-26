@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 
 from bwa_mem3_bench import REPO_ROOT
+from bwa_mem3_bench import minibwa_sha as _pinned_minibwa_sha
 from bwa_mem3_bench.commands._run import run_cmd
 
 
@@ -27,6 +28,7 @@ def _ecr_login(image_name: str, *, dry_run: bool) -> None:
 def build(  # noqa: PLR0913
     *,
     fg_labs_sha: str,
+    minibwa_sha: str | None = None,
     upstream_tag: str = "v2.2.1",
     platforms: str = "linux/amd64,linux/arm64",
     image_name: str = "bwa-mem3-bench",
@@ -40,6 +42,11 @@ def build(  # noqa: PLR0913
     """Build the bwa-mem3-bench Docker image for a given fg-labs SHA.
 
     :param fg_labs_sha: fg-labs/bwa-mem3 commit SHA.
+    :param minibwa_sha: lh3/minibwa commit SHA recorded as the image's
+        ``MINIBWA_SHA`` build-arg label. Defaults to the canonical pin in
+        ``docker/build-arg-defaults.env`` (which must match the vendored
+        ``vendor/minibwa`` submodule commit — the real source of truth).
+        Pass explicitly only to override the label.
     :param upstream_tag: upstream bwa-mem2 tag to bake in (default v2.2.1).
     :param platforms: comma-separated platforms for buildx.
     :param image_name: image name, sans `:<tag>`. Use an ECR URI to tag for
@@ -86,6 +93,20 @@ def build(  # noqa: PLR0913
             f"--make-target must be one of {sorted(_supported_make_targets)}, got {make_target!r}"
         )
 
+    # Default the MINIBWA_SHA label to the canonical pin (build-arg-defaults.env)
+    # so a plain `build` matches the vendored submodule without an explicit flag.
+    resolved_minibwa_sha = minibwa_sha or _pinned_minibwa_sha()
+
+    # minibwa is vendored as a git submodule (private repo, can't clone in
+    # the Dockerfile). Confirm it has been populated before invoking buildx.
+    # Skipped on --dry-run so the print path works on a fresh clone.
+    minibwa_makefile = REPO_ROOT / "vendor" / "minibwa" / "Makefile"
+    if not dry_run and not minibwa_makefile.is_file():
+        raise FileNotFoundError(
+            f"vendored minibwa source missing at {minibwa_makefile.parent}; "
+            "run `git submodule update --init` (requires lh3/minibwa access)."
+        )
+
     if push:
         _ecr_login(image_name, dry_run=dry_run)
 
@@ -130,6 +151,8 @@ def build(  # noqa: PLR0913
         "BWA_VERSION=0.7.19",
         "--build-arg",
         "BWAMETH_VERSION=0.2.7",
+        "--build-arg",
+        f"MINIBWA_SHA={resolved_minibwa_sha}",
         "--tag",
         f"{image_name}:{sha_tag}",
     ]

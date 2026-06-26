@@ -39,7 +39,16 @@ def test_bench_subgroup_help() -> None:
 
 
 def test_subcommand_stubs_run_in_dry_mode() -> None:
-    r = _run(["build", "--fg-labs-sha", "abcdef1", "--dry-run"])
+    r = _run(
+        [
+            "build",
+            "--fg-labs-sha",
+            "abcdef1",
+            "--minibwa-sha",
+            "fedcba9",
+            "--dry-run",
+        ]
+    )
     assert r.returncode == 0, r.stderr
     assert "dry-run" in r.stdout.lower()
 

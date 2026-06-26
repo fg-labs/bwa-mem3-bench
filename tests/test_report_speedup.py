@@ -11,7 +11,7 @@ from bwa_mem3_bench.report.speedup import (
     generate_speedup,
     render_speedup_markdown,
 )
-from bwa_mem3_bench.storage.ingest import baseline_sha_for
+from bwa_mem3_bench.storage.ingest import baseline_sha_for, minibwa_sha_for
 from bwa_mem3_bench.storage.sqlite import connect, upsert_run, upsert_trial
 
 FG_LABS_SHA = "abc1234"
@@ -147,6 +147,80 @@ def test_generate_speedup_no_trials(tmp_path: Path) -> None:
     connect(db).close()
     text = render_speedup_markdown(db_path=db, fg_labs_sha="missing", upstream_tag=UPSTREAM_TAG)
     assert "No fg-labs trials" in text
+
+
+MINIBWA_SHA = "a8cf4d336613672213dd2df89e9fe9cbc041c31e"
+MINIBWA_WALL = 6.0  # half of FG_LABS_WALL ⇒ minibwa_speedup 2.0x on c6a
+EXPECTED_MINIBWA_SPEEDUP = FG_LABS_WALL / MINIBWA_WALL  # 2.0
+
+
+def _seed_minibwa(db_path: Path) -> None:
+    """Add a single minibwa trial (smoke-1M / c6a) to an already-seeded db."""
+    conn = connect(db_path)
+    synthetic = minibwa_sha_for(MINIBWA_SHA)
+    upsert_run(conn, fg_labs_sha=synthetic, status="minibwa")
+    upsert_trial(
+        conn,
+        fg_labs_sha=synthetic,
+        sample="smoke-1M",
+        arch="c6a",
+        rep=1,
+        wall_seconds=MINIBWA_WALL,
+        max_rss_mb=1024.0,
+        cpu_time=48.0,
+        io_read_mb=200.0,
+        io_write_mb=50.0,
+        mean_load=380.0,
+        reads_processed=0,
+        instance_type="c6a.4xlarge",
+        availability_zone="us-east-1a",
+        spot_price=None,
+        status="ok",
+    )
+    conn.close()
+
+
+def test_speedup_table_omits_minibwa_columns_by_default(tmp_path: Path) -> None:
+    db = tmp_path / "benchmark.db"
+    _seed_db(db)
+    df = build_speedup_table(db_path=db, fg_labs_sha=FG_LABS_SHA, upstream_tag=UPSTREAM_TAG)
+    assert "minibwa_speedup" not in df.columns
+    assert "minibwa_s" not in df.columns
+
+
+def test_speedup_table_adds_minibwa_columns_when_sha_given(tmp_path: Path) -> None:
+    db = tmp_path / "benchmark.db"
+    _seed_db(db)
+    _seed_minibwa(db)
+    df = build_speedup_table(
+        db_path=db,
+        fg_labs_sha=FG_LABS_SHA,
+        upstream_tag=UPSTREAM_TAG,
+        minibwa_sha=MINIBWA_SHA,
+    )
+    rows = df.set_index(["sample", "arch"])
+    assert rows.loc[("smoke-1M", "c6a"), "minibwa_s"] == MINIBWA_WALL
+    assert (
+        abs(rows.loc[("smoke-1M", "c6a"), "minibwa_speedup"] - EXPECTED_MINIBWA_SPEEDUP)
+        < SPEEDUP_TOL
+    )
+    # No minibwa trial for the ARM arch ⇒ NaN.
+    assert math.isnan(rows.loc[("smoke-1M", "c7g"), "minibwa_s"])
+
+
+def test_render_speedup_markdown_includes_minibwa_columns(tmp_path: Path) -> None:
+    db = tmp_path / "benchmark.db"
+    _seed_db(db)
+    _seed_minibwa(db)
+    md = render_speedup_markdown(
+        db_path=db,
+        fg_labs_sha=FG_LABS_SHA,
+        upstream_tag=UPSTREAM_TAG,
+        minibwa_sha=MINIBWA_SHA,
+    )
+    assert "minibwa_speedup | minibwa_s |" in md
+    assert f"minibwa-{MINIBWA_SHA}" in md
+    assert "2.00x" in md  # fg_labs 12.0 / minibwa 6.0
 
 
 def test_performance_report_includes_speedup_column(tmp_path: Path) -> None:

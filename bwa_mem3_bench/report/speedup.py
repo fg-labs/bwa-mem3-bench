@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from bwa_mem3_bench.storage.ingest import baseline_sha_for
+from bwa_mem3_bench.storage.ingest import baseline_sha_for, minibwa_sha_for
 from bwa_mem3_bench.storage.queries import query_df
 
 EM_DASH = "—"
@@ -60,6 +60,7 @@ def build_speedup_table(
     db_path: Path,
     fg_labs_sha: str,
     upstream_tag: str,
+    minibwa_sha: str | None = None,
 ) -> pd.DataFrame:
     """Return a DataFrame with both wall and compute speedups per (sample, arch).
 
@@ -67,6 +68,13 @@ def build_speedup_table(
     ``wall_speedup``, ``baseline_compute_s``, ``fg_labs_compute_s``,
     ``compute_speedup``. Compute columns are NaN when bwa stderr was not
     captured (pre-PROCESS()-parsing runs).
+
+    When ``minibwa_sha`` is given, two more columns are added: ``minibwa_s``
+    (min wall across reps for the ``minibwa-<sha>`` synthetic SHA) and
+    ``minibwa_speedup`` = ``fg_labs_s / minibwa_s`` (``>1`` means minibwa is
+    faster than bwa-mem3 on that cell). minibwa has no ``PROCESS()`` line, so
+    only the wall ratio is reported, and it is wall-symmetric: both the
+    minibwa and fg-labs timed regions exclude index load.
     """
     fg = _best_walls(db_path, fg_labs_sha).rename(
         columns={"wall_seconds": "fg_labs_s", "process_seconds": "fg_labs_compute_s"}
@@ -77,6 +85,14 @@ def build_speedup_table(
     merged = fg.merge(base, on=["sample", "arch"], how="left")
     merged["wall_speedup"] = merged["baseline_s"] / merged["fg_labs_s"]
     merged["compute_speedup"] = merged["baseline_compute_s"] / merged["fg_labs_compute_s"]
+
+    if minibwa_sha is not None:
+        mb = _best_walls(db_path, minibwa_sha_for(minibwa_sha))[
+            ["sample", "arch", "wall_seconds"]
+        ].rename(columns={"wall_seconds": "minibwa_s"})
+        merged = merged.merge(mb, on=["sample", "arch"], how="left")
+        merged["minibwa_speedup"] = merged["fg_labs_s"] / merged["minibwa_s"]
+
     return merged.sort_values(["sample", "arch"]).reset_index(drop=True)
 
 
@@ -97,12 +113,14 @@ def render_speedup_markdown(
     db_path: Path,
     fg_labs_sha: str,
     upstream_tag: str,
+    minibwa_sha: str | None = None,
 ) -> str:
     """Return the markdown speedup table as a string."""
     df = build_speedup_table(
         db_path=db_path,
         fg_labs_sha=fg_labs_sha,
         upstream_tag=upstream_tag,
+        minibwa_sha=minibwa_sha,
     )
 
     lines = [
@@ -131,6 +149,21 @@ def render_speedup_markdown(
         ]
     )
 
+    show_minibwa = minibwa_sha is not None and "minibwa_speedup" in df.columns
+    if show_minibwa:
+        lines.extend(
+            [
+                f"minibwa columns are vs `minibwa-{minibwa_sha}` (wall only, warm-symmetric):",
+                "",
+                "- **`minibwa_speedup`** — `fg_labs_s / minibwa_s`; `>1` means "
+                "minibwa is faster than bwa-mem3 on that cell. x86 archs run "
+                "minibwa's SSE4.2 build vs bwa-mem3's AVX2/AVX-512, so they carry "
+                "an ISA-maturity gap; the NEON archs (c7g/c8g) are the clean "
+                "same-ISA comparison.",
+                "",
+            ]
+        )
+
     headers = [
         "sample",
         "arch",
@@ -142,24 +175,24 @@ def render_speedup_markdown(
         "baseline_s",
     ]
     aligners = ["---", "---", "---:", "---:", "---:", "---:", "---:", "---:"]
+    if show_minibwa:
+        headers.extend(["minibwa_speedup", "minibwa_s"])
+        aligners.extend(["---:", "---:"])
     body_rows: list[str] = []
     for row in df.itertuples(index=False):
-        body_rows.append(
-            "| "
-            + " | ".join(
-                [
-                    str(row.sample),
-                    str(row.arch),
-                    _format_speedup(row.compute_speedup),
-                    _format_speedup(row.wall_speedup),
-                    _format_seconds(row.fg_labs_compute_s),
-                    _format_seconds(row.baseline_compute_s),
-                    _format_seconds(row.fg_labs_s),
-                    _format_seconds(row.baseline_s),
-                ]
-            )
-            + " |"
-        )
+        cells = [
+            str(row.sample),
+            str(row.arch),
+            _format_speedup(row.compute_speedup),
+            _format_speedup(row.wall_speedup),
+            _format_seconds(row.fg_labs_compute_s),
+            _format_seconds(row.baseline_compute_s),
+            _format_seconds(row.fg_labs_s),
+            _format_seconds(row.baseline_s),
+        ]
+        if show_minibwa:
+            cells.extend([_format_speedup(row.minibwa_speedup), _format_seconds(row.minibwa_s)])
+        body_rows.append("| " + " | ".join(cells) + " |")
 
     lines.append("| " + " | ".join(headers) + " |")
     lines.append("| " + " | ".join(aligners) + " |")
@@ -174,12 +207,14 @@ def generate_speedup(
     fg_labs_sha: str,
     upstream_tag: str,
     out_md: Path | None,
+    minibwa_sha: str | None = None,
 ) -> str:
     """Render the speedup table; write to `out_md` if given. Returns the markdown."""
     text = render_speedup_markdown(
         db_path=db_path,
         fg_labs_sha=fg_labs_sha,
         upstream_tag=upstream_tag,
+        minibwa_sha=minibwa_sha,
     )
     if out_md is not None:
         out_md.parent.mkdir(parents=True, exist_ok=True)
