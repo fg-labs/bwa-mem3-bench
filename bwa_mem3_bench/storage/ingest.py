@@ -10,12 +10,13 @@ from typing import Any
 
 from bwa_mem3_bench.storage import VS_BASELINE, VS_GOLDEN
 from bwa_mem3_bench.storage.sqlite import (
+    upsert_accuracy,
     upsert_comparison,
     upsert_run,
     upsert_trial,
 )
 
-_TIMING_MIN_LINES = 2  # header + one data row
+_MIN_TSV_LINES = 2  # header + at least one data row (timing, meth, etc.)
 
 # compare-bams supplementary-disagreement fields, stored as a JSON blob in
 # comparisons.supp_json. Absent on older comparison JSON (pre-supp-metrics).
@@ -59,7 +60,7 @@ def baseline_sha_for(tool_version: str) -> str:
 def _parse_timing_tsv(path: Path) -> dict[str, float]:
     """Parse Snakemake's benchmark directive output (single data row after header)."""
     text = path.read_text().strip().splitlines()
-    if len(text) < _TIMING_MIN_LINES:
+    if len(text) < _MIN_TSV_LINES:
         raise ValueError(f"malformed timing.tsv: {path}")
     header = text[0].split("\t")
     values = text[1].split("\t")
@@ -363,6 +364,203 @@ def ingest_minibwa(
                     commit=False,
                 )
                 count += 1
+
+    conn.commit()
+    return count
+
+
+_VARIANTS_SUFFIX = ".variants.tsv"
+
+
+def _na_float(cell: str) -> float | None:
+    """Parse a holodeck eval numeric cell, mapping the literal `NA` to None."""
+    return None if cell == "NA" else float(cell)
+
+
+def _parse_eval_txt(path: Path) -> dict[str, Any]:
+    """Parse a holodeck `<tool>.eval.txt` placement table.
+
+    Columns: ``mapq_bin total correct mismapped unmapped pct_correct
+    pct_mismapped pct_unmapped``; one row per MAPQ bin plus an ``ALL`` row.
+    Returns ``{"bins": {label: {...}}, "all": {...}}`` — the per-bin breakdown
+    (kept as JSON) plus the ``ALL`` row surfaced for the headline columns.
+    """
+    lines = path.read_text().strip().splitlines()
+    if len(lines) < _MIN_TSV_LINES:
+        raise ValueError(f"malformed eval.txt: {path}")
+    header = lines[0].split("\t")
+    bins: dict[str, dict[str, float]] = {}
+    all_row: dict[str, float] | None = None
+    for line in lines[1:]:
+        row = dict(zip(header, line.split("\t"), strict=True))
+        parsed = {
+            "total": int(row["total"]),
+            "correct": int(row["correct"]),
+            "mismapped": int(row["mismapped"]),
+            "unmapped": int(row["unmapped"]),
+            "pct_correct": float(row["pct_correct"]),
+            "pct_mismapped": float(row["pct_mismapped"]),
+            "pct_unmapped": float(row["pct_unmapped"]),
+        }
+        if row["mapq_bin"] == "ALL":
+            all_row = parsed
+        else:
+            bins[row["mapq_bin"]] = parsed
+    # The ALL row carries the headline placement metrics; a header-only or
+    # ALL-less file must fail rather than upsert NULL headline columns.
+    if all_row is None:
+        raise ValueError(f"malformed eval.txt missing ALL row: {path}")
+    return {"bins": bins, "all": all_row}
+
+
+def _parse_variants_tsv(path: Path) -> dict[str, Any]:
+    """Parse a holodeck `<tool>.variants.tsv`.
+
+    Columns: ``class confounded n_expected n_represented represented_pct
+    mean_mapq mean_as`` per class, then ``#``-prefixed footer lines
+    (``variant_bearing_reads``, ``md_concordant_pct``, ``nm_concordant_pct``).
+    ``mean_as`` and the concordance footers may be the literal ``NA``.
+    """
+    lines = path.read_text().strip().splitlines()
+    if not lines:
+        raise ValueError(f"empty variants.tsv: {path}")
+    header = lines[0].split("\t")
+    by_class: dict[str, dict[str, Any]] = {}
+    footer: dict[str, str] = {}
+    for line in lines[1:]:
+        if line.startswith("#"):
+            key, _, val = line[1:].partition("\t")
+            footer[key] = val
+            continue
+        row = dict(zip(header, line.split("\t"), strict=True))
+        by_class[row["class"]] = {
+            "confounded": row["confounded"] == "true",
+            "n_expected": int(row["n_expected"]),
+            "n_represented": int(row["n_represented"]),
+            "represented_pct": float(row["represented_pct"]),
+            "mean_mapq": float(row["mean_mapq"]),
+            "mean_as": _na_float(row["mean_as"]),
+        }
+    # These footer metrics feed the headline accuracy table, so a truncated or
+    # format-drifted file must fail loudly rather than masquerade as real data
+    # with placeholder zeros.
+    required = ("variant_bearing_reads", "md_concordant_pct", "nm_concordant_pct")
+    missing = [key for key in required if key not in footer]
+    if missing:
+        raise ValueError(f"malformed variants.tsv missing footer keys {missing}: {path}")
+    return {
+        "by_class": by_class,
+        "variant_bearing_reads": int(footer["variant_bearing_reads"]),
+        "md_concordant_pct": _na_float(footer["md_concordant_pct"]),
+        "nm_concordant_pct": _na_float(footer["nm_concordant_pct"]),
+    }
+
+
+def _parse_meth_tsv(path: Path) -> dict[str, Any] | None:
+    """Parse a holodeck `<tool>.meth.tsv`, or None for the non-meth placeholder.
+
+    Columns: ``n_cpg pearson_r rmse`` with a single data row (``pearson_r`` /
+    ``rmse`` may be ``NA``). Returns None for the empty file the eval rule
+    writes for non-meth samples (holodeck emits no `.meth.tsv` without --meth).
+    """
+    # Only a truly empty file is the non-meth placeholder the eval rule writes;
+    # a header-only/truncated file is a corrupt meth artifact and must fail
+    # rather than silently drop the methylation metrics.
+    text = path.read_text().strip()
+    if not text:
+        return None
+    lines = text.splitlines()
+    if len(lines) < _MIN_TSV_LINES:
+        raise ValueError(f"malformed meth.tsv: {path}")
+    cells = lines[1].split("\t")
+    return {
+        "n_cpg": int(cells[0]),
+        "pearson_r": _na_float(cells[1]),
+        "rmse": _na_float(cells[2]),
+    }
+
+
+def ingest_accuracy(
+    conn: sqlite3.Connection,
+    *,
+    runs_root: Path,
+    fg_labs_sha: str,
+) -> int:
+    """Walk `runs_root/<sha>/<sample>/<arch>/rep-<n>/eval/` and populate `accuracy`.
+
+    Each `eval/<tool>.variants.tsv` (with its sibling `.eval.txt` and `.meth.tsv`)
+    is one aligner-arm accuracy cell; all arms of a run share `fg_labs_sha` and
+    are disambiguated by the `tool` taken from the filename. Returns the number
+    of rows upserted; 0 (without raising) if the run tree is missing, since
+    accuracy is an optional input to ``cli collect`` (only the `accuracy` /
+    `accuracy_smoke` targets produce it).
+
+    :param conn: SQLite connection.
+    :param runs_root: local mirror of the S3 ``runs/`` prefix.
+    :param fg_labs_sha: fg-labs SHA whose run tree to ingest.
+    """
+    sha_dir = runs_root / fg_labs_sha
+    if not sha_dir.is_dir():
+        return 0
+
+    upsert_run(conn, fg_labs_sha=fg_labs_sha, status="complete", commit=False)
+
+    count = 0
+    for sample_dir in sorted(d for d in sha_dir.iterdir() if d.is_dir()):
+        sample = sample_dir.name
+        for arch_dir in sorted(d for d in sample_dir.iterdir() if d.is_dir()):
+            arch = arch_dir.name
+            for rep_dir in sorted(d for d in arch_dir.iterdir() if d.is_dir()):
+                if not rep_dir.name.startswith("rep-"):
+                    continue
+                rep = int(rep_dir.name.split("-", 1)[1])
+                eval_dir = rep_dir / "eval"
+                if not eval_dir.is_dir():
+                    continue
+                for variants_path in sorted(eval_dir.glob(f"*{_VARIANTS_SUFFIX}")):
+                    tool = variants_path.name[: -len(_VARIANTS_SUFFIX)]
+                    variants = _parse_variants_tsv(variants_path)
+                    eval_txt = eval_dir / f"{tool}.eval.txt"
+                    # `eval_accuracy` declares `.eval.txt` for every arm and
+                    # `upsert_accuracy` overwrites on conflict, so a missing sibling
+                    # means a partial/corrupt sync — fail rather than overwrite an
+                    # existing row with NULL placement metrics.
+                    if not eval_txt.exists():
+                        raise FileNotFoundError(f"missing eval output for accuracy arm: {eval_txt}")
+                    placement = _parse_eval_txt(eval_txt)
+                    # The eval rule writes a (possibly empty) `.meth.tsv` for every
+                    # arm, so a missing sibling is a partial sync — fail rather than
+                    # treat it as None and overwrite stored meth metrics with NULL.
+                    meth_path = eval_dir / f"{tool}.meth.tsv"
+                    if not meth_path.exists():
+                        raise FileNotFoundError(
+                            f"missing meth output for accuracy arm: {meth_path}"
+                        )
+                    meth = _parse_meth_tsv(meth_path)
+                    all_row = placement["all"]
+
+                    upsert_accuracy(
+                        conn,
+                        fg_labs_sha=fg_labs_sha,
+                        sample=sample,
+                        arch=arch,
+                        rep=rep,
+                        tool=tool,
+                        placement_total=all_row.get("total"),
+                        placement_correct_pct=all_row.get("pct_correct"),
+                        placement_mismapped_pct=all_row.get("pct_mismapped"),
+                        placement_unmapped_pct=all_row.get("pct_unmapped"),
+                        placement_json=json.dumps(placement),
+                        variant_bearing_reads=variants["variant_bearing_reads"],
+                        md_concordant_pct=variants["md_concordant_pct"],
+                        nm_concordant_pct=variants["nm_concordant_pct"],
+                        by_class_json=json.dumps(variants["by_class"]),
+                        meth_n_cpg=(meth["n_cpg"] if meth else None),
+                        meth_pearson_r=(meth["pearson_r"] if meth else None),
+                        meth_rmse=(meth["rmse"] if meth else None),
+                        commit=False,
+                    )
+                    count += 1
 
     conn.commit()
     return count
