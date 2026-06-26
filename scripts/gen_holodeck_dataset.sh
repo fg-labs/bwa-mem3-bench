@@ -63,7 +63,10 @@ case "$KIND" in
         coverage=(--coverage 30 --targets "$BED")
         ;;
     *-place)
-        coverage=(--coverage 1)
+        # ~0.5x genome-wide => ~5M read pairs over hg38, the bench-scale
+        # placement/MAPQ probe per the design spec. The point is breadth across
+        # diverse/hard loci, not depth, so coverage stays well below 1x.
+        coverage=(--coverage 0.5)
         ;;
 esac
 
