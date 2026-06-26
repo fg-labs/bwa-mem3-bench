@@ -26,6 +26,13 @@ class Sample:
     # the mate-SW reference windows and OOMs the cgroup.
     mem_flags: list[str] = field(default_factory=list)
     compare_options: dict[str, Any] = field(default_factory=dict)
+    # Truth-based accuracy sample (holodeck-simulated). When True, the sample's
+    # S3 `source` prefix also holds the truth artifacts (`golden.bam`,
+    # `truth.vcf`, and for meth samples `cpg-truth.bedGraph`) that the
+    # `eval_accuracy` rule grades the aligner BAM against. Truth samples are
+    # driven by the `accuracy` / `accuracy_smoke` targets, NOT the speed/
+    # concordance sweep (`rule all` / `baseline_all` exclude them).
+    truth: bool = False
 
     def __post_init__(self) -> None:
         if self.layout not in ("paired", "single"):
@@ -172,6 +179,25 @@ def _as_str_list(sample_name: str, key: str, value: Any) -> list[str]:
     return list(value)
 
 
+def _as_bool(sample_name: str, key: str, value: Any) -> bool:
+    """Validate a YAML flag value is a real ``bool`` before use.
+
+    YAML's implicit typing accepts ``true``/``false`` as booleans, but a quoted
+    or mistyped value (``truth: "yes"``, ``truth: 1``) would be silently coerced
+    to ``True`` by ``bool(...)``. Reject anything that is not already a bool so a
+    misconfiguration fails loudly at load time (mirrors ``_as_str_list``).
+
+    :param sample_name: sample the flag belongs to (for the error message).
+    :param key: config key being validated (e.g. ``"truth"``).
+    :param value: raw value read from YAML.
+    :return: the value as a ``bool``.
+    :raises ValueError: if ``value`` is not a bool.
+    """
+    if not isinstance(value, bool):
+        raise ValueError(f"sample {sample_name!r} `{key}` must be a boolean; got {value!r}")
+    return value
+
+
 def _read_yaml(path: Path) -> dict[str, Any]:
     with path.open("r") as fh:
         result: dict[str, Any] = yaml.safe_load(fh)
@@ -202,6 +228,7 @@ def load_config(config_dir: Path) -> WorkflowConfig:
             fg_labs_flags=_as_str_list(name, "fg_labs_flags", data.get("fg_labs_flags", [])),
             mem_flags=_as_str_list(name, "mem_flags", data.get("mem_flags", [])),
             compare_options=dict(data.get("compare_options", {})),
+            truth=_as_bool(name, "truth", data.get("truth", False)),
         )
 
     archs = {
