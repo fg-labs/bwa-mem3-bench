@@ -62,6 +62,13 @@ rule align_minibwa:
         container_image = lambda wc: image_for_arch(wc.arch),
     params:
         threads = CONFIG.threads,
+        # Sample `mem_flags` translated to minibwa's CLI (see
+        # Sample.minibwa_flags). Empty for most samples; for hic-1M this is
+        # `-5 -P --rescue=0` — the minibwa equivalent of the bwa `-5 -S -P` the
+        # bwa-mem3/bwa-mem2 arms use, so minibwa also skips the
+        # Hi-C-inappropriate mate rescue and the comparison stays
+        # apples-to-apples.
+        flags = lambda wc: " ".join(CONFIG.samples[wc.sample].minibwa_flags),
     shell:
         # minibwa `map` emits SAM by default (since lh3/minibwa r387; `-f`
         # selects PAF). The index prefix is the plain .fasta path
@@ -87,7 +94,7 @@ rule align_minibwa:
         mkdir -p $(dirname {output.bam}) $(dirname {output.timing})
         cat {input.ref[1]} {input.ref[2]} > /dev/null 2>/dev/null || true
         tricorder --out {output.timing} -- \
-            bash -c 'set -o pipefail; minibwa map -t {params.threads} \
+            bash -c 'set -o pipefail; minibwa map -t {params.threads} {params.flags} \
                 {input.ref[0]} {input.fastqs} \
                 2> >(tee "{output.minibwa_stderr}" >&2) \
               | samtools view -@4 -b -o {output.bam} -'
