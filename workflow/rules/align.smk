@@ -54,41 +54,61 @@ def _baseline_bwa_bin(sample_name: str) -> str:
 
 
 def _is_meth(sample_name: str) -> bool:
-    sample = CONFIG.samples[sample_name]
-    return sample.baseline_tool == "bwameth" or "--meth" in sample.fg_labs_flags
+    # Single meth predicate — delegates to Sample.is_meth (config-validated to
+    # agree with the sample's reference; see Sample.__post_init__).
+    return CONFIG.samples[sample_name].is_meth
 
 
 def _mem_mb_for(sample_name: str) -> int:
-    """Batch container memory. Bisulfite runs load the ~20 GB doubled .bwameth.c2t
-    FMI + ~6 GB packed reference into bwa-mem2; observed peak RSS is ~46 GB.
-    Meth samples run on m7i.4xlarge (64 GB host, ~62 GB container budget); 52 GB
-    leaves ~10 GB headroom for the ECS agent and page cache. Non-meth 28 GB is
-    plenty for standard hg38 (~10 GB FMI + 6 GB packed).
+    """Batch container memory — a hard cgroup OOM-kill line, sized to ~1.5x the
+    measured peak RSS (not to the host ceiling). An OOM kill yields a silent
+    truncated BAM that exits 0, so the cap wants margin above worst-case peak.
 
-    Note: when `bwa-mem2 shm` is used, the staged segment lives in /dev/shm
-    (tmpfs) and is accounted against this cgroup limit. The segment is the
-    bwa working set's memory, not on top of it — the FMI/.pac/.0123 buffers
-    that would have been heap-allocated by `bwa mem` are aliased into shm
-    instead. Total cgroup usage stays ~the same as the no-shm case.
+    The bwa-mem3 D3 `mem --meth` path seeds against the doubled `.meth` seed FMI
+    (~21 GB) and scores against the original reference by pac-fetching bases from
+    `.pac` (~1 GB) on demand (fg-labs/bwa-mem3#177) — so it loads NEITHER the
+    original `.0123` (~6.4 GB) NOR the seed `.0123`/`.pac` (~13/1.6 GB), and
+    `index --meth` doesn't even emit the original `.0123`. The resident index is
+    therefore ~22 GB (bwa-mem3 `memory-and-data-types` docs); on a 5M sample at
+    `-t 16` the per-batch working set adds ~5-10 GB, so peak RSS is ~30-32 GB
+    worst-case. (The smoke_meth `9c4bbf2` tricorder max_rss of ~21.7 GB is just
+    the resident index — smoke's batch is tiny. An earlier ~52-55 GB figure was
+    the pre-#177 `feat/meth-d3-seeding` branch, which still loaded the original
+    `.0123` plus both seed files.) 48 GB ~= 1.5x the ~32 GB worst-case peak and
+    leaves headroom under the ~62 GB container budget on m7i.4xlarge (64 GB host); meth
+    is pinned there because its working set exceeds the 32 GB RAM of the non-meth
+    *.4xlarge hosts. Non-meth 28 GB is plenty for standard hg38 (~15 GB FMI/.pac
+    resident + per-batch).
+
+    Note: for non-meth, `bwa-mem2 shm` stages the segment in /dev/shm (tmpfs),
+    accounted against this cgroup limit — but it aliases the FMI/.pac buffers
+    `bwa mem` would otherwise heap-allocate, so total usage is ~the same as the
+    no-shm case. Meth (D3) uses `shm --meth` to stage the seed-only `.meth`
+    FM-index, then pac-fetches the original `.pac` from page cache.
     """
-    return 52000 if _is_meth(sample_name) else 28000
+    return 48000 if _is_meth(sample_name) else 28000
 
 
 def _shm_size_mb_for(sample_name: str) -> int:
     """/dev/shm sizing for `bwa-mem2 shm` to stage the in-memory index.
 
-    The packed segment holds the FMI buffers (from .bwt.2bit.64, ~10 GB for
-    hg38), .pac (~0.75 GB), and .0123 (~6.4 GB) — total ~17 GB for hg38, and
-    ~2x that for the doubled .bwameth.c2t meth reference. We size /dev/shm
-    with a few GB of headroom so the segment header / section table and any
-    minor bookkeeping have room. Plumbed into the worker job definition's
+    Non-meth: the segment holds the FMI buffers (from .bwt.2bit.64, ~10 GB for
+    hg38), .pac (~0.75 GB), and .0123 (~6.4 GB) — total ~17 GB for hg38.
+
+    Meth (D3) uses `shm --meth`, which stages the SEED-only `.meth` FM-index +
+    contig metadata (~21 GB on hg38; the seed PAC/.0123 are omitted, and the
+    original `.pac` is pac-fetched from disk, not staged). So meth needs the
+    larger /dev/shm.
+
+    Either way we size /dev/shm with a few GB of headroom for the segment header
+    / section table. Plumbed into the worker job definition's
     linuxParameters.sharedMemorySize via our snakemake-executor-plugin-aws-batch
-    fork (default ECS /dev/shm is only 64 MB).
+    fork (default ECS /dev/shm is 64 MB).
     """
     return 40960 if _is_meth(sample_name) else 20480
 
 
-def _ref_inputs(wc) -> list[str]:
+def _ref_inputs(wc, *, meth_index: str) -> list[str]:
     """S3-relative paths to every reference-sidecar file the aligner needs.
 
     Paths are returned relative to the snakemake default-storage-prefix
@@ -102,21 +122,48 @@ def _ref_inputs(wc) -> list[str]:
     ref = sample.reference
     fasta_name = CONFIG.references[ref]["fasta_name"]
     base = f"references/{ref}/{fasta_name}"
-    if ref == "hg38-meth":
-        # For bisulfite, only the doubled `.bwameth.c2t` reference + its
-        # bwa-mem2 sidecars are uploaded. bwa-mem2.fg-labs --meth and bwameth.py
-        # both auto-append ".bwameth.c2t" to the .fasta path they're given.
-        meth_base = f"{base}.bwameth.c2t"
-        return [
+    # Key the meth-sidecar branch on the same predicate as `params.is_meth`
+    # (Sample.is_meth), not on the reference string — config validation
+    # guarantees `is_meth == reference.endswith("-meth")`, so staging and the
+    # `--meth` exec flag stay in lockstep.
+    if sample.is_meth:
+        # Two bisulfite index families coexist in references/hg38-meth/; which
+        # one is staged depends on the aligner (`meth_index`):
+        #   - "c2t" (bwameth.py baseline): the legacy doubled C->T/G->A
+        #     reference + upstream bwa-mem2 sidecars (incl. .0123). This is the
+        #     D1 contract — bwameth.py wraps upstream bwa-mem2 and aligns
+        #     pre-converted reads against the collapsed `.bwameth.c2t` index.
+        #   - "d3" (bwa-mem3 `mem --meth`): the *original* 4-letter index
+        #     (scored against, pac-fetched — no .0123) PLUS the `.meth.*`
+        #     converted seed index. fg-labs/bwa-mem3#174 (D3) seeds in 3-letter
+        #     space but scores against the original reference, so it needs the
+        #     original index + the `<ref>.meth.*` seed index and must be given
+        #     the *original* prefix (passing a `.bwameth.c2t` path now errors).
+        common = [
             base,  # plain .fasta — must be index 0 (the path passed to aligner)
             f"{base}.fai",
             base.replace(".fasta", ".dict"),
-            meth_base,
-            f"{meth_base}.0123",
-            f"{meth_base}.amb",
-            f"{meth_base}.ann",
-            f"{meth_base}.bwt.2bit.64",
-            f"{meth_base}.pac",
+        ]
+        if meth_index == "c2t":
+            c2t = f"{base}.bwameth.c2t"
+            return common + [
+                c2t,
+                f"{c2t}.0123",
+                f"{c2t}.amb",
+                f"{c2t}.ann",
+                f"{c2t}.bwt.2bit.64",
+                f"{c2t}.pac",
+            ]
+        return common + [
+            f"{base}.amb",
+            f"{base}.ann",
+            f"{base}.bwt.2bit.64",
+            f"{base}.pac",
+            f"{base}.meth.fa",
+            f"{base}.meth.amb",
+            f"{base}.meth.ann",
+            f"{base}.meth.bwt.2bit.64",
+            f"{base}.meth.pac",
         ]
     # Non-meth: plain bwa-mem2 index sidecars.
     return [
@@ -147,7 +194,7 @@ def _query_fastqs(wc):
 
 rule align_fg_labs:
     input:
-        ref = _ref_inputs,
+        ref = lambda wc: _ref_inputs(wc, meth_index="d3"),
         fastqs = _query_fastqs,
     output:
         bam        = "runs/{sha}/{sample}/{arch}/rep-{rep}/aligned.bam",
@@ -166,24 +213,38 @@ rule align_fg_labs:
         threads = CONFIG.threads,
         extra   = lambda wc: _fg_labs_flags(wc.sample),
         mem_flags = lambda wc: _mem_flags(wc.sample),
-        # `bwa-mem2 mem --meth` auto-appends `.bwameth.c2t` to the given prefix
-        # to find its index sidecars. `bwa-mem2 shm` does not — it loads the
-        # literal prefix's index. So for meth runs the shm prefix has to be
-        # the doubled-c2t prefix; mem still gets the plain prefix and
-        # auto-appends. For non-meth they're the same.
-        shm_prefix = lambda wc, input: (
-            f"{input.ref[0]}.bwameth.c2t" if _is_meth(wc.sample) else input.ref[0]
-        ),
+        is_meth = lambda wc: "1" if _is_meth(wc.sample) else "0",
     shell:
-        r"""
-        set -euo pipefail
-        mkdir -p $(dirname {output.bam}) $(dirname {output.timing})
-        bwa-mem2.fg-labs shm {params.shm_prefix}
-        trap 'bwa-mem2.fg-labs shm -d || true' EXIT
+        # Both paths stage the index into /dev/shm via `bwa-mem2 shm` so the
+        # FMI load is pinned and excluded from the timed region; `mem`
+        # auto-attaches. They differ only in the `--meth` flag:
+        #
+        #   Non-meth — `shm <ref>` stages the single hg38 index; `mem <ref>`.
+        #
+        #   Meth (D3) — `shm --meth <ref>` stages the seed-only `.meth` FM-index
+        #   (~21 GB; the seed PAC/.0123 are never staged — mem extends against the
+        #   ORIGINAL reference, not the seed). `mem --meth <ref>` (`--meth` comes
+        #   from {params.extra}) auto-attaches and pac-fetches the original bases
+        #   from `<ref>.pac`. That `.pac` is NOT in the shm segment, so we warm it
+        #   into page cache (untimed) to keep the timed region load-free. mem is
+        #   given the plain `<ref>` prefix; a `.bwameth.c2t` path would now error
+        #   (fg-labs/bwa-mem3#174). `shm --meth`: fg-labs/bwa-mem3 shm.md.
+        #
         # `set -o pipefail` inside the inner bash -c so an aligner that dies
         # (e.g. OOM-killed -> SIGKILL, exit 137) fails the pipeline instead of
         # samtools silently exiting 0 on the partial header stream and caching a
         # header-only BAM as a "successful" alignment.
+        r"""
+        set -euo pipefail
+        mkdir -p $(dirname {output.bam}) $(dirname {output.timing})
+        if [ "{params.is_meth}" = "1" ]; then
+            bwa-mem2.fg-labs shm --meth {input.ref[0]}
+            trap 'bwa-mem2.fg-labs shm -d || true' EXIT
+            cat {input.ref[0]}.pac > /dev/null 2>/dev/null || true
+        else
+            bwa-mem2.fg-labs shm {input.ref[0]}
+            trap 'bwa-mem2.fg-labs shm -d || true' EXIT
+        fi
         tricorder --out {output.timing} -- \
             bash -c 'set -o pipefail; bwa-mem2.fg-labs mem -t {params.threads} {params.mem_flags} {params.extra} \
                 {input.ref[0]} {input.fastqs} 2>"{output.bwa_stderr}" \
@@ -218,7 +279,10 @@ rule align_baseline:
     For meth samples the .bwameth.c2t-suffixed files are warmed instead.
     """
     input:
-        ref = _ref_inputs,
+        # bwameth.py is a D1 (3-letter) aligner wrapping upstream bwa-mem2, so
+        # the baseline always stages the legacy `.bwameth.c2t` index family —
+        # NOT the bwa-mem3 D3 original+`.meth.*` set (see `_ref_inputs`).
+        ref = lambda wc: _ref_inputs(wc, meth_index="c2t"),
         fastqs = _query_fastqs,
     output:
         bam        = "baseline/{tool_version}/{sample}/{arch}/rep-{rep}/aligned.bam",

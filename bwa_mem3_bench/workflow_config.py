@@ -33,6 +33,29 @@ class Sample:
                 f"sample {self.name!r} has invalid layout {self.layout!r}; "
                 f"expected 'paired' or 'single'"
             )
+        # Single-predicate invariant: a methylation sample MUST use a `-meth`
+        # reference and a non-meth sample MUST NOT. The alignment rule stages
+        # the reference index off `sample.reference` but passes the `--meth`
+        # exec flag off `is_meth` (baseline_tool / fg_labs_flags); if a
+        # hand-edited config let those disagree, the pipeline would stage the
+        # wrong index and pass mismatched args (missing `.0123` / bad seed index
+        # at runtime). Enforce consistency here so the two can never diverge.
+        if self.is_meth != self.reference.endswith("-meth"):
+            raise ValueError(
+                f"sample {self.name!r} has inconsistent methylation config: "
+                f"is_meth={self.is_meth} (baseline_tool={self.baseline_tool!r}, "
+                f"fg_labs_flags={self.fg_labs_flags}) but reference={self.reference!r}. "
+                f"Meth samples must use a '-meth' reference and non-meth samples must not."
+            )
+
+    @property
+    def is_meth(self) -> bool:
+        """Single source of truth for whether this is a methylation
+        (bisulfite/EM-seq) sample: the bwameth baseline or an fg-labs `--meth`
+        flag. The workflow's meth predicates and the reference-staging branch
+        all key off this, so reference selection and the `--meth` exec flag
+        cannot disagree (enforced in `__post_init__`)."""
+        return self.baseline_tool == "bwameth" or "--meth" in self.fg_labs_flags
 
     @property
     def fastq_names(self) -> tuple[str, ...]:
