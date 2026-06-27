@@ -302,9 +302,11 @@ rule minibwa:
 
     Sample × arch × rep matrix:
       - smoke-1M, 1 rep, all non-meth archs (build / sanity)
-      - wgs-5M + wes-5M, REPS each, all non-meth archs (per-arch runtime
-        signal; both are standard paired-end so they exercise the same
-        comparison surface as the bwa-mem3 wgs/wes rows)
+      - every non-meth bench sample, REPS each, all non-meth archs: wgs-5M +
+        wes-5M (standard PE), panel-twist-5M (hybrid panel), hic-1M (Hi-C PE),
+        and sbx-1M (Roche SBX single-end). Together these give minibwa a row
+        against bwa-mem3/bwa-mem2 on every dataset it can align. The meth
+        samples are excluded — minibwa has no bisulfite path.
 
     Outputs are cached under `minibwa/<MINIBWA_SHA>/<sample>/<arch>/rep-<r>/`
     (aligned.minibwa.bam + benchmarks/timing.minibwa.tsv +
@@ -328,7 +330,11 @@ rule minibwa:
         ],
         [
             f"minibwa/{MINIBWA_SHA}/{sample}/{a}/rep-{r}/aligned.minibwa.bam"
-            for sample in ("wgs-5M", "wes-5M")
+            # Every non-meth bench sample minibwa can align: the standard
+            # paired-end pair (wgs/wes), the hybrid panel, Hi-C PE, and Roche
+            # SBX (single-end — handled by `align_minibwa` via `_query_fastqs`).
+            # minibwa has no bisulfite path, so the meth samples are excluded.
+            for sample in ("wgs-5M", "wes-5M", "panel-twist-5M", "hic-1M", "sbx-1M")
             for a in MINIBWA_ARCHS
             for r in range(1, REPS + 1)
         ],

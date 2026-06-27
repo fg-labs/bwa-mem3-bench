@@ -68,6 +68,38 @@ class Sample:
             return ("r1.fq.gz",)
         return ("r1.fq.gz", "r2.fq.gz")
 
+    @property
+    def minibwa_flags(self) -> list[str]:
+        """`mem_flags` translated to their ``minibwa map`` equivalents.
+
+        `mem_flags` are bwa-mem CLI flags applied to the bwa-mem2 / bwa-mem3
+        arms. minibwa's CLI is mostly bwa-compatible but not identical, so the
+        minibwa probe must run the *equivalent* flags rather than the bwa ones
+        verbatim — otherwise the comparison is not apples-to-apples (e.g. Hi-C's
+        mate rescue would stay ON for minibwa while it is OFF for the others).
+
+        Translation (the only flags we use today):
+          - ``-5`` / ``-P`` -> identical in minibwa (PRIMARY5 / NO_PAIRING).
+          - ``-S`` (skip mate rescue) -> ``--rescue=0`` (minibwa has no ``-S``;
+            mate rescue is a count, 0 disables it).
+
+        An unrecognized flag raises rather than being silently dropped or passed
+        through to a minibwa that would reject it — a new `mem_flags` entry must
+        be given an explicit minibwa mapping here.
+        """
+        translated: list[str] = []
+        for flag in self.mem_flags:
+            if flag in ("-5", "-P"):
+                translated.append(flag)
+            elif flag == "-S":
+                translated.append("--rescue=0")
+            else:
+                raise ValueError(
+                    f"sample {self.name!r}: mem_flag {flag!r} has no minibwa "
+                    f"equivalent mapping in Sample.minibwa_flags; add one"
+                )
+        return translated
+
 
 @dataclass(frozen=True)
 class Arch:

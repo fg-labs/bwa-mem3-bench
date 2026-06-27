@@ -1,5 +1,6 @@
 """Unit tests for workflow_config loader."""
 
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -211,6 +212,24 @@ def test_mem_flags_default_empty_and_hic_uses_canonical_hic_flags() -> None:
     # smallest-coord split as primary. Disabling mate rescue also removes the
     # huge mate-SW windows that OOM'd ARM workers.
     assert cfg.samples["hic-1M"].mem_flags == ["-5", "-S", "-P"]
+
+
+def test_minibwa_flags_translate_mem_flags() -> None:
+    cfg = load_config(CONFIG_DIR)
+    # Samples with no mem_flags get no minibwa flags.
+    assert cfg.samples["wgs-5M"].minibwa_flags == []
+    assert cfg.samples["sbx-1M"].minibwa_flags == []
+    # hic-1M's bwa `-5 -S -P` maps to minibwa `-5 -P --rescue=0` (minibwa has
+    # no `-S`; mate rescue is disabled with `--rescue=0`), so the minibwa Hi-C
+    # run skips mate rescue exactly like the bwa-mem3 / bwa-mem2 arms.
+    assert cfg.samples["hic-1M"].minibwa_flags == ["-5", "--rescue=0", "-P"]
+
+
+def test_minibwa_flags_rejects_unmapped_flag() -> None:
+    cfg = load_config(CONFIG_DIR)
+    bad = dataclasses.replace(cfg.samples["wgs-5M"], mem_flags=["-Z"])
+    with pytest.raises(ValueError, match="no minibwa"):
+        _ = bad.minibwa_flags
 
 
 def test_as_str_list_accepts_list_of_strings() -> None:
