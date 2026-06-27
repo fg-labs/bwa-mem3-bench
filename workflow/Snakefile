@@ -181,21 +181,26 @@ def _accuracy_targets(samples: list, reps: int) -> list:
         truth + FASTQs with its collapsed sibling).
       - baseline: the primary (non-genomic) arm only — bwa-mem2 upstream for
         non-meth, bwameth for meth.
-      - minibwa: non-meth primary arms only (minibwa has no --meth path).
+      - minibwa: every primary (non-genomic) arm, meth included. On meth samples
+        minibwa is the naive 4-letter aligner (no bisulfite mode): it aligns the
+        EM-seq reads against the plain DNA index and is scored on placement +
+        variant representation (methylation correlation is NA — no XM tags), so
+        the meth comparison has all four arms (minibwa / bwameth / D3-collapsed /
+        D3-genomic). The genomic D3 arm is a re-scored sibling sample, so it
+        carries only the fg-labs output — baseline and minibwa would be byte-for-
+        byte identical to the collapsed arm's.
     Requesting one of the eval rule's three outputs pulls the whole rule.
     """
     targets = []
     for sample in samples:
         arch = _accuracy_arch(sample)
-        meth = _is_meth_sample(sample)
         genomic = "genomic" in CONFIG.samples[sample].fg_labs_flags
         for rep in range(1, reps + 1):
             base = f"runs/{FG_LABS_SHA}/{sample}/{arch}/rep-{rep}/eval"
             targets.append(f"{base}/fg-labs.variants.tsv")
             if not genomic:
                 targets.append(f"{base}/baseline.variants.tsv")
-                if not meth:
-                    targets.append(f"{base}/minibwa.variants.tsv")
+                targets.append(f"{base}/minibwa.variants.tsv")
     return targets
 
 
