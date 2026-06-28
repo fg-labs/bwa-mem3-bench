@@ -36,6 +36,13 @@ def test_bench_subgroup_help() -> None:
     r = _run(["bench", "--help"])
     assert r.returncode == 0, r.stderr
     assert "summary" in r.stdout
+    assert "accuracy" in r.stdout
+
+
+def test_bench_accuracy_help_does_not_error() -> None:
+    r = _run(["bench", "accuracy", "--help"])
+    assert r.returncode == 0, r.stderr
+    assert "fg-labs-sha" in r.stdout
 
 
 def test_subcommand_stubs_run_in_dry_mode() -> None:

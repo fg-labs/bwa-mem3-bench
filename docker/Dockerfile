@@ -47,7 +47,7 @@ ARG TARGETARCH
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential git cmake curl ca-certificates pkg-config \
         libz-dev libbz2-dev liblzma-dev libcurl4-openssl-dev libssl-dev \
-        libncurses-dev \
+        libncurses-dev libgit2-dev \
         python3 python3-pip python3-venv \
         autoconf automake autoconf-archive libtool \
     && rm -rf /var/lib/apt/lists/*
@@ -174,6 +174,18 @@ RUN cd /build/minibwa && \
 ARG TRICORD_VERSION=0.1.2
 RUN rustup toolchain install stable --profile minimal --no-self-update && \
     cargo +stable install --locked --root /out --version "${TRICORD_VERSION}" tricord
+
+# Install holodeck (fg-labs/holodeck) for the truth-based accuracy benchmark:
+# it generates the simulated truth datasets and provides `holodeck eval`. The
+# repo is public, so cargo-install it from a pinned git ref (no submodule).
+# Build with +stable (already installed for tricord, >=1.94): the +toolchain
+# override takes precedence over holodeck's rust-toolchain.toml pin, avoiding a
+# hard toolchain coupling. holodeck's `built` build-dependency links libgit2,
+# hence libgit2-dev in the builder apt (build-only; the binary does not link it).
+ARG HOLODECK_REPO
+ARG HOLODECK_REF
+RUN cargo +stable install --locked --git "${HOLODECK_REPO}" --rev "${HOLODECK_REF}" \
+    --root /out holodeck
 
 ############ Stage 2: runtime ############
 FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS runtime

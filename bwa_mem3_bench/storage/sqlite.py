@@ -9,10 +9,14 @@ from bwa_mem3_bench.storage.schema import SCHEMA_SQL, SCHEMA_VERSION
 
 EXPECTED_SCHEMA_VERSION = SCHEMA_VERSION
 
-# Older DBs are auto-migrated in place via ALTER TABLE; existing rows keep NULL
-# for new columns until `cli collect` re-ingests them.
+# Older DBs are auto-migrated in place; column additions via ALTER TABLE, new
+# tables via the `CREATE TABLE IF NOT EXISTS` in SCHEMA_SQL (run unconditionally
+# by connect()). Existing rows keep NULL for new columns until `cli collect`
+# re-ingests them.
 #   v1 → v2: added trials.process_seconds + trials.index_read_seconds.
 #   v2 → v3: added comparisons.supp_json (compare-bams supplementary metrics).
+#   v3 → v4: added the `accuracy` table (holodeck truth-based eval) — a new
+#            table, so no ALTER is needed; executescript creates it in place.
 _SCHEMA_V1 = 1
 _SCHEMA_V2 = 2
 _SCHEMA_V3 = 3
@@ -150,6 +154,83 @@ def upsert_trial(  # noqa: PLR0913
             status,
             process_seconds,
             index_read_seconds,
+        ),
+    ).fetchone()
+    if commit:
+        conn.commit()
+    return int(row[0])
+
+
+def upsert_accuracy(  # noqa: PLR0913
+    conn: sqlite3.Connection,
+    *,
+    fg_labs_sha: str,
+    sample: str,
+    arch: str,
+    rep: int,
+    tool: str,
+    placement_total: int | None,
+    placement_correct_pct: float | None,
+    placement_mismapped_pct: float | None,
+    placement_unmapped_pct: float | None,
+    placement_json: str | None,
+    variant_bearing_reads: int | None,
+    md_concordant_pct: float | None,
+    nm_concordant_pct: float | None,
+    by_class_json: str | None,
+    meth_n_cpg: int | None,
+    meth_pearson_r: float | None,
+    meth_rmse: float | None,
+    commit: bool = True,
+) -> int:
+    """Insert or update one accuracy row (one aligner arm of one sim cell).
+
+    Keyed by ``(fg_labs_sha, sample, arch, rep, tool)``; re-ingesting a run
+    overwrites in place. Returns the row id.
+    """
+    row = conn.execute(
+        """
+        INSERT INTO accuracy (
+            fg_labs_sha, sample, arch, rep, tool,
+            placement_total, placement_correct_pct, placement_mismapped_pct,
+            placement_unmapped_pct, placement_json,
+            variant_bearing_reads, md_concordant_pct, nm_concordant_pct, by_class_json,
+            meth_n_cpg, meth_pearson_r, meth_rmse
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(fg_labs_sha, sample, arch, rep, tool) DO UPDATE SET
+            placement_total = excluded.placement_total,
+            placement_correct_pct = excluded.placement_correct_pct,
+            placement_mismapped_pct = excluded.placement_mismapped_pct,
+            placement_unmapped_pct = excluded.placement_unmapped_pct,
+            placement_json = excluded.placement_json,
+            variant_bearing_reads = excluded.variant_bearing_reads,
+            md_concordant_pct = excluded.md_concordant_pct,
+            nm_concordant_pct = excluded.nm_concordant_pct,
+            by_class_json = excluded.by_class_json,
+            meth_n_cpg = excluded.meth_n_cpg,
+            meth_pearson_r = excluded.meth_pearson_r,
+            meth_rmse = excluded.meth_rmse
+        RETURNING id
+        """,
+        (
+            fg_labs_sha,
+            sample,
+            arch,
+            rep,
+            tool,
+            placement_total,
+            placement_correct_pct,
+            placement_mismapped_pct,
+            placement_unmapped_pct,
+            placement_json,
+            variant_bearing_reads,
+            md_concordant_pct,
+            nm_concordant_pct,
+            by_class_json,
+            meth_n_cpg,
+            meth_pearson_r,
+            meth_rmse,
         ),
     ).fetchone()
     if commit:

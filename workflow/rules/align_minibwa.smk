@@ -38,13 +38,22 @@ def _minibwa_ref_inputs(wc) -> list[str]:
     minibwa auto-appends ``.l2b``/``.mbw`` to the prefix it is given.
     """
     sample = CONFIG.samples[wc.sample]
-    ref = sample.reference
+    # The minibwa index sidecars live under the plain DNA reference for BOTH
+    # modes — minibwa's BS-seq index (`index --meth`) writes `.l2b`, `.mbw` and
+    # an additional `.meth.mbw` (the C->T/G->A converted FM-index) alongside the
+    # DNA FASTA, not under a separate `hg38-meth` tree. Strip the `-meth` suffix
+    # from the (meth) sample's reference to reach it.
+    ref = sample.reference.removesuffix("-meth")
     fasta_name = CONFIG.references[ref]["fasta_name"]
     base = f"references/{ref}/{fasta_name}"
+    # `map --meth` loads `.l2b` + `.meth.mbw`; plain `map` loads `.l2b` + `.mbw`
+    # (see mb_idx_load). Stage exactly the BWT the run will use so the prewarm
+    # and the timed region match.
+    bwt = f"{base}.meth.mbw" if _is_meth_sample(wc.sample) else f"{base}.mbw"
     return [
         base,  # plain .fasta — must be index 0 (path passed to minibwa)
         f"{base}.l2b",
-        f"{base}.mbw",
+        bwt,
     ]
 
 
@@ -69,6 +78,13 @@ rule align_minibwa:
         # Hi-C-inappropriate mate rescue and the comparison stays
         # apples-to-apples.
         flags = lambda wc: " ".join(CONFIG.samples[wc.sample].minibwa_flags),
+        # `--meth` for methylation samples: minibwa maps the EM-seq reads
+        # bisulfite-aware against the `.meth.mbw` BS-seq index (directional:
+        # read1 C->T, read2 G->A), exactly the supported way to run it on meth
+        # data. Empty for non-meth samples. (minibwa emits no XM tags even in
+        # --meth mode, so methylation-level correlation is NA; it is scored on
+        # placement + variant representation.)
+        meth_flag = lambda wc: "--meth" if _is_meth_sample(wc.sample) else "",
     shell:
         # minibwa `map` emits SAM by default (since lh3/minibwa r387; `-f`
         # selects PAF). The index prefix is the plain .fasta path
@@ -94,7 +110,7 @@ rule align_minibwa:
         mkdir -p $(dirname {output.bam}) $(dirname {output.timing})
         cat {input.ref[1]} {input.ref[2]} > /dev/null 2>/dev/null || true
         tricorder --out {output.timing} -- \
-            bash -c 'set -o pipefail; minibwa map -t {params.threads} {params.flags} \
+            bash -c 'set -o pipefail; minibwa map -t {params.threads} {params.flags} {params.meth_flag} \
                 {input.ref[0]} {input.fastqs} \
                 2> >(tee "{output.minibwa_stderr}" >&2) \
               | samtools view -@4 -b -o {output.bam} -'

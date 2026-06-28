@@ -207,7 +207,66 @@ Or upload one sample at a time by passing the sample name as `--what`
 
 ---
 
-## 3. Adapt to your own samples
+## 3. Simulated truth datasets (holodeck)
+
+The truth-based accuracy benchmark (`--target accuracy` / `accuracy_smoke`)
+runs on reads simulated by [fg-labs/holodeck](https://github.com/fg-labs/holodeck),
+which emits each read's true placement, the variant it carries, and (for
+methylation) per-CpG truth. These are scored by `holodeck eval` against the
+aligners' BAMs — see `README.md` and `workflow/rules/eval.smk`.
+
+One command generates all of them and (optionally) stages them to S3:
+
+```bash
+# holodeck must be on PATH — build fg-labs/holodeck at the
+# docker/build-arg-defaults.env HOLODECK_REF pin, or extract the binary from the
+# bench image. Then:
+scripts/gen_all_sim_datasets.sh \
+    ~/work/references/hg38/Homo_sapiens_assembly38.fasta \
+    /tmp/sim 42 s3://<your-bucket>/data/sim
+```
+
+`scripts/gen_all_sim_datasets.sh` is the single source of truth for the dataset
+matrix; it drives the per-dataset `scripts/gen_holodeck_dataset.sh`
+(`mutate` → optional `methylate` → `simulate`, renaming outputs to canonical
+bare names). Per-kind coverage is fixed inside that script.
+
+| Dataset | Kind | Coverage | Target | Chemistry |
+|---|---|---|---|---|
+| `sim-wgs-place` | `wgs-place` | 0.5× (~5M pairs) | genome-wide | DNA |
+| `sim-meth-place` | `meth-place` | 0.5× (~5M pairs) | genome-wide | EM-seq |
+| `sim-wgs-vars` | `wgs-vars` | 30× | `scripts/sim-targets/chr22.bed` | DNA |
+| `sim-meth-vars` | `meth-vars` | 30× | `scripts/sim-targets/chr22.bed` | EM-seq |
+
+The `-place` datasets sweep the whole genome at low coverage to probe placement
+and MAPQ calibration across hard/repetitive loci; the `-vars` datasets put depth
+over a **target BED** (real targeted-seq style — never a reduced reference, so
+off-target mismapping is still observable) to probe per-read variant
+representation. The meth arms also emit `cpg-truth.bedGraph` for methylation-level
+correlation. Each dataset directory holds exactly the files the workflow resolves
+from a sample's `source` prefix:
+
+```text
+data/sim/<name>/
+  r1.fq.gz  r2.fq.gz        # simulated reads (truth encoded in read names)
+  golden.bam                # ground-truth alignment (eval --truth)
+  truth.vcf                 # simulated SNVs (eval --variants)
+  cpg-truth.bedGraph        # per-CpG methylation truth (meth kinds; eval --cpg-truth)
+```
+
+**Provenance / reproducibility.** Everything is seeded (default `--seed 42`), so
+regenerating reproduces byte-identical inputs. Record the seed and the holodeck
+SHA (the `HOLODECK_REF` in `docker/build-arg-defaults.env`) alongside any run.
+The `-vars` target region is versioned at `scripts/sim-targets/chr22.bed`.
+
+A chr22-slice smoke variant (`sim-smoke-*`, used by `accuracy_smoke` for fast
+CI/harness validation) is generated the same way against the full reference but
+with a small chr22 target BED (`scripts/sim-targets/smoke.bed`), so the inputs
+stay tiny while off-target mismapping is still observable.
+
+---
+
+## 4. Adapt to your own samples
 
 The set of samples is defined in `config/samples.yaml`. Each entry needs:
 

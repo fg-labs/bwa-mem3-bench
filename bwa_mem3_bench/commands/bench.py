@@ -7,6 +7,7 @@ from pathlib import Path
 
 from bwa_mem3_bench import DB_PATH, LOCAL_MIRROR_ROOT, REPO_ROOT
 from bwa_mem3_bench.registry import DEFAULT_REGISTRY_PATH
+from bwa_mem3_bench.report.accuracy import generate_accuracy
 from bwa_mem3_bench.report.compare import generate_compare
 from bwa_mem3_bench.report.docs import generate_docs, parse_releases
 from bwa_mem3_bench.report.full_report import generate_full_report
@@ -135,6 +136,24 @@ def speedup(
         out_md=out,
         minibwa_sha=minibwa_sha,
     )
+    if out is None:
+        print(text)
+    else:
+        print(f"wrote {out}")
+
+
+def accuracy(*, fg_labs_sha: str, out: Path | None = None) -> None:
+    """Emit the truth-based alignment-accuracy report (holodeck eval).
+
+    Renders placement + MAPQ calibration, per-read variant representation, and
+    methylation-level correlation per sim dataset and aligner arm — graded
+    against simulation truth, not tool-vs-tool agreement. Markdown is written to
+    stdout by default; pass ``--out path/file.md`` to redirect to a file.
+
+    :param fg_labs_sha: fg-labs SHA whose accuracy rows to report.
+    :param out: optional path to write the markdown to.
+    """
+    text = generate_accuracy(db_path=DB_PATH, fg_labs_sha=fg_labs_sha, out_md=out)
     if out is None:
         print(text)
     else:

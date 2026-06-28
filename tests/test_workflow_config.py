@@ -9,6 +9,7 @@ from bwa_mem3_bench.workflow_config import (
     Arch,
     Sample,
     WorkflowConfig,
+    _as_bool,
     _as_str_list,
     load_config,
 )
@@ -230,6 +231,61 @@ def test_minibwa_flags_rejects_unmapped_flag() -> None:
     bad = dataclasses.replace(cfg.samples["wgs-5M"], mem_flags=["-Z"])
     with pytest.raises(ValueError, match="no minibwa"):
         _ = bad.minibwa_flags
+
+
+def test_truth_defaults_false_for_ordinary_samples() -> None:
+    cfg = load_config(CONFIG_DIR)
+    assert cfg.samples["wgs-5M"].truth is False
+    assert cfg.samples["meth-twist-emseq-5M"].truth is False
+    assert _make_sample().truth is False
+
+
+def test_truth_rejects_non_boolean() -> None:
+    """A non-boolean `truth` value (e.g. quoted YAML) must fail loudly, not be
+    silently coerced by bool()."""
+    assert _as_bool("s", "truth", True) is True
+    assert _as_bool("s", "truth", False) is False
+    with pytest.raises(ValueError, match="truth"):
+        _as_bool("s", "truth", "yes")
+
+
+def test_sim_samples_are_truth_samples() -> None:
+    cfg = load_config(CONFIG_DIR)
+    for name in (
+        "sim-wgs-place",
+        "sim-wgs-vars",
+        "sim-meth-place",
+        "sim-meth-place-genomic",
+        "sim-meth-vars",
+        "sim-meth-vars-genomic",
+        "sim-smoke-vars",
+        "sim-smoke-meth-vars",
+        "sim-smoke-meth-vars-genomic",
+    ):
+        assert cfg.samples[name].truth is True, name
+
+
+def test_sim_non_meth_arms() -> None:
+    """Non-meth sim datasets carry no fg_labs_flags and use the hg38 reference +
+    bwa-mem2 baseline (graded vs minibwa + upstream)."""
+    cfg = load_config(CONFIG_DIR)
+    for name in ("sim-wgs-place", "sim-wgs-vars"):
+        sample = cfg.samples[name]
+        assert sample.reference == "hg38"
+        assert sample.baseline_tool == "bwa-mem2-upstream"
+        assert sample.fg_labs_flags == []
+
+
+def test_sim_meth_collapsed_and_genomic_arms_share_source() -> None:
+    """The genomic D3 arm is a separate sample sharing FASTQs + truth (`source`)
+    with its collapsed sibling; only the fg_labs_flags differ."""
+    cfg = load_config(CONFIG_DIR)
+    collapsed = cfg.samples["sim-meth-vars"]
+    genomic = cfg.samples["sim-meth-vars-genomic"]
+    assert collapsed.source == genomic.source == "data/sim/sim-meth-vars/"
+    assert collapsed.reference == genomic.reference == "hg38-meth"
+    assert collapsed.fg_labs_flags == ["--meth"]
+    assert genomic.fg_labs_flags == ["--meth", "--meth-scoring", "genomic"]
 
 
 def test_as_str_list_accepts_list_of_strings() -> None:

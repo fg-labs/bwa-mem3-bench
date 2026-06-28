@@ -7,7 +7,12 @@ from pathlib import Path
 
 from bwa_mem3_bench import DB_PATH, LOCAL_MIRROR_ROOT, REPO_ROOT, aws_config
 from bwa_mem3_bench.commands._run import run_cmd
-from bwa_mem3_bench.storage.ingest import ingest_baseline, ingest_minibwa, ingest_run
+from bwa_mem3_bench.storage.ingest import (
+    ingest_accuracy,
+    ingest_baseline,
+    ingest_minibwa,
+    ingest_run,
+)
 from bwa_mem3_bench.storage.sqlite import connect
 from bwa_mem3_bench.workflow_config import load_config
 
@@ -20,7 +25,13 @@ _EXCLUDED_PATTERNS = ("*.bam", "*.bam.bai", "*.bam.csi")
 
 
 def _sync_prefix(remote: str, local: str, *, dry_run: bool) -> None:
-    cmd = ["aws", "s3", "sync", remote, local]
+    # `--exact-timestamps`: re-download whenever the S3 timestamp differs, even
+    # when the size is unchanged. Re-running a rule against a fixed SHA (e.g. a
+    # new holodeck build re-emitting eval TSVs) commonly produces a same-sized
+    # file with different content; without this, `aws s3 sync`'s default
+    # size+newer-than heuristic silently keeps the stale local copy and ingest
+    # reports old numbers. S3 is authoritative here, so always pull the latest.
+    cmd = ["aws", "s3", "sync", remote, local, "--exact-timestamps"]
     for pat in _EXCLUDED_PATTERNS:
         cmd.extend(["--exclude", pat])
     run_cmd(cmd, dry_run=dry_run)
@@ -70,6 +81,13 @@ def collect(
         try:
             n = ingest_run(conn, runs_root=runs_root, fg_labs_sha=fg_labs_sha)
             print(f"ingested {n} trials into {DB_PATH}", file=sys.stderr)
+
+            # Truth-based accuracy rows (holodeck eval) live alongside the timing
+            # trees under runs/<sha>/.../eval/; only present for sim samples run
+            # via the `accuracy` / `accuracy_smoke` targets.
+            a = ingest_accuracy(conn, runs_root=runs_root, fg_labs_sha=fg_labs_sha)
+            if a:
+                print(f"ingested {a} accuracy rows into {DB_PATH}", file=sys.stderr)
 
             # Ingest baselines from each upstream tag known to the workflow
             # config so that `bench report`/`bench speedup` can join fg-labs

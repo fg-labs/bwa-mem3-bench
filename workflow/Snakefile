@@ -105,12 +105,14 @@ wildcard_constraints:
     sample      = "[A-Za-z0-9_-]+",
     arch        = "[a-z0-9]+",
     rep         = r"\d+",
-    minibwa_sha = "[0-9a-f]+"
+    minibwa_sha = "[0-9a-f]+",
+    tool        = "fg-labs|baseline|minibwa"
 
 include: "rules/align.smk"
 include: "rules/compare.smk"
 include: "rules/benchmark.smk"
 include: "rules/align_minibwa.smk"
+include: "rules/eval.smk"
 
 
 # Aggregator targets have no shell body, so they always run on the coordinator.
@@ -122,6 +124,8 @@ localrules:
     smoke_meth,
     minibwa,
     minibwa_smoke,
+    accuracy,
+    accuracy_smoke,
     emit_meta,
 
 
@@ -141,13 +145,72 @@ def _archs_for_sample(sample_name: str) -> list:
     return BASELINE_ARCHS
 
 
+# Samples in the speed/concordance sweep (`rule all`, `baseline_all`). Truth
+# (sim-*) samples are excluded — they have no upstream-concordance question and
+# are driven by the `accuracy` / `accuracy_smoke` targets instead (eval.smk).
+SWEEP_SAMPLES = [s for s in SAMPLES if not CONFIG.samples[s].truth]
+
+
+# ---------------------------------------------------------------------------
+# Truth-based accuracy targets (holodeck eval). Accuracy is a property of the
+# aligner build and is ~arch-invariant, so — unlike the timing sweep — we do
+# NOT stratify by arch: each chemistry is pinned to a single arch. Non-meth runs
+# on the cheapest baseline-supported x86 (c6a); meth runs on m7i, the only arch
+# with RAM for the doubled meth FMI.
+# ---------------------------------------------------------------------------
+_ACCURACY_ARCH_NONMETH = "c6a"
+_ACCURACY_ARCH_METH = "m7i"
+
+# Sourced from SAMPLES (not CONFIG.samples) so `--config samples=` scopes the
+# accuracy run too, symmetric with SWEEP_SAMPLES. SAMPLES defaults to every
+# config sample, so an unscoped `accuracy` run still covers all sim datasets.
+SIM_SAMPLES = [s for s in SAMPLES if CONFIG.samples[s].truth]
+SMOKE_SIM_SAMPLES = [s for s in SIM_SAMPLES if s.startswith("sim-smoke-")]
+FULL_SIM_SAMPLES = [s for s in SIM_SAMPLES if not s.startswith("sim-smoke-")]
+
+
+def _accuracy_arch(sample_name: str) -> str:
+    return _ACCURACY_ARCH_METH if _is_meth_sample(sample_name) else _ACCURACY_ARCH_NONMETH
+
+
+def _accuracy_targets(samples: list, reps: int) -> list:
+    """Eval-output sentinels (`.variants.tsv`) for the accuracy matrix.
+
+    Per dataset the arms are:
+      - fg-labs: every sim sample (the genomic D3 arm is its own sample sharing
+        truth + FASTQs with its collapsed sibling).
+      - baseline: the primary (non-genomic) arm only — bwa-mem2 upstream for
+        non-meth, bwameth for meth.
+      - minibwa: every primary (non-genomic) arm, meth included. On meth samples
+        minibwa is the naive 4-letter aligner (no bisulfite mode): it aligns the
+        EM-seq reads against the plain DNA index and is scored on placement +
+        variant representation (methylation correlation is NA — no XM tags), so
+        the meth comparison has all four arms (minibwa / bwameth / D3-collapsed /
+        D3-genomic). The genomic D3 arm is a re-scored sibling sample, so it
+        carries only the fg-labs output — baseline and minibwa would be byte-for-
+        byte identical to the collapsed arm's.
+    Requesting one of the eval rule's three outputs pulls the whole rule.
+    """
+    targets = []
+    for sample in samples:
+        arch = _accuracy_arch(sample)
+        genomic = "genomic" in CONFIG.samples[sample].fg_labs_flags
+        for rep in range(1, reps + 1):
+            base = f"runs/{FG_LABS_SHA}/{sample}/{arch}/rep-{rep}/eval"
+            targets.append(f"{base}/fg-labs.variants.tsv")
+            if not genomic:
+                targets.append(f"{base}/baseline.variants.tsv")
+                targets.append(f"{base}/minibwa.variants.tsv")
+    return targets
+
+
 rule all:
     input:
         # fg-labs query alignments + concordance reports (baseline rep-1 is
         # pulled in as a dependency of compare_vs_baseline).
         [
             f"runs/{FG_LABS_SHA}/{sample}/{arch}/rep-{rep}/compare/vs-baseline.json"
-            for sample in SAMPLES
+            for sample in SWEEP_SAMPLES
             for arch in _archs_for_sample(sample)
             for rep in range(1, REPS + 1)
         ],
@@ -159,14 +222,14 @@ rule all:
         # can't hold the doubled-meth FMI + packed ref.
         [
             f"runs/{FG_LABS_SHA}/{sample}/{arch}/rep-{rep}/compare/vs-x86.json"
-            for sample in SAMPLES
+            for sample in SWEEP_SAMPLES
             if not _is_meth_sample(sample)
             for arch in ARM_ARCHS
             for rep in range(1, REPS + 1)
         ],
         [
             f"runs/{FG_LABS_SHA}/{sample}/{arch}/rep-{rep}/benchmarks/meta.json"
-            for sample in SAMPLES
+            for sample in SWEEP_SAMPLES
             if not _is_meth_sample(sample)
             for arch in ARM_ARCHS
             for rep in range(1, REPS + 1)
@@ -176,7 +239,7 @@ rule all:
         # forces them to be materialized by `rule all`.
         [
             f"baseline/bwa-mem2-{CONFIG.upstream_tag}/{sample}/{arch}/rep-{rep}/aligned.bam"
-            for sample in SAMPLES
+            for sample in SWEEP_SAMPLES
             for arch in _archs_for_sample(sample)
             for rep in range(1, REPS_BASELINE + 1)
         ],
@@ -185,14 +248,14 @@ rule all:
         # GOLDEN_SAMPLES — a golden predating a sample has no BAM to compare to).
         [
             f"runs/{FG_LABS_SHA}/{sample}/{arch}/rep-{rep}/compare/vs-golden.json"
-            for sample in SAMPLES
+            for sample in SWEEP_SAMPLES
             for arch in _archs_for_sample(sample)
             for rep in range(1, REPS + 1)
             if GOLDEN_REF_SHA and GOLDEN_REF_SHA != FG_LABS_SHA and sample in GOLDEN_SAMPLES
         ]
         + [
             f"runs/{FG_LABS_SHA}/{sample}/{arch}/rep-{rep}/compare/vs-golden.json"
-            for sample in SAMPLES
+            for sample in SWEEP_SAMPLES
             if not _is_meth_sample(sample)
             for arch in ARM_ARCHS
             for rep in range(1, REPS + 1)
@@ -213,6 +276,7 @@ rule baseline_all:
         [
             f"baseline/bwa-mem2-{CONFIG.upstream_tag}/{sample}/{arch}/rep-{rep}/aligned.bam"
             for sample in CONFIG.samples
+            if not CONFIG.samples[sample].truth
             for arch in _archs_for_sample(sample)
             for rep in range(1, REPS_BASELINE + 1)
         ]
@@ -338,3 +402,41 @@ rule minibwa:
             for a in MINIBWA_ARCHS
             for r in range(1, REPS + 1)
         ],
+
+
+rule accuracy:
+    """Truth-based alignment-accuracy benchmark over the full sim datasets.
+
+    Grades each aligner arm's BAM against holodeck simulation truth (placement +
+    MAPQ calibration, per-read variant representation, methylation-level
+    correlation) — no variant caller, no methylation extractor, so the numbers
+    isolate the aligner. Per dataset the arms are:
+      - non-meth: bwa-mem3 (fg-labs) · minibwa · upstream bwa-mem2
+      - meth:     D3 collapsed · D3 genomic (its own `*-genomic` sample) · bwameth
+
+    Accuracy is ~arch-invariant, so each chemistry is pinned to a single arch
+    (non-meth → c6a, meth → m7i) rather than swept across SIMD tiers. Outputs
+    land at runs/<sha>/<sample>/<arch>/rep-<r>/eval/<tool>.{eval.txt,variants.tsv,
+    meth.tsv}; `cli collect` ingests them into the `accuracy` table.
+
+    Usage:
+        snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
+            --config fg_labs_sha=<sha> -- accuracy
+    """
+    input:
+        _accuracy_targets(FULL_SIM_SAMPLES, REPS)
+
+
+rule accuracy_smoke:
+    """Fast wiring check for the accuracy pipeline on chr22-slice sim datasets.
+
+    Exercises the full `holodeck eval` matrix (all arms, all three axes) on tiny
+    chr22-slice datasets at 1 rep — cheap end-to-end validation before paying
+    for the full-hg38 `accuracy` run.
+
+    Usage:
+        snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
+            --config fg_labs_sha=<sha> -- accuracy_smoke
+    """
+    input:
+        _accuracy_targets(SMOKE_SIM_SAMPLES, 1)

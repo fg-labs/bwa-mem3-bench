@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 # Increment this whenever the schema changes in a backward-incompatible way.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_SQL = """
-PRAGMA user_version = 3;
+PRAGMA user_version = 4;
 
 CREATE TABLE IF NOT EXISTS runs (
     fg_labs_sha     TEXT PRIMARY KEY,
@@ -58,6 +58,42 @@ CREATE TABLE IF NOT EXISTS comparisons (
     UNIQUE (trial_id, kind)
 );
 
+-- Truth-based accuracy results (holodeck eval), one row per
+-- (run, sim-sample, arch, rep, aligner arm). Distinct from `comparisons`,
+-- which is tool-vs-tool agreement; this is graded against simulation truth.
+-- `tool` is the aligner arm (`fg-labs`, `baseline`, `minibwa`); all arms of a
+-- run share the run's `fg_labs_sha` (the eval outputs all live under
+-- runs/<sha>/), so `tool` disambiguates them.
+CREATE TABLE IF NOT EXISTS accuracy (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    fg_labs_sha             TEXT NOT NULL REFERENCES runs(fg_labs_sha),
+    sample                  TEXT NOT NULL,
+    arch                    TEXT NOT NULL,
+    rep                     INTEGER NOT NULL,
+    tool                    TEXT NOT NULL,
+    -- Placement + MAPQ calibration (<tool>.eval.txt). Headline ALL-bin rates as
+    -- columns; the full per-MAPQ-bin table as JSON in placement_json.
+    placement_total         INTEGER,
+    placement_correct_pct   REAL,
+    placement_mismapped_pct REAL,
+    placement_unmapped_pct  REAL,
+    placement_json          TEXT,
+    -- Per-read variant representation (<tool>.variants.tsv). Per-class
+    -- accumulators as JSON in by_class_json; the footer concordance stats as
+    -- columns (NULL when holodeck wrote "NA" — no comparable golden tag).
+    variant_bearing_reads   INTEGER,
+    md_concordant_pct       REAL,
+    nm_concordant_pct       REAL,
+    by_class_json           TEXT,
+    -- Methylation-level correlation (<tool>.meth.tsv; meth samples only —
+    -- NULL columns for non-meth, whose .meth.tsv is an empty placeholder).
+    meth_n_cpg              INTEGER,
+    meth_pearson_r          REAL,
+    meth_rmse               REAL,
+    UNIQUE (fg_labs_sha, sample, arch, rep, tool)
+);
+
 CREATE INDEX IF NOT EXISTS idx_trials_run ON trials(fg_labs_sha);
 CREATE INDEX IF NOT EXISTS idx_trials_sample_arch ON trials(sample, arch);
+CREATE INDEX IF NOT EXISTS idx_accuracy_run ON accuracy(fg_labs_sha);
 """
