@@ -56,3 +56,30 @@ allowances:
       docs/version-only commit on top of this benchmarked binary. Intentional,
       accepted.
     expected_drift_pct: 0.00003
+
+  - to_sha: 2681143bb7ab665488cdcd5d46380cc928f5bd05
+    pr: fg-labs/bwa-mem3-bench#19
+    date: 2026-06-27
+    summary: >-
+      v0.4.0: a deliberate methylation-alignment change plus a small non-meth
+      shift vs the v0.3.0 golden (a02fcb44).
+      Meth — the fg-labs `--meth` path was cut over to the D3 native bisulfite
+      contract (fg-labs/bwa-mem3-bench#19), so EM-seq alignments diverge
+      substantially from the v0.3.0 bwameth-style golden: meth-twist-emseq-5M
+      93.90% / smoke-meth 93.77% primary concordance vs the v0.3.0 golden
+      (~6.1% drift; pos 4.0%, mapq 1.0%, plus mapped-only deltas). This is the
+      intended new contract, and truth-based holodeck eval confirms quality is
+      preserved: native-bisulfite placement is ~95% correct (sim-meth-place
+      94.3% / sim-meth-vars 95.1%, within ~0.4pp of bwameth's 94.7%/95.4%)
+      while additionally recovering methylation that bwameth/minibwa do not
+      (per-CpG Pearson r 0.945-0.980 across the meth sim datasets).
+      Non-meth — a tiny, bounded fraction of reads shifts vs the v0.3.0 golden,
+      identical across all six archs: wgs-5M 99.9986% (142 of 9.98M; pos 77,
+      mapq 61, cigar 3), smoke-1M 99.976% (15 of 63k), panel-twist-5M 99.9725%
+      (2173 of 7.91M; pos 1332, mapq 763). All non-meth samples stay within the
+      Gate #1 upstream-drift budget, and truth-based placement is byte-identical
+      to bwa-mem2 v2.2.1 (sim-wgs-place / sim-wgs-vars fg-labs == baseline), so
+      primary placement quality is unchanged. Performance improved or held flat
+      everywhere (1.1-1.9x compute speedup vs upstream; no wall-time
+      regressions). Intentional, accepted.
+    expected_drift_pct: 6.1
