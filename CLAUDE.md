@@ -56,6 +56,12 @@ All commands are `pixi run python -m bwa_mem3_bench.cli <subcommand>`.
   child workers submitted by a running coordinator.
 - `aws cost` — approximate spot spend per run.
 - `aws cleanup` — deregister orphaned `snakejob-def-*` job definitions.
+- `aws cleanup-s3` — delete large `aligned.bam`s from old `runs/<sha>/` trees,
+  keeping the `--keep-latest N` most-recent runs and every blessed-golden SHA
+  (`golden/fg-labs-<sha>/`). Preserves the small per-run artifacts `collect`
+  ingests and the `baseline/`/`minibwa/` caches. `--workflow-sources` also drops
+  the root `snakemake-workflow-sources.*.tar.xz` bundles. Safe by default
+  (preview unless `--force`); refuses to delete while any project job is active.
 
 ## Queue routing
 

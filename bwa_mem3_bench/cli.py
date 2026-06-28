@@ -55,6 +55,7 @@ def main(argv: list[str] | None = None) -> None:
                 "teardown": aws_module.teardown,
                 "cost": aws_module.cost,
                 "cleanup": aws_module.cleanup,
+                "cleanup-s3": aws_module.cleanup_s3,
             },
         },
         argv=argv if argv is not None else sys.argv[1:],

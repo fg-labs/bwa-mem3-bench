@@ -34,6 +34,10 @@ def _logs() -> Any:
     return boto3.client("logs", region_name=_REGION)
 
 
+def _s3() -> Any:
+    return boto3.client("s3", region_name=_REGION)
+
+
 def _list_jobs(queue: str, status: str) -> list[dict[str, Any]]:
     client = _batch()
     out: list[dict[str, Any]] = []
@@ -291,3 +295,179 @@ def cleanup(*, keep_latest: int = 10, dry_run: bool = False) -> None:
             client.deregister_job_definition(jobDefinition=arn)
             _console.print(f"[green]deregistered[/green] {arn}")
     _console.print(f"[bold]kept {min(len(defs), keep_latest)} / {len(defs)}[/bold]")
+
+
+# Suffixes of the large per-run alignment artifacts that `cleanup_s3` removes.
+# Everything else under runs/<sha>/ (timing.tsv, *.json compares, eval TSVs,
+# meta.json — the small things `collect` ingests) is preserved.
+_BAM_SUFFIXES = (".bam", ".bam.bai", ".bam.csi")
+# S3 DeleteObjects caps a single request at 1000 keys.
+_DELETE_BATCH = 1000
+# How many failed-delete keys to name in the error summary before truncating.
+_DELETE_ERROR_SAMPLE = 5
+
+
+def _active_job_count() -> int:
+    """Total Batch jobs in a non-terminal state across every project queue.
+
+    A nonzero count means a worker may still be uploading into ``runs/``, so
+    deleting run outputs then could race an in-flight upload (see the
+    kill-then-wipe gotcha in CLAUDE.md).
+    """
+    return sum(len(_list_jobs(q, s)) for q in _ALL_QUEUES for s in _ACTIVE_STATES)
+
+
+def _golden_shas(s3: Any, bucket: str) -> set[str]:
+    """fg-labs SHAs that have a blessed golden under ``golden/fg-labs-<sha>/``.
+
+    These are protected from run-BAM deletion so a blessed release's source run
+    tree stays intact even when it is no longer among the most recent runs.
+    """
+    paginator = s3.get_paginator("list_objects_v2")
+    shas: set[str] = set()
+    # Paginate: a bucket with >1000 golden prefixes would otherwise drop some,
+    # leaving a blessed release's run tree unprotected from deletion.
+    for page in paginator.paginate(Bucket=bucket, Prefix="golden/fg-labs-", Delimiter="/"):
+        for cp in page.get("CommonPrefixes", []):
+            # "golden/fg-labs-<sha>/" -> "<sha>"
+            name = cp["Prefix"].removeprefix("golden/fg-labs-").rstrip("/")
+            if name:
+                shas.add(name)
+    return shas
+
+
+def _run_bams_by_sha(s3: Any, bucket: str) -> dict[str, tuple[float, list[tuple[str, int]]]]:
+    """Map each ``runs/<sha>/`` to its (newest-object-epoch, [(bam_key, size)]).
+
+    The timestamp is the max ``LastModified`` over the run's objects, used to
+    rank runs by recency; the key list is restricted to the BAM artifacts.
+    """
+    paginator = s3.get_paginator("list_objects_v2")
+    # Enumerate the immediate run-SHA subprefixes, paginating so a bucket with
+    # >1000 run SHAs doesn't silently omit the older ones from cleanup selection.
+    shas: list[str] = []
+    for page in paginator.paginate(Bucket=bucket, Prefix="runs/", Delimiter="/"):
+        shas.extend(
+            cp["Prefix"].removeprefix("runs/").rstrip("/") for cp in page.get("CommonPrefixes", [])
+        )
+    out: dict[str, tuple[float, list[tuple[str, int]]]] = {}
+    for sha in shas:
+        newest = 0.0
+        bams: list[tuple[str, int]] = []
+        for page in paginator.paginate(Bucket=bucket, Prefix=f"runs/{sha}/"):
+            for obj in page.get("Contents", []):
+                newest = max(newest, obj["LastModified"].timestamp())
+                if obj["Key"].endswith(_BAM_SUFFIXES):
+                    bams.append((obj["Key"], int(obj["Size"])))
+        out[sha] = (newest, bams)
+    return out
+
+
+def _select_run_bams_to_delete(
+    runs: dict[str, tuple[float, list[tuple[str, int]]]],
+    golden_shas: set[str],
+    keep_latest: int,
+) -> list[tuple[str, int]]:
+    """The (bam_key, size) pairs to delete: BAMs of every run SHA that is neither
+    among the ``keep_latest`` most-recent runs nor a blessed golden.
+
+    Pure selection logic (no I/O) so the keep/protect policy is unit-testable.
+    """
+    ordered = sorted(runs, key=lambda sha: runs[sha][0], reverse=True)
+    protected = set(ordered[: max(keep_latest, 0)]) | golden_shas
+    return [pair for sha in ordered if sha not in protected for pair in runs[sha][1]]
+
+
+def _workflow_source_keys(s3: Any, bucket: str) -> list[str]:
+    """Root ``snakemake-workflow-sources.*.tar.xz`` bundles (per-run staging
+    archives the executor uploads; orphaned once a run is done)."""
+    paginator = s3.get_paginator("list_objects_v2")
+    keys: list[str] = []
+    for page in paginator.paginate(Bucket=bucket, Prefix="snakemake-workflow-sources."):
+        for obj in page.get("Contents", []):
+            if obj["Key"].endswith(".tar.xz"):
+                keys.append(obj["Key"])
+    return keys
+
+
+def cleanup_s3(
+    *,
+    keep_latest: int = 3,
+    workflow_sources: bool = False,
+    force: bool = False,
+) -> None:
+    """Delete large aligned BAMs from old ``runs/<sha>/`` trees, keeping recent runs.
+
+    Removes only ``*.bam`` / ``*.bam.bai`` / ``*.bam.csi`` under
+    ``runs/<fg-labs-sha>/`` for the oldest run SHAs. Preserved: the
+    ``keep_latest`` most-recent runs, every SHA with a blessed golden under
+    ``golden/fg-labs-<sha>/``, all the small per-run artifacts ``collect``
+    ingests (timing/compare/eval/meta), and the ``baseline/`` & ``minibwa/``
+    caches (expensive, reused across runs). Optionally also removes the orphaned
+    root ``snakemake-workflow-sources.*.tar.xz`` bundles.
+
+    Safe by default: without ``force`` this only prints the deletion plan.
+    Refuses to delete while any project Batch job is active, since a running
+    worker may still be uploading into ``runs/``.
+
+    :param keep_latest: number of most-recent run SHAs whose BAMs are kept.
+    :param workflow_sources: also delete root ``snakemake-workflow-sources.*.tar.xz``.
+    :param force: actually delete; without it this is a no-op preview.
+    """
+    bucket = _cfg.bucket
+    s3 = _s3()
+    golden = _golden_shas(s3, bucket)
+    runs = _run_bams_by_sha(s3, bucket)
+    victims = _select_run_bams_to_delete(runs, golden, keep_latest)
+    ws_keys = _workflow_source_keys(s3, bucket) if workflow_sources else []
+
+    n_keep = min(max(keep_latest, 0), len(runs))
+    total_gb = sum(size for _, size in victims) / 1e9
+    _console.print(
+        f"[bold]cleanup-s3[/bold] bucket=s3://{bucket}\n"
+        f"  run SHAs: {len(runs)} total — keeping {n_keep} most-recent "
+        f"+ {len(golden)} golden-protected\n"
+        f"  BAMs to delete: {len(victims)} ({total_gb:.1f} GB)\n"
+        f"  workflow-source archives to delete: {len(ws_keys)}"
+    )
+
+    keys = [k for k, _ in victims] + ws_keys
+    if not keys:
+        _console.print("[green]nothing to clean[/green]")
+        return
+    if not force:
+        _console.print("[yellow]preview only — re-run with --force to delete[/yellow]")
+        return
+
+    active = _active_job_count()
+    if active:
+        _console.print(
+            f"[red]refusing to delete: {active} active Batch job(s) — a worker may "
+            f"still be uploading into runs/. Wait for all jobs to reach a terminal "
+            f"state (cli aws jobs) and retry.[/red]"
+        )
+        return
+
+    deleted = 0
+    errors: list[dict[str, Any]] = []
+    for i in range(0, len(keys), _DELETE_BATCH):
+        batch = keys[i : i + _DELETE_BATCH]
+        resp = s3.delete_objects(
+            Bucket=bucket,
+            Delete={"Objects": [{"Key": k} for k in batch], "Quiet": True},
+        )
+        # delete_objects can return HTTP 200 with per-key Errors; Quiet=True
+        # omits the successful keys, so count successes as batch minus failures.
+        batch_errors = resp.get("Errors", [])
+        errors.extend(batch_errors)
+        deleted += len(batch) - len(batch_errors)
+    if errors:
+        sample = ", ".join(
+            f"{e.get('Key')} ({e.get('Code')})" for e in errors[:_DELETE_ERROR_SAMPLE]
+        )
+        suffix = " …" if len(errors) > _DELETE_ERROR_SAMPLE else ""
+        _console.print(
+            f"[red]deleted {deleted} objects, but {len(errors)} failed: {sample}{suffix}[/red]"
+        )
+        sys.exit(1)
+    _console.print(f"[green]deleted {deleted} objects ({total_gb:.1f} GB freed)[/green]")
