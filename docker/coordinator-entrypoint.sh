@@ -51,6 +51,12 @@ CONFIG_ARGS="fg_labs_sha=${FG_LABS_SHA}"
 [[ -n "${SAMPLES:-}" ]]    && CONFIG_ARGS="${CONFIG_ARGS} samples=${SAMPLES}"
 [[ -n "${GOLDEN_REF_SHA:-}" ]] && CONFIG_ARGS="${CONFIG_ARGS} golden_ref_sha=${GOLDEN_REF_SHA}"
 [[ -n "${IMAGE_TAG:-}" ]]  && CONFIG_ARGS="${CONFIG_ARGS} image_tag=${IMAGE_TAG}"
+# Thread the bucket through snakemake config so worker jobs resolve it too.
+# Workers re-parse the Snakefile but their job definitions don't carry this
+# env, so without this the golden listing (golden_backed_samples) falls back to
+# a wrong default bucket and a golden-gated run aborts. `--config` propagates to
+# workers (the job-def env does not), so this is the reliable channel.
+[[ -n "${BWA_MEM3_BENCH_S3_BUCKET:-}" ]] && CONFIG_ARGS="${CONFIG_ARGS} s3_bucket=${BWA_MEM3_BENCH_S3_BUCKET}"
 
 # Render the Snakemake AWS Batch profile from its template using the
 # BWA_MEM3_BENCH_{ECR_REPO,S3_BUCKET} env vars baked into the coordinator

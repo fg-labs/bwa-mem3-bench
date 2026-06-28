@@ -64,12 +64,20 @@ from bwa_mem3_bench.golden import golden_backed_samples
 _AWS = _aws_config.load()
 _ECR_REPO_URI = _AWS.ecr_repo_uri
 
+# Bucket for the golden listing below. On the coordinator `aws_config.load()`
+# resolves the bucket from the Batch job-def env; worker jobs re-parse this
+# Snakefile WITHOUT that env and would fall back to the wrong default bucket
+# (NoSuchBucket → the golden-gated run aborts). The coordinator threads the
+# bucket through the `s3_bucket` config key, and snakemake config propagates to
+# workers (unlike the job-def env), so prefer it. See coordinator-entrypoint.sh.
+_S3_BUCKET = config.get("s3_bucket") or _AWS.bucket
+
 # Samples the pinned golden actually contains. A golden blessed before a sample
 # existed (e.g. the v0.2.2 golden predates hic-1M / sbx-1M) lacks that sample's
 # BAM, so requesting vs-golden for it would make `rule all` unsatisfiable. We
 # scope vs-golden to this set. Empty unless a golden is pinned (no S3 call then).
 GOLDEN_SAMPLES = (
-    golden_backed_samples(_AWS.bucket, GOLDEN_REF_SHA)
+    golden_backed_samples(_S3_BUCKET, GOLDEN_REF_SHA)
     if GOLDEN_REF_SHA and GOLDEN_REF_SHA != FG_LABS_SHA
     else frozenset()
 )

@@ -132,6 +132,30 @@ def test_image_tag_alone_passes_through_without_sha_suffix(stubbed_path: str) ->
     assert "image_tag=some-other-tag" in line
 
 
+def test_s3_bucket_env_propagates_to_config(stubbed_path: str) -> None:
+    """BWA_MEM3_BENCH_S3_BUCKET must be threaded into the snakemake config.
+
+    Worker Batch jobs re-parse the Snakefile but their job definitions do not
+    carry the coordinator's bucket env, so the golden-listing helper falls back
+    to a wrong default bucket (NoSuchBucket) and the whole golden-gated run
+    aborts. snakemake `--config` *does* propagate to workers, so threading the
+    bucket through config is what makes the worker-side golden lookup resolve
+    the right bucket. Regression guard for that propagation.
+    """
+    line = _run_entrypoint(
+        {"FG_LABS_SHA": "deadbeef", "BWA_MEM3_BENCH_S3_BUCKET": "fg-bwa-mem3-bench"},
+        stubbed_path,
+    )
+    assert "s3_bucket=fg-bwa-mem3-bench" in line
+
+
+def test_s3_bucket_absent_from_config_when_env_unset(stubbed_path: str) -> None:
+    """With no bucket env set, no `s3_bucket` config key is emitted — the
+    Snakefile then falls back to `aws_config.load()` (correct for local runs)."""
+    line = _run_entrypoint({"FG_LABS_SHA": "deadbeef"}, stubbed_path)
+    assert "s3_bucket=" not in line
+
+
 def test_missing_fg_labs_sha_errors(stubbed_path: str) -> None:
     """FG_LABS_SHA is required — the entrypoint must exit non-zero if it's unset."""
     result = subprocess.run(
