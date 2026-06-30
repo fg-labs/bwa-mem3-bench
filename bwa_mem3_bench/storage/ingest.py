@@ -8,7 +8,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from bwa_mem3_bench.storage import VS_BASELINE, VS_GOLDEN
+from bwa_mem3_bench.storage import VS_BASELINE, VS_DEFAULT, VS_GOLDEN
 from bwa_mem3_bench.storage.sqlite import (
     upsert_accuracy,
     upsert_comparison,
@@ -166,7 +166,7 @@ def ingest_run(
                     commit=False,
                 )
 
-                for kind in (VS_BASELINE, VS_GOLDEN):
+                for kind in (VS_BASELINE, VS_GOLDEN, VS_DEFAULT):
                     path = rep_dir / "compare" / f"{kind}.json"
                     if not path.exists():
                         continue

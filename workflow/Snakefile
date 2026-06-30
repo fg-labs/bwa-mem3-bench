@@ -134,6 +134,8 @@ localrules:
     minibwa_smoke,
     accuracy,
     accuracy_smoke,
+    fast,
+    fast_smoke,
     emit_meta,
 
 
@@ -156,7 +158,17 @@ def _archs_for_sample(sample_name: str) -> list:
 # Samples in the speed/concordance sweep (`rule all`, `baseline_all`). Truth
 # (sim-*) samples are excluded — they have no upstream-concordance question and
 # are driven by the `accuracy` / `accuracy_smoke` targets instead (eval.smk).
-SWEEP_SAMPLES = [s for s in SAMPLES if not CONFIG.samples[s].truth]
+# `--fast`-preset siblings (`*-fast`) are also excluded — they are driven only
+# by the opt-in `fast` target (see FAST_* below), which adds the fast-vs-default
+# concordance the standard sweep does not produce; keeping them out leaves
+# `rule all` / `baseline_all` / `accuracy` byte-for-byte unchanged.
+def _is_fast_sample(sample_name: str) -> bool:
+    return sample_name.endswith("-fast")
+
+
+SWEEP_SAMPLES = [
+    s for s in SAMPLES if not CONFIG.samples[s].truth and not _is_fast_sample(s)
+]
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +184,9 @@ _ACCURACY_ARCH_METH = "m7i"
 # Sourced from SAMPLES (not CONFIG.samples) so `--config samples=` scopes the
 # accuracy run too, symmetric with SWEEP_SAMPLES. SAMPLES defaults to every
 # config sample, so an unscoped `accuracy` run still covers all sim datasets.
-SIM_SAMPLES = [s for s in SAMPLES if CONFIG.samples[s].truth]
+SIM_SAMPLES = [
+    s for s in SAMPLES if CONFIG.samples[s].truth and not _is_fast_sample(s)
+]
 SMOKE_SIM_SAMPLES = [s for s in SIM_SAMPLES if s.startswith("sim-smoke-")]
 FULL_SIM_SAMPLES = [s for s in SIM_SAMPLES if not s.startswith("sim-smoke-")]
 
@@ -202,14 +216,90 @@ def _accuracy_targets(samples: list, reps: int) -> list:
     targets = []
     for sample in samples:
         arch = _accuracy_arch(sample)
-        genomic = "genomic" in CONFIG.samples[sample].fg_labs_flags
+        # Secondary fg-labs arms (a `*-genomic` meth-scoring sibling or a
+        # `*-fast` preset sibling) re-score / re-run the SAME source FASTQs as
+        # their primary sample, so their baseline + minibwa arms would be
+        # byte-identical to the primary's — request only the fg-labs arm for
+        # them and let the primary carry the shared baseline/minibwa grades.
+        flags = CONFIG.samples[sample].fg_labs_flags
+        secondary = "genomic" in flags or "--fast" in flags
         for rep in range(1, reps + 1):
             base = f"runs/{FG_LABS_SHA}/{sample}/{arch}/rep-{rep}/eval"
             targets.append(f"{base}/fg-labs.variants.tsv")
-            if not genomic:
+            if not secondary:
                 targets.append(f"{base}/baseline.variants.tsv")
                 targets.append(f"{base}/minibwa.variants.tsv")
     return targets
+
+
+# ---------------------------------------------------------------------------
+# `--fast` preset benchmark (fg-labs/bwa-mem3 PR #189). Opt-in `fast` target.
+#
+# For each base sample we run BOTH the default arm and its `<base>-fast` sibling
+# at the SAME fg-labs SHA, so default-vs-fast isolates the preset on a
+# byte-identical binary. Deliverables:
+#   - wall + peak RSS: each arm's tricord timing.tsv (ingested per-sample).
+#   - upstream/bwameth concordance + drift: the default arm's vs-baseline.json
+#     (x86) / vs-x86.json (arm), exactly as `rule all`.
+#   - fast-vs-default concordance (the headline, MAPQ-stratified): the fast
+#     arm's vs-default.json on every arch the default arm runs on.
+#   - truth-based sensitivity/specificity/MAPQ/meth-corr for the sim siblings.
+#
+# minibwa is reused untouched — cached by MINIBWA_SHA, independent of the
+# fg-labs SHA — so `--target fast` re-aligns nothing on the minibwa side.
+# ---------------------------------------------------------------------------
+# Real-data bases (speed + memory + concordance); each needs a `*-fast` sibling.
+FAST_REAL_BASES = ["wgs-5M", "wes-5M", "meth-twist-emseq-5M"]
+# Truth bases (holodeck-graded accuracy).
+FAST_SIM_BASES = ["sim-wgs-place", "sim-wgs-vars", "sim-meth-place", "sim-meth-vars"]
+
+
+def _fast_speed_targets() -> list:
+    """Sentinels for the real-data fast benchmark: default-arm upstream
+    concordance + both arms' timing + the fast-vs-default headline concordance.
+    """
+    targets = []
+    for base in FAST_REAL_BASES:
+        fast = f"{base}-fast"
+        meth = _is_meth_sample(base)
+        # Default arm at this SHA — mirror `rule all`: vs-baseline on x86 (pulls
+        # the upstream baseline + the default fg-labs BAM/timing), vs-x86 on arm
+        # (transitive concordance + arm timing; non-meth only).
+        for arch in _archs_for_sample(base):
+            for rep in range(1, REPS + 1):
+                targets.append(
+                    f"runs/{FG_LABS_SHA}/{base}/{arch}/rep-{rep}/compare/vs-baseline.json"
+                )
+            for rep in range(1, REPS_BASELINE + 1):
+                targets.append(
+                    f"baseline/bwa-mem2-{CONFIG.upstream_tag}/{base}/{arch}/rep-{rep}/aligned.bam"
+                )
+        if not meth:
+            for arch in ARM_ARCHS:
+                for rep in range(1, REPS + 1):
+                    targets.append(
+                        f"runs/{FG_LABS_SHA}/{base}/{arch}/rep-{rep}/compare/vs-x86.json"
+                    )
+        # Fast arm: headline fast-vs-default concordance on every arch the
+        # default arm runs on. vs-default pulls the fast BAM/timing as its query
+        # and the default BAM as its baseline, so no redundant fast-arm upstream
+        # alignment is paid.
+        fast_archs = list(_archs_for_sample(base)) + ([] if meth else list(ARM_ARCHS))
+        for arch in fast_archs:
+            for rep in range(1, REPS + 1):
+                targets.append(
+                    f"runs/{FG_LABS_SHA}/{fast}/{arch}/rep-{rep}/compare/vs-default.json"
+                )
+    return targets
+
+
+def _fast_accuracy_targets() -> list:
+    """Truth-based accuracy for the sim bases (full arms: fg-labs + baseline +
+    minibwa) plus their `*-fast` siblings (fg-labs-only — _accuracy_targets
+    treats `--fast` as a secondary arm sharing the primary's source)."""
+    return _accuracy_targets(FAST_SIM_BASES, REPS) + _accuracy_targets(
+        [f"{b}-fast" for b in FAST_SIM_BASES], REPS
+    )
 
 
 rule all:
@@ -284,7 +374,7 @@ rule baseline_all:
         [
             f"baseline/bwa-mem2-{CONFIG.upstream_tag}/{sample}/{arch}/rep-{rep}/aligned.bam"
             for sample in CONFIG.samples
-            if not CONFIG.samples[sample].truth
+            if not CONFIG.samples[sample].truth and not _is_fast_sample(sample)
             for arch in _archs_for_sample(sample)
             for rep in range(1, REPS_BASELINE + 1)
         ]
@@ -448,3 +538,57 @@ rule accuracy_smoke:
     """
     input:
         _accuracy_targets(SMOKE_SIM_SAMPLES, 1)
+
+
+rule fast:
+    """`--fast` preset benchmark (fg-labs/bwa-mem3 PR #189) — opt-in.
+
+    Runs each FAST_REAL_BASES sample with AND without `--fast` at one fg-labs
+    SHA (so default-vs-fast isolates the preset on a byte-identical binary),
+    plus the FAST_SIM_BASES truth-based accuracy arms. Produces:
+      - wall + peak RSS per arm (tricord timing.tsv),
+      - upstream/bwameth concordance for the default arm (vs-baseline / vs-x86),
+      - fast-vs-default concordance with MAPQ stratification (vs-default.json),
+      - holodeck-graded sensitivity/specificity for the sim siblings.
+    minibwa is reused from its MINIBWA_SHA cache (nothing re-aligns there).
+
+    Build the image at PR #189's head SHA first, then submit; the default and
+    fast arms are produced together by this one target.
+
+    Usage:
+        snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
+            --config fg_labs_sha=<#189-head-sha> -- fast
+    """
+    input:
+        _fast_speed_targets(),
+        _fast_accuracy_targets(),
+
+
+rule fast_smoke:
+    """End-to-end AWS smoke for the `--fast` preset pipeline — cheap wiring
+    validation before the full `fast` run. Exercises, at 1 rep:
+      - `--fast` align (smoke-1M-fast) + fast-vs-default + fast-vs-upstream on
+        c6a (x86 baseline), plus fast-vs-default + transitive vs-x86 on c8g,
+      - `--meth --fast` align (smoke-meth-fast) + compares on m7i,
+      - the accuracy fast arm (sim-smoke-vars-fast grades vs holodeck truth) on
+        c6a.
+    Submit with the matching archs (c6a,c8g,m7i) and build the image at PR
+    #189's head SHA first.
+
+    Usage:
+        snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
+            --config fg_labs_sha=<sha> archs=c6a,c8g,m7i -- fast_smoke
+    """
+    input:
+        # Non-meth: default + fast vs upstream (c6a); fast vs default (c6a, c8g).
+        f"runs/{FG_LABS_SHA}/smoke-1M/c6a/rep-1/compare/vs-baseline.json",
+        f"runs/{FG_LABS_SHA}/smoke-1M-fast/c6a/rep-1/compare/vs-baseline.json",
+        f"runs/{FG_LABS_SHA}/smoke-1M-fast/c6a/rep-1/compare/vs-default.json",
+        f"runs/{FG_LABS_SHA}/smoke-1M-fast/c8g/rep-1/compare/vs-default.json",
+        f"runs/{FG_LABS_SHA}/smoke-1M-fast/c8g/rep-1/compare/vs-x86.json",
+        # Meth: default + fast vs bwameth (m7i); fast vs default (m7i).
+        f"runs/{FG_LABS_SHA}/smoke-meth/m7i/rep-1/compare/vs-baseline.json",
+        f"runs/{FG_LABS_SHA}/smoke-meth-fast/m7i/rep-1/compare/vs-baseline.json",
+        f"runs/{FG_LABS_SHA}/smoke-meth-fast/m7i/rep-1/compare/vs-default.json",
+        # Accuracy: the fast arm grades against truth (chr22-slice).
+        f"runs/{FG_LABS_SHA}/sim-smoke-vars-fast/c6a/rep-1/eval/fg-labs.variants.tsv",

@@ -170,3 +170,97 @@ samples:
     source: data/sim/sim-smoke-meth-vars/
     fg_labs_flags: ["--meth", "--meth-scoring", "genomic"]
     truth: true
+
+  # ---------------------------------------------------------------------------
+  # `--fast` preset siblings (fg-labs/bwa-mem3 PR #189). Each `<base>-fast`
+  # sample SHARES its base sample's `source` (identical FASTQs + truth) and
+  # differs only by adding `--fast` to `fg_labs_flags`, so default-vs-fast
+  # isolates the preset on a byte-identical binary at one fg-labs SHA — exactly
+  # the `*-genomic` meth-scoring sibling pattern (the align rules key flags off
+  # the sample name, so a second flag set over one dataset is a second sample).
+  #
+  # `--fast` ≡ `-m 10 -y 0 --min-ext-len 30 --smem-dedup` (+ `-s 0` under
+  # `--meth`); PR #189 reports ~1.86x wall / -51% CPU on WGS with divergence
+  # confined to low-MAPQ reads. These siblings are NOT in `rule all` /
+  # `baseline_all` / `accuracy` — they are driven only by the opt-in `fast`
+  # target (workflow/Snakefile), which adds the fast-vs-default concordance
+  # (`compare/vs-default.json`) the standard sweep does not produce.
+  #
+  # Real-data arms (wall + peak RSS + concordance via compare-bams):
+  # ---------------------------------------------------------------------------
+  wgs-5M-fast:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/wgs/1kg-HG00096/downsampled-5M/
+    fg_labs_flags: ["--fast"]
+
+  wes-5M-fast:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/wes/1kg-HG00100/downsampled-5M/
+    fg_labs_flags: ["--fast"]
+
+  meth-twist-emseq-5M-fast:
+    baseline_tool: bwameth
+    reference: hg38-meth
+    source: data/meth/twist-emseq/downsampled-5M/
+    fg_labs_flags: ["--meth", "--fast"]
+    compare_options:
+      ignore_tags: ["YD", "XM", "XG"]
+
+  # ---------------------------------------------------------------------------
+  # Truth-based accuracy arms (holodeck-graded placement + MAPQ calibration +
+  # variant representation, and methylation correlation for meth). These verify
+  # PR #189's "no high-confidence accuracy loss" claim against known truth.
+  # ---------------------------------------------------------------------------
+  sim-wgs-place-fast:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/sim/sim-wgs-place/
+    fg_labs_flags: ["--fast"]
+    truth: true
+
+  sim-wgs-vars-fast:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/sim/sim-wgs-vars/
+    fg_labs_flags: ["--fast"]
+    truth: true
+
+  sim-meth-place-fast:
+    baseline_tool: bwameth
+    reference: hg38-meth
+    source: data/sim/sim-meth-place/
+    fg_labs_flags: ["--meth", "--fast"]
+    truth: true
+
+  sim-meth-vars-fast:
+    baseline_tool: bwameth
+    reference: hg38-meth
+    source: data/sim/sim-meth-vars/
+    fg_labs_flags: ["--meth", "--fast"]
+    truth: true
+
+  # `--fast` smoke siblings — cheap end-to-end wiring validation for the fast
+  # pipeline (align + compare_vs_default + accuracy fast arm) before the full
+  # `fast` run. Driven by `--target fast_smoke`.
+  smoke-1M-fast:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/smoke/1M/
+    fg_labs_flags: ["--fast"]
+
+  smoke-meth-fast:
+    baseline_tool: bwameth
+    reference: hg38-meth
+    source: data/smoke-meth/10K/
+    fg_labs_flags: ["--meth", "--fast"]
+    compare_options:
+      ignore_tags: ["YD", "XM", "XG"]
+
+  sim-smoke-vars-fast:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/sim/sim-smoke-vars/
+    fg_labs_flags: ["--fast"]
+    truth: true

@@ -83,6 +83,37 @@ def test_ingest_creates_run_and_trial_and_comparison(db_path: Path) -> None:
     conn.close()
 
 
+def test_ingest_vs_default_comparison(db_path: Path, tmp_path: Path) -> None:
+    """A `--fast` arm's compare/vs-default.json (PR #189) ingests as a
+    `comparisons` row with kind='vs-default', alongside the trial's timing."""
+    sha = "def5678"
+    rep_dir = tmp_path / sha / "wgs-5M-fast" / "c8g" / "rep-1"
+    (rep_dir / "benchmarks").mkdir(parents=True)
+    (rep_dir / "compare").mkdir(parents=True)
+    (rep_dir / "benchmarks" / "timing.tsv").write_text(
+        _TIMING_HEADER + "\n"
+        "9.100\t0:00:09\t1024.50\t2048.00\t900.00\t950.00\t200.75\t50.25\t380.00\t40.10\n"
+    )
+    (rep_dir / "compare" / "vs-default.json").write_text(
+        json.dumps(
+            {
+                "total_reads": 2003,
+                "concordant": 1990,
+                "concordance_pct": 99.35,
+                "by_class": {"mapq_diff": {"count": 13}},
+            }
+        )
+    )
+
+    conn = connect(db_path)
+    assert ingest_run(conn, runs_root=tmp_path, fg_labs_sha=sha) == 1
+    comp = conn.execute(
+        "SELECT kind, concordance_pct, total, concordant FROM comparisons"
+    ).fetchone()
+    assert comp == ("vs-default", 99.35, 2003, 1990)
+    conn.close()
+
+
 def test_supp_json_extracts_only_supp_keys() -> None:
     comp = {
         "concordance_pct": 99.9996,
