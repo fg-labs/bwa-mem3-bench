@@ -108,8 +108,12 @@ RUN git clone --recursive ${FG_LABS_REPO} fg-labs && \
     git fetch --all --quiet && \
     git checkout ${FG_LABS_SHA} && \
     git submodule update --init --recursive && \
-    # Same GCC-12 __rdtsc redefinition fix as upstream (no-op if fg-labs already patched).
-    sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true
+    # Same GCC-12 __rdtsc redefinition fix as upstream (no-op if fg-labs already
+    # patched). The `|| true` is scoped to JUST the sed via the brace group — a
+    # failing `git checkout` (e.g. a stale/orphaned FG_LABS_SHA after a PR
+    # force-push) MUST fail the build, not get swallowed and silently fall back
+    # to the default-branch HEAD, shipping a binary that isn't the requested SHA.
+    { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; }
 # Build fg-labs bwa-mem3. Since fg-labs PR #83, x86 ships a single binary
 # with all five SIMD tiers (sse41/sse42/avx/avx2/avx512bw) compiled in and
 # selected at runtime via in-process dispatch — no more `make multi` launcher
