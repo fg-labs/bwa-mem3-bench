@@ -344,8 +344,14 @@ pixi run python -m bwa_mem3_bench.cli bench speedup --fg-labs-sha <fg-sha> \
 ### Intentionally NOT integrated
 
 - No `compare_*` rule — output equivalency is out of scope (wall time only).
-- No meth support — minibwa's `--meth` is a separate path; m7i is excluded
-  from `MINIBWA_ARCHS`.
+- minibwa meth IS supported (bisulfite `--meth` → `.meth.mbw` BS-seq index in
+  `align_minibwa.smk`; the `.meth.mbw` index is staged in S3). It is excluded
+  from the default `minibwa` target only because that target's `MINIBWA_ARCHS`
+  drops m7i (the meth arch) — but the rule runs meth fine, and the `--fast`
+  benchmark's `_fast_minibwa_targets()` runs minibwa on `meth-twist-emseq-5M`
+  /m7i (mem bumped to 48 GB for the 12.8 GB `.meth.mbw`). minibwa also runs the
+  sim-meth accuracy datasets. (Methylation-level correlation is still NA —
+  minibwa emits no XM tags — so meth minibwa is scored on placement + speed.)
 - No Hi-C / SBX single-end rows in the default `minibwa` target — `wgs-5M` and
   `wes-5M` (standard paired-end) carry the headline cross-arch signal; the
   rule itself handles single-end via `_query_fastqs` if a target adds it.

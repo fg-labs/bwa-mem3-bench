@@ -302,6 +302,28 @@ def _fast_accuracy_targets() -> list:
     )
 
 
+def _fast_minibwa_targets() -> list:
+    """minibwa wall-time probe for the fast comparison, cached by MINIBWA_SHA.
+
+    Non-meth real samples run on every MINIBWA_ARCHS arch (reused from prior
+    runs — only a MINIBWA_SHA bump re-aligns). The meth sample additionally
+    runs minibwa in bisulfite mode (`--meth` → `.meth.mbw`) on m7i — the
+    standard `minibwa` target omits this because MINIBWA_ARCHS excludes m7i,
+    but minibwa's BS-seq path is real and the meth speed comparison wants it.
+    """
+    targets = [
+        f"minibwa/{MINIBWA_SHA}/{base}/{arch}/rep-{r}/aligned.minibwa.bam"
+        for base in ("wgs-5M", "wes-5M")
+        for arch in MINIBWA_ARCHS
+        for r in range(1, REPS + 1)
+    ]
+    targets += [
+        f"minibwa/{MINIBWA_SHA}/meth-twist-emseq-5M/m7i/rep-{r}/aligned.minibwa.bam"
+        for r in range(1, REPS + 1)
+    ]
+    return targets
+
+
 rule all:
     input:
         # fg-labs query alignments + concordance reports (baseline rep-1 is
@@ -562,6 +584,7 @@ rule fast:
     input:
         _fast_speed_targets(),
         _fast_accuracy_targets(),
+        _fast_minibwa_targets(),
 
 
 rule fast_smoke:
