@@ -135,6 +135,7 @@ localrules:
     accuracy,
     accuracy_smoke,
     fast,
+    fast_meth,
     fast_smoke,
     emit_meta,
 
@@ -585,6 +586,36 @@ rule fast:
         _fast_speed_targets(),
         _fast_accuracy_targets(),
         _fast_minibwa_targets(),
+
+
+rule fast_meth:
+    """Meth-only slice of `fast` — re-verify just the `--fast --meth` arm (e.g.
+    after changing its reseed level) without re-running the SHA-stable non-meth
+    matrix. Meth runs only on m7i. Produces, for the meth sample and the two
+    meth sim datasets:
+      - default vs bwameth concordance + fast vs default concordance,
+      - truth-graded placement for default + fast (fg-labs) arms,
+      - minibwa meth speed (cached by MINIBWA_SHA — reused, not re-aligned).
+
+    Usage:
+        snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
+            --config fg_labs_sha=<sha> archs=m7i -- fast_meth
+    """
+    input:
+        [
+            f"runs/{FG_LABS_SHA}/meth-twist-emseq-5M/m7i/rep-{r}/compare/vs-baseline.json"
+            for r in range(1, REPS + 1)
+        ],
+        [
+            f"runs/{FG_LABS_SHA}/meth-twist-emseq-5M-fast/m7i/rep-{r}/compare/vs-default.json"
+            for r in range(1, REPS + 1)
+        ],
+        _accuracy_targets(["sim-meth-place", "sim-meth-vars"], REPS),
+        _accuracy_targets(["sim-meth-place-fast", "sim-meth-vars-fast"], REPS),
+        [
+            f"minibwa/{MINIBWA_SHA}/meth-twist-emseq-5M/m7i/rep-{r}/aligned.minibwa.bam"
+            for r in range(1, REPS + 1)
+        ],
 
 
 rule fast_smoke:
