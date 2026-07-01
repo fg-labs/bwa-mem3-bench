@@ -296,6 +296,9 @@ def test_fast_siblings_share_source_and_only_add_fast_flag() -> None:
     pairs = {
         "wgs-5M": "wgs-5M-fast",
         "wes-5M": "wes-5M-fast",
+        "panel-twist-5M": "panel-twist-5M-fast",
+        "hic-1M": "hic-1M-fast",
+        "sbx-1M": "sbx-1M-fast",
         "meth-twist-emseq-5M": "meth-twist-emseq-5M-fast",
         "sim-wgs-place": "sim-wgs-place-fast",
         "sim-wgs-vars": "sim-wgs-vars-fast",
@@ -309,6 +312,10 @@ def test_fast_siblings_share_source_and_only_add_fast_flag() -> None:
         assert fast.reference == base.reference, fast_name
         assert fast.baseline_tool == base.baseline_tool, fast_name
         assert fast.truth == base.truth, fast_name
+        # Layout + mem_flags must be preserved so fast-vs-default stays
+        # apples-to-apples (sbx is single-end; hic carries -5 -S -P).
+        assert fast.layout == base.layout, fast_name
+        assert fast.mem_flags == base.mem_flags, fast_name
         # The fast arm's flags are the base's flags plus `--fast`, nothing else.
         assert fast.fg_labs_flags == [*base.fg_labs_flags, "--fast"], fast_name
         # is_meth must agree with the (shared) reference — `--fast` never flips it.

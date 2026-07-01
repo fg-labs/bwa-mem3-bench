@@ -250,7 +250,19 @@ def _accuracy_targets(samples: list, reps: int) -> list:
 # fg-labs SHA — so `--target fast` re-aligns nothing on the minibwa side.
 # ---------------------------------------------------------------------------
 # Real-data bases (speed + memory + concordance); each needs a `*-fast` sibling.
-FAST_REAL_BASES = ["wgs-5M", "wes-5M", "meth-twist-emseq-5M"]
+# Every real dataset the benchmark carries, so `--fast` is compared on all of
+# them. Non-meth bases sweep all arches (via _archs_for_sample + ARM); meth is
+# pinned to m7i — the only bench arch with enough RAM (~48 GB) for the doubled
+# meth FMI, so a cross-microarch meth sweep would need larger instances (infra
+# change), not just a target edit.
+FAST_REAL_BASES = [
+    "wgs-5M",
+    "wes-5M",
+    "panel-twist-5M",
+    "hic-1M",
+    "sbx-1M",
+    "meth-twist-emseq-5M",
+]
 # Truth bases (holodeck-graded accuracy).
 FAST_SIM_BASES = ["sim-wgs-place", "sim-wgs-vars", "sim-meth-place", "sim-meth-vars"]
 
@@ -312,9 +324,10 @@ def _fast_minibwa_targets() -> list:
     standard `minibwa` target omits this because MINIBWA_ARCHS excludes m7i,
     but minibwa's BS-seq path is real and the meth speed comparison wants it.
     """
+    nonmeth_bases = [b for b in FAST_REAL_BASES if not _is_meth_sample(b)]
     targets = [
         f"minibwa/{MINIBWA_SHA}/{base}/{arch}/rep-{r}/aligned.minibwa.bam"
-        for base in ("wgs-5M", "wes-5M")
+        for base in nonmeth_bases
         for arch in MINIBWA_ARCHS
         for r in range(1, REPS + 1)
     ]

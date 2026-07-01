@@ -208,6 +208,31 @@ samples:
     compare_options:
       ignore_tags: ["YD", "XM", "XG"]
 
+  # Remaining real datasets, so `--fast` is compared on every dataset the
+  # benchmark carries. Each mirrors its base sample's layout / mem_flags so the
+  # fast-vs-default comparison stays apples-to-apples.
+  panel-twist-5M-fast:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/panel/twist-umi/downsampled-5M/
+    fg_labs_flags: ["--fast"]
+
+  hic-1M-fast:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/hic/hg002-1M/
+    layout: paired
+    fg_labs_flags: ["--fast"]
+    # Same canonical Hi-C mem flags as the base (applied to both arms).
+    mem_flags: ["-5", "-S", "-P"]
+
+  sbx-1M-fast:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/sbx/hg002-1M/
+    layout: single
+    fg_labs_flags: ["--fast"]
+
   # ---------------------------------------------------------------------------
   # Truth-based accuracy arms (holodeck-graded placement + MAPQ calibration +
   # variant representation, and methylation correlation for meth). These verify
