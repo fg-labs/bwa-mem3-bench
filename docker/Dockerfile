@@ -101,8 +101,63 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
         libdeflate-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Build fg-labs bwa-mem3. Fetch all branches so ${FG_LABS_SHA} can point to any
-# branch (e.g. fg-main) not just the repo's default.
+# NOTE: the fg-labs/bwa-mem3 clone + build is deliberately the LAST step in this
+# stage (moved below, after compare-bams / minibwa / tricord / holodeck).
+# FG_LABS_SHA is the one build input that changes on every release iteration, and
+# Docker's per-stage layer cache is a linear chain — any layer *after* the
+# invalidated one rebuilds regardless of its own inputs. Keeping the SHA-keyed
+# fg-labs build last means a bwa-mem3-only SHA bump rebuilds just that block; the
+# SHA-independent tool builds above (incl. the slow tricord/holodeck cargo
+# installs) stay cached. libdeflate-dev (installed above, after the upstream
+# bwa-mem2 build) is already present for the fg-labs build.
+
+# Build compare-bams.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml /src/
+COPY tools/compare-bams /src/tools/compare-bams
+RUN cd /src && cargo build --release --bin compare-bams && \
+    install -Dm755 /src/target/release/compare-bams /out/bin/compare-bams
+
+# Build lh3/minibwa from the vendored submodule (vendor/minibwa, populated on
+# the host via `git submodule update --init`). Single binary; ksw2 has a
+# portable SIMD layer (NEON on arm64 via s2n-lite.h, SSE4.2 on x86 — minibwa
+# has no AVX path yet). The submodule pin captures the source SHA; MINIBWA_SHA
+# is set only as a build-arg label for the resulting image.
+#
+# The aarch64 GCC-12 s2n-lite.h type-mismatch on _mm_add_epi32 / _mm_sub_epi32
+# (unsigned vaddq_u32 reinterpreted via signed vreinterpretq_u8_s32) that
+# earlier pins needed a sed patch for was fixed upstream as of the pinned SHA
+# (s2n-lite.h now uses vaddq_s32/vsubq_s32 consistently), so no patch is
+# applied — the source builds cleanly on GCC 12+ for both arches.
+COPY vendor/minibwa /build/minibwa
+RUN cd /build/minibwa && \
+    make clean && \
+    make -j"$(nproc)" && \
+    install -Dm755 minibwa /out/bin/minibwa
+
+# Install tricorder (fg-labs/tricord) for benchmarking the alignment subprocess
+# without snakemake's `benchmark:` directive. Tricord requires Rust 1.94+, so
+# install a separate stable toolchain rather than retraining 1.85 above. We
+# pin to a published crates.io version for reproducibility; bump as needed.
+ARG TRICORD_VERSION=0.1.2
+RUN rustup toolchain install stable --profile minimal --no-self-update && \
+    cargo +stable install --locked --root /out --version "${TRICORD_VERSION}" tricord
+
+# Install holodeck (fg-labs/holodeck) for the truth-based accuracy benchmark:
+# it generates the simulated truth datasets and provides `holodeck eval`. The
+# repo is public, so cargo-install it from a pinned git ref (no submodule).
+# Build with +stable (already installed for tricord, >=1.94): the +toolchain
+# override takes precedence over holodeck's rust-toolchain.toml pin, avoiding a
+# hard toolchain coupling. holodeck's `built` build-dependency links libgit2,
+# hence libgit2-dev in the builder apt (build-only; the binary does not link it).
+ARG HOLODECK_REPO
+ARG HOLODECK_REF
+RUN cargo +stable install --locked --git "${HOLODECK_REPO}" --rev "${HOLODECK_REF}" \
+    --root /out holodeck
+
+# Build fg-labs bwa-mem3 — intentionally the LAST builder step (see the NOTE
+# above the compare-bams build for the layer-cache rationale). Fetch all branches
+# so ${FG_LABS_SHA} can point to any branch (e.g. fg-main) or a release-please
+# branch, not just the repo's default.
 RUN git clone --recursive ${FG_LABS_REPO} fg-labs && \
     cd fg-labs && \
     git fetch --all --quiet && \
@@ -147,49 +202,6 @@ RUN cd fg-labs && \
         exit 1 ;; \
     esac && \
     install -Dm755 "$BUILT_BIN" /out/bin/bwa-mem2.fg-labs
-
-# Build compare-bams.
-COPY Cargo.toml Cargo.lock rust-toolchain.toml /src/
-COPY tools/compare-bams /src/tools/compare-bams
-RUN cd /src && cargo build --release --bin compare-bams && \
-    install -Dm755 /src/target/release/compare-bams /out/bin/compare-bams
-
-# Build lh3/minibwa from the vendored submodule (vendor/minibwa, populated on
-# the host via `git submodule update --init`). Single binary; ksw2 has a
-# portable SIMD layer (NEON on arm64 via s2n-lite.h, SSE4.2 on x86 — minibwa
-# has no AVX path yet). The submodule pin captures the source SHA; MINIBWA_SHA
-# is set only as a build-arg label for the resulting image.
-#
-# The aarch64 GCC-12 s2n-lite.h type-mismatch on _mm_add_epi32 / _mm_sub_epi32
-# (unsigned vaddq_u32 reinterpreted via signed vreinterpretq_u8_s32) that
-# earlier pins needed a sed patch for was fixed upstream as of the pinned SHA
-# (s2n-lite.h now uses vaddq_s32/vsubq_s32 consistently), so no patch is
-# applied — the source builds cleanly on GCC 12+ for both arches.
-COPY vendor/minibwa /build/minibwa
-RUN cd /build/minibwa && \
-    make clean && \
-    make -j"$(nproc)" && \
-    install -Dm755 minibwa /out/bin/minibwa
-
-# Install tricorder (fg-labs/tricord) for benchmarking the alignment subprocess
-# without snakemake's `benchmark:` directive. Tricord requires Rust 1.94+, so
-# install a separate stable toolchain rather than retraining 1.85 above. We
-# pin to a published crates.io version for reproducibility; bump as needed.
-ARG TRICORD_VERSION=0.1.2
-RUN rustup toolchain install stable --profile minimal --no-self-update && \
-    cargo +stable install --locked --root /out --version "${TRICORD_VERSION}" tricord
-
-# Install holodeck (fg-labs/holodeck) for the truth-based accuracy benchmark:
-# it generates the simulated truth datasets and provides `holodeck eval`. The
-# repo is public, so cargo-install it from a pinned git ref (no submodule).
-# Build with +stable (already installed for tricord, >=1.94): the +toolchain
-# override takes precedence over holodeck's rust-toolchain.toml pin, avoiding a
-# hard toolchain coupling. holodeck's `built` build-dependency links libgit2,
-# hence libgit2-dev in the builder apt (build-only; the binary does not link it).
-ARG HOLODECK_REPO
-ARG HOLODECK_REF
-RUN cargo +stable install --locked --git "${HOLODECK_REPO}" --rev "${HOLODECK_REF}" \
-    --root /out holodeck
 
 ############ Stage 2: runtime ############
 FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS runtime
