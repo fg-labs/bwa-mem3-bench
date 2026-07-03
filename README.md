@@ -56,7 +56,7 @@ Submit a benchmark run (fire-and-forget coordinator on AWS):
 ```bash
 pixi run python -m bwa_mem3_bench.cli build --fg-labs-sha <sha> --push  # builds + pushes to ECR
 pixi run python -m bwa_mem3_bench.cli submit --fg-labs-sha <sha>         # smoke by default
-# or: --target all / --target baseline_all
+# or: --target all / --target baseline_all / --target bless_release (full release matrix)
 ```
 
 The `submit` command fires a small coordinator Batch job (c6a.large spot) that runs

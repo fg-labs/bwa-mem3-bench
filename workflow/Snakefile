@@ -128,6 +128,7 @@ include: "rules/eval.smk"
 localrules:
     all,
     baseline_all,
+    bless_release,
     smoke,
     smoke_meth,
     minibwa,
@@ -395,6 +396,37 @@ rule all:
             for rep in range(1, REPS + 1)
             if GOLDEN_REF_SHA and GOLDEN_REF_SHA != FG_LABS_SHA and sample in GOLDEN_SAMPLES
         ],
+
+
+rule bless_release:
+    """Full candidate-release validation matrix — run to bless a fg-labs release.
+
+    The union of three otherwise-separate targets, deduped by Snakemake:
+      - `all`      — default-arm speed + upstream/x86 concordance across arches
+                     (the regression sweep; deliberately excludes --fast/truth).
+      - `fast`     — the `--fast` preset on every real dataset (incl. --fast
+                     --meth on m7i): fast-vs-default concordance + timing + the
+                     fast sim-accuracy arms + minibwa wall-time.
+      - `accuracy` — holodeck truth-graded placement / MAPQ / variant / meth-corr
+                     over the full sim datasets.
+
+    Deliberately a SEPARATE aggregator rather than folding these into `all`:
+    `all` is the cross-SHA regression baseline (`bench regression` diffs this
+    run's `all` outputs against the pinned golden's), so its target set must stay
+    byte-for-byte stable. `bless_release` layers the release-validation extras on
+    top without perturbing that invariant. The default-arm targets shared with
+    `all` resolve to the same output paths and are computed once.
+
+    Usage:
+        snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
+            --config fg_labs_sha=<sha> -- bless_release
+    """
+    input:
+        rules.all.input,
+        _fast_speed_targets(),
+        _fast_accuracy_targets(),
+        _fast_minibwa_targets(),
+        _accuracy_targets(FULL_SIM_SAMPLES, REPS),
 
 
 rule baseline_all:
