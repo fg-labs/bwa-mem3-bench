@@ -60,6 +60,19 @@ def test_target_baseline_all_auto_fills_archs() -> None:
     assert "c8g" in archs.split(",")
 
 
+def test_target_bless_release_auto_fills_archs() -> None:
+    """``bless_release`` is the full candidate-release matrix (all + fast +
+    accuracy); its inputs iterate ARCHS, so — like ``all`` — it must expand to
+    the full arch sweep when no ``--archs`` is given, or it silently shrinks to
+    the single ``core_arch`` default."""
+    with patch.object(submit_module, "run_cmd") as mock_run:
+        submit_module.submit(fg_labs_sha="deadbeef", target="bless_release")
+
+    archs = _captured_archs(mock_run.call_args_list)
+    assert archs is not None, "expected ARCHS env override for target=bless_release"
+    assert set(archs.split(",")) == {"c8g", "c7g", "c6a", "c7i", "c7a", "m7i"}
+
+
 def test_target_smoke_does_not_auto_fill_archs() -> None:
     """``rule smoke`` iterates ``CONFIG.full_archs`` directly, so leave ARCHS unset."""
     with patch.object(submit_module, "run_cmd") as mock_run:

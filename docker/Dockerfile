@@ -101,48 +101,15 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
         libdeflate-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Build fg-labs bwa-mem3. Fetch all branches so ${FG_LABS_SHA} can point to any
-# branch (e.g. fg-main) not just the repo's default.
-RUN git clone --recursive ${FG_LABS_REPO} fg-labs && \
-    cd fg-labs && \
-    git fetch --all --quiet && \
-    git checkout ${FG_LABS_SHA} && \
-    git submodule update --init --recursive && \
-    # Same GCC-12 __rdtsc redefinition fix as upstream (no-op if fg-labs already patched).
-    sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true
-# Build fg-labs bwa-mem3. Since fg-labs PR #83, x86 ships a single binary
-# with all five SIMD tiers (sse41/sse42/avx/avx2/avx512bw) compiled in and
-# selected at runtime via in-process dispatch — no more `make multi` launcher
-# + per-tier binaries. ARM is unchanged: still one binary, runtime-detected.
-# The output filename was also renamed `bwa-mem2` → `bwa-mem3` (PR-rename).
-# We install it under the legacy `bwa-mem2.fg-labs` path so the workflow
-# rules that invoke `bwa-mem2.fg-labs mem` keep working untouched.
-RUN cd fg-labs && \
-    BUILT_BIN=bwa-mem3 && \
-    case "${FG_LABS_MAKE_TARGET:-}" in \
-      "" ) \
-        if [ "$TARGETARCH" = "arm64" ]; then \
-            make arch=arm64 -j"$(nproc)"; \
-        else \
-            make BASELINE_ARCH="${BASELINE_ARCH:-avx2}" -j"$(nproc)"; \
-        fi ;; \
-      lto-build ) \
-        # `make lto-build` produces `bwa-mem3.lto`. LTO_ARCH selects the arch
-        # flag passed to the inner make (Makefile defaults to `native`, which
-        # would resolve to the build host's microarch rather than the bench
-        # target's — set it explicitly so the LTO binary matches the
-        # corresponding non-LTO build on the same arch.
-        if [ "$TARGETARCH" = "arm64" ]; then \
-            make lto-build LTO_ARCH=arm64 -j"$(nproc)"; \
-        else \
-            make lto-build LTO_ARCH="${BASELINE_ARCH:-avx2}" -j"$(nproc)"; \
-        fi && \
-        BUILT_BIN=bwa-mem3.lto ;; \
-      * ) \
-        echo "ERROR: unsupported FG_LABS_MAKE_TARGET=${FG_LABS_MAKE_TARGET} (supported: '' / lto-build)" >&2 ; \
-        exit 1 ;; \
-    esac && \
-    install -Dm755 "$BUILT_BIN" /out/bin/bwa-mem2.fg-labs
+# NOTE: the fg-labs/bwa-mem3 clone + build is deliberately the LAST step in this
+# stage (moved below, after compare-bams / minibwa / tricord / holodeck).
+# FG_LABS_SHA is the one build input that changes on every release iteration, and
+# Docker's per-stage layer cache is a linear chain — any layer *after* the
+# invalidated one rebuilds regardless of its own inputs. Keeping the SHA-keyed
+# fg-labs build last means a bwa-mem3-only SHA bump rebuilds just that block; the
+# SHA-independent tool builds above (incl. the slow tricord/holodeck cargo
+# installs) stay cached. libdeflate-dev (installed above, after the upstream
+# bwa-mem2 build) is already present for the fg-labs build.
 
 # Build compare-bams.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml /src/
@@ -186,6 +153,55 @@ ARG HOLODECK_REPO
 ARG HOLODECK_REF
 RUN cargo +stable install --locked --git "${HOLODECK_REPO}" --rev "${HOLODECK_REF}" \
     --root /out holodeck
+
+# Build fg-labs bwa-mem3 — intentionally the LAST builder step (see the NOTE
+# above the compare-bams build for the layer-cache rationale). Fetch all branches
+# so ${FG_LABS_SHA} can point to any branch (e.g. fg-main) or a release-please
+# branch, not just the repo's default.
+RUN git clone --recursive ${FG_LABS_REPO} fg-labs && \
+    cd fg-labs && \
+    git fetch --all --quiet && \
+    git checkout ${FG_LABS_SHA} && \
+    git submodule update --init --recursive && \
+    # Same GCC-12 __rdtsc redefinition fix as upstream (no-op if fg-labs already
+    # patched). The `|| true` is scoped to JUST the sed via the brace group — a
+    # failing `git checkout` (e.g. a stale/orphaned FG_LABS_SHA after a PR
+    # force-push) MUST fail the build, not get swallowed and silently fall back
+    # to the default-branch HEAD, shipping a binary that isn't the requested SHA.
+    { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; }
+# Build fg-labs bwa-mem3. Since fg-labs PR #83, x86 ships a single binary
+# with all five SIMD tiers (sse41/sse42/avx/avx2/avx512bw) compiled in and
+# selected at runtime via in-process dispatch — no more `make multi` launcher
+# + per-tier binaries. ARM is unchanged: still one binary, runtime-detected.
+# The output filename was also renamed `bwa-mem2` → `bwa-mem3` (PR-rename).
+# We install it under the legacy `bwa-mem2.fg-labs` path so the workflow
+# rules that invoke `bwa-mem2.fg-labs mem` keep working untouched.
+RUN cd fg-labs && \
+    BUILT_BIN=bwa-mem3 && \
+    case "${FG_LABS_MAKE_TARGET:-}" in \
+      "" ) \
+        if [ "$TARGETARCH" = "arm64" ]; then \
+            make arch=arm64 -j"$(nproc)"; \
+        else \
+            make BASELINE_ARCH="${BASELINE_ARCH:-avx2}" -j"$(nproc)"; \
+        fi ;; \
+      lto-build ) \
+        # `make lto-build` produces `bwa-mem3.lto`. LTO_ARCH selects the arch
+        # flag passed to the inner make (Makefile defaults to `native`, which
+        # would resolve to the build host's microarch rather than the bench
+        # target's — set it explicitly so the LTO binary matches the
+        # corresponding non-LTO build on the same arch.
+        if [ "$TARGETARCH" = "arm64" ]; then \
+            make lto-build LTO_ARCH=arm64 -j"$(nproc)"; \
+        else \
+            make lto-build LTO_ARCH="${BASELINE_ARCH:-avx2}" -j"$(nproc)"; \
+        fi && \
+        BUILT_BIN=bwa-mem3.lto ;; \
+      * ) \
+        echo "ERROR: unsupported FG_LABS_MAKE_TARGET=${FG_LABS_MAKE_TARGET} (supported: '' / lto-build)" >&2 ; \
+        exit 1 ;; \
+    esac && \
+    install -Dm755 "$BUILT_BIN" /out/bin/bwa-mem2.fg-labs
 
 ############ Stage 2: runtime ############
 FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS runtime

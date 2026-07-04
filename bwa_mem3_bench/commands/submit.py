@@ -19,7 +19,9 @@ COORDINATOR_JOB_DEF = _cfg.coordinator_job_definition
 # intent for these targets — they are all "every arch" rules. The minibwa
 # targets iterate MINIBWA_ARCHS (= ARCHS minus m7i), so passing full_archs is
 # correct: m7i is filtered out in the Snakefile.
-_FULL_SWEEP_TARGETS = frozenset({"all", "baseline_all", "minibwa", "minibwa_smoke"})
+_FULL_SWEEP_TARGETS = frozenset(
+    {"all", "baseline_all", "bless_release", "minibwa", "minibwa_smoke"}
+)
 
 
 def submit(  # noqa: PLR0913
@@ -41,7 +43,8 @@ def submit(  # noqa: PLR0913
     — no `iam:PassRole` required.
 
     :param fg_labs_sha: fg-labs/bwa-mem3 SHA. Must already be built + pushed to ECR.
-    :param target: Snakemake target (e.g. ``smoke``, ``all``, ``baseline_all``).
+    :param target: Snakemake target (e.g. ``smoke``, ``all``, ``baseline_all``,
+        ``bless_release`` — the full candidate-release matrix: all + fast + accuracy).
     :param samples: comma-separated sample subset (empty = all).
     :param archs: comma-separated arch subset. Empty falls back to
         ``full_archs`` for ``all`` / ``baseline_all`` (so "full benchmark"

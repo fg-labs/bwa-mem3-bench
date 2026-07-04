@@ -17,6 +17,16 @@ def _ignore_tag_args(sample_name: str) -> str:
     return " ".join(f"--ignore-tag {tag}" for tag in tags)
 
 
+def _default_arm_sample(fast_sample_name: str) -> str:
+    """The default (no-`--fast`) sibling of a `<base>-fast` sample.
+
+    `--fast` siblings share their base sample's `source`, so `align_fg_labs`
+    over the same FASTQ emits primaries in identical input order on both arms —
+    which is all `compare-bams` needs to walk the two streams in lockstep.
+    """
+    return fast_sample_name.removesuffix("-fast")
+
+
 rule compare_vs_baseline:
     input:
         query    = "runs/{sha}/{sample}/{arch}/rep-{rep}/aligned.bam",
@@ -62,6 +72,42 @@ rule compare_vs_x86:
         r"""
         mkdir -p $(dirname {output.json})
         compare-bams --query {input.query} --baseline {input.x86} --out {output.json} {params.ignore_tag_args}
+        """
+
+
+rule compare_vs_default:
+    """`--fast`-preset concordance (fg-labs/bwa-mem3 PR #189): compare a
+    `<base>-fast` arm against its default sibling, both fg-labs at the same
+    SHA on the same arch + rep. This is the direct check of the PR's claim that
+    `--fast` diverges only in low-confidence regions — the `by_class` /
+    MAPQ-stratified breakdown in the emitted JSON is where the "85% of divergent
+    reads are MAPQ<=29" number reproduces on our own data.
+
+    Both arms align the SAME FASTQ, so primaries stream in identical input
+    order; `--smem-dedup`'s supplementary differences surface as compare-bams'
+    supplementary-disagreement metrics rather than desyncing the walk (same
+    mechanism exercised by hic-1M's heavy supplementaries). Only requested by
+    the opt-in `fast` target, and only for `*-fast` samples — for a non-fast
+    sample `_default_arm_sample` is a no-op and the compare would be a vacuous
+    self-comparison, so do not request it there."""
+    input:
+        query   = "runs/{sha}/{sample}/{arch}/rep-{rep}/aligned.bam",
+        default = lambda wc: (
+            f"runs/{wc.sha}/{_default_arm_sample(wc.sample)}/"
+            f"{wc.arch}/rep-{wc.rep}/aligned.bam"
+        ),
+        meta    = "runs/{sha}/{sample}/{arch}/rep-{rep}/benchmarks/meta.json",
+    output:
+        json = "runs/{sha}/{sample}/{arch}/rep-{rep}/compare/vs-default.json",
+    resources:
+        batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
+        container_image = lambda wc: image_for_arch(wc.arch),
+    params:
+        ignore_tag_args = lambda wc: _ignore_tag_args(wc.sample),
+    shell:
+        r"""
+        mkdir -p $(dirname {output.json})
+        compare-bams --query {input.query} --baseline {input.default} --out {output.json} {params.ignore_tag_args}
         """
 
 

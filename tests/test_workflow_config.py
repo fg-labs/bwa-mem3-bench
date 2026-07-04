@@ -288,6 +288,48 @@ def test_sim_meth_collapsed_and_genomic_arms_share_source() -> None:
     assert genomic.fg_labs_flags == ["--meth", "--meth-scoring", "genomic"]
 
 
+def test_fast_siblings_share_source_and_only_add_fast_flag() -> None:
+    """Each `--fast` preset sibling (fg-labs/bwa-mem3 PR #189) shares its base
+    sample's `source`, reference, and baseline_tool, and differs only by adding
+    `--fast` to fg_labs_flags — so default-vs-fast isolates the preset."""
+    cfg = load_config(CONFIG_DIR)
+    pairs = {
+        "wgs-5M": "wgs-5M-fast",
+        "wes-5M": "wes-5M-fast",
+        "panel-twist-5M": "panel-twist-5M-fast",
+        "hic-1M": "hic-1M-fast",
+        "sbx-1M": "sbx-1M-fast",
+        "meth-twist-emseq-5M": "meth-twist-emseq-5M-fast",
+        "sim-wgs-place": "sim-wgs-place-fast",
+        "sim-wgs-vars": "sim-wgs-vars-fast",
+        "sim-meth-place": "sim-meth-place-fast",
+        "sim-meth-vars": "sim-meth-vars-fast",
+    }
+    for base_name, fast_name in pairs.items():
+        base = cfg.samples[base_name]
+        fast = cfg.samples[fast_name]
+        assert fast.source == base.source, fast_name
+        assert fast.reference == base.reference, fast_name
+        assert fast.baseline_tool == base.baseline_tool, fast_name
+        assert fast.truth == base.truth, fast_name
+        # Layout + mem_flags must be preserved so fast-vs-default stays
+        # apples-to-apples (sbx is single-end; hic carries -5 -S -P).
+        assert fast.layout == base.layout, fast_name
+        assert fast.mem_flags == base.mem_flags, fast_name
+        # The fast arm's flags are the base's flags plus `--fast`, nothing else.
+        assert fast.fg_labs_flags == [*base.fg_labs_flags, "--fast"], fast_name
+        # is_meth must agree with the (shared) reference — `--fast` never flips it.
+        assert fast.is_meth == base.is_meth, fast_name
+
+
+def test_meth_fast_sibling_keeps_compare_ignore_tags() -> None:
+    """The meth `--fast` sibling carries the same bisulfite ignore-tags so its
+    vs-default / vs-baseline compares stay apples-to-apples with the default."""
+    cfg = load_config(CONFIG_DIR)
+    fast = cfg.samples["meth-twist-emseq-5M-fast"]
+    assert fast.compare_options.get("ignore_tags") == ["YD", "XM", "XG"]
+
+
 def test_as_str_list_accepts_list_of_strings() -> None:
     assert _as_str_list("s", "mem_flags", ["-5", "-S"]) == ["-5", "-S"]
 
