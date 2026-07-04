@@ -33,6 +33,12 @@ class ReleaseAllowance:
     date: str
     summary: str
     expected_drift_pct: float
+    # Additional SHAs that are code-identical to `to_sha` and share its golden,
+    # so no BAMs need re-copying. The canonical use: a release benched on its
+    # release-please branch head (`to_sha`) then squash-merged to a different tag
+    # SHA — the two trees are identical, so the tag is listed here and resolves
+    # to `to_sha`'s golden. Empty for the common single-SHA case.
+    aliases: tuple[str, ...] = ()
 
 
 _REQUIRED_FIELDS = ("to_sha", "pr", "date", "summary", "expected_drift_pct")
@@ -50,6 +56,15 @@ def load_allowances(path: Path) -> list[ReleaseAllowance]:
             raise ValueError(
                 f"release-allowance entry {i} missing required field(s): {', '.join(missing)}"
             )
+        aliases_raw = item.get("aliases") or []
+        # A bare scalar (`aliases: <sha>`, missing the list dash) would otherwise
+        # be iterated character-by-character into a bogus alias tuple, silently
+        # breaking alias matching. Require an explicit list and fail fast.
+        if not isinstance(aliases_raw, list):
+            raise ValueError(
+                f"release-allowance entry {i}: 'aliases' must be a list of SHAs; got "
+                f"{aliases_raw!r}"
+            )
         entries.append(
             ReleaseAllowance(
                 to_sha=str(item["to_sha"]),
@@ -57,9 +72,23 @@ def load_allowances(path: Path) -> list[ReleaseAllowance]:
                 date=str(item["date"]),
                 summary=str(item["summary"]),
                 expected_drift_pct=float(item["expected_drift_pct"]),
+                aliases=tuple(str(a) for a in aliases_raw),
             )
         )
     return entries
+
+
+def _sha_prefix_match(a: str, b: str) -> bool:
+    """True when non-empty ``a`` and ``b`` are prefix-compatible (either is a
+    prefix of the other) — mirrors the CLI's tolerance of abbreviated SHAs."""
+    return bool(a) and bool(b) and (a.startswith(b) or b.startswith(a))
+
+
+def _entry_matches(entry: ReleaseAllowance, query: str) -> bool:
+    """True when ``query`` prefix-matches the entry's ``to_sha`` or any alias."""
+    return _sha_prefix_match(entry.to_sha, query) or any(
+        _sha_prefix_match(a, query) for a in entry.aliases
+    )
 
 
 def allowance_for(entries: list[ReleaseAllowance], to_sha: str) -> ReleaseAllowance | None:
@@ -74,12 +103,25 @@ def allowance_for(entries: list[ReleaseAllowance], to_sha: str) -> ReleaseAllowa
     q = to_sha.strip()
     if not q:
         return None
-    matches = [
-        e for e in entries if e.to_sha and (q.startswith(e.to_sha) or e.to_sha.startswith(q))
-    ]
+    matches = [e for e in entries if _entry_matches(e, q)]
     if len(matches) > 1:
         raise ValueError(
             f"ambiguous release-allowance match for {to_sha!r}: "
             f"{', '.join(e.to_sha for e in matches)} — use a longer SHA"
         )
     return matches[0] if matches else None
+
+
+def canonical_golden_sha(entries: list[ReleaseAllowance], query: str) -> str:
+    """The SHA under which the golden for ``query`` physically lives.
+
+    If ``query`` matches an allowance's ``to_sha`` or one of its ``aliases``,
+    return that entry's ``to_sha`` (the key ``bless-golden`` stored the BAMs
+    under). Otherwise return ``query`` unchanged — a SHA with no alias entry is
+    its own golden key, so existing (unaliased) goldens resolve exactly as
+    before. This lets a release referenced by a code-identical alias (e.g. a
+    squash-merged tag) reuse the golden blessed under the benched SHA without
+    re-copying any BAMs.
+    """
+    match = allowance_for(entries, query)
+    return match.to_sha if match is not None else query.strip()

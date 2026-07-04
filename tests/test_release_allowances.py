@@ -12,6 +12,7 @@ from bwa_mem3_bench.release_allowances import (
     DEFAULT_ALLOWANCES_PATH,
     ReleaseAllowance,
     allowance_for,
+    canonical_golden_sha,
     load_allowances,
 )
 
@@ -261,3 +262,98 @@ allowances:
     # Guard passes (sha is authorized); proceeds to the missing-run-dir error.
     with pytest.raises(FileNotFoundError, match="no local run"):
         bless_golden(fg_labs_sha="deadbeef", allowances_path=authorized, dry_run=True)
+
+
+# --------------------------------------------------------------------------- #
+# SHA aliases: one blessed golden, referenced by multiple code-identical SHAs
+# (e.g. the benched release-please branch head and its squash-merged tag).
+# --------------------------------------------------------------------------- #
+
+
+def _write_aliased(path: Path) -> Path:
+    return _write(
+        path,
+        """
+allowances:
+  - to_sha: 9dd30dd0e5e477ddfd33bec752179978ac9f5a1d
+    pr: fg-labs/bwa-mem3-bench#25
+    date: 2026-07-03
+    summary: v0.5.0 — golden lives here; the release tag is a code-identical alias.
+    expected_drift_pct: 0.1
+    aliases:
+      - b2fea467b776751e665a022c0f01319e7a92155b
+""",
+    )
+
+
+def test_aliases_parse(tmp_path: Path) -> None:
+    entries = load_allowances(_write_aliased(tmp_path / "a.yaml"))
+    assert len(entries) == 1
+    assert entries[0].aliases == ("b2fea467b776751e665a022c0f01319e7a92155b",)
+
+
+def test_aliases_default_empty_when_absent(tmp_path: Path) -> None:
+    # An entry with no `aliases` key must default to an empty tuple (the common
+    # single-SHA case). Uses a temp file so it does not depend on whether the
+    # shipped registry happens to contain an aliased entry.
+    p = _write(
+        tmp_path / "a.yaml",
+        """
+allowances:
+  - to_sha: 44cbaec
+    pr: fg-labs/bwa-mem3#123
+    date: 2026-06-08
+    summary: no aliases here
+    expected_drift_pct: 0.0
+""",
+    )
+    entries = load_allowances(p)
+    assert entries[0].aliases == ()
+
+
+def test_canonical_golden_sha_resolves_alias_to_to_sha(tmp_path: Path) -> None:
+    entries = load_allowances(_write_aliased(tmp_path / "a.yaml"))
+    to_sha = "9dd30dd0e5e477ddfd33bec752179978ac9f5a1d"
+    tag = "b2fea467b776751e665a022c0f01319e7a92155b"
+    # The release-tag SHA resolves to where the golden physically lives.
+    assert canonical_golden_sha(entries, tag) == to_sha
+    # A prefix of the alias resolves too (CLI accepts short SHAs).
+    assert canonical_golden_sha(entries, "b2fea46") == to_sha
+    # The canonical SHA resolves to itself.
+    assert canonical_golden_sha(entries, to_sha) == to_sha
+    assert canonical_golden_sha(entries, "9dd30dd0") == to_sha
+
+
+def test_canonical_golden_sha_passthrough_for_unaliased(tmp_path: Path) -> None:
+    entries = load_allowances(_write_aliased(tmp_path / "a.yaml"))
+    # A SHA that matches no entry is returned unchanged (golden lives at itself).
+    assert canonical_golden_sha(entries, "deadbeefdeadbeef") == "deadbeefdeadbeef"
+    assert canonical_golden_sha([], "anything") == "anything"
+
+
+def test_allowance_for_matches_an_alias(tmp_path: Path) -> None:
+    entries = load_allowances(_write_aliased(tmp_path / "a.yaml"))
+    # bless authorization recognizes the alias, not just the canonical to_sha.
+    a = allowance_for(entries, "b2fea467b776751e665a022c0f01319e7a92155b")
+    assert a is not None and a.to_sha == "9dd30dd0e5e477ddfd33bec752179978ac9f5a1d"
+
+
+def test_aliases_scalar_string_rejected(tmp_path: Path) -> None:
+    # A YAML author who forgets the list dash writes `aliases: b2fea...` (a bare
+    # scalar). Without a guard, `tuple(str(a) for a in "b2fea...")` iterates the
+    # string character-by-character and silently produces a bogus alias tuple,
+    # breaking alias matching with no error signal. Fail fast instead.
+    p = _write(
+        tmp_path / "a.yaml",
+        """
+allowances:
+  - to_sha: 44cbaec
+    pr: fg-labs/bwa-mem3#123
+    date: 2026-06-08
+    summary: scalar aliases (missing list dash)
+    expected_drift_pct: 0.0
+    aliases: b2fea467b776751e665a022c0f01319e7a92155b
+""",
+    )
+    with pytest.raises(ValueError, match=r"aliases.*must be a list"):
+        load_allowances(p)
