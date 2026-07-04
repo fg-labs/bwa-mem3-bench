@@ -83,3 +83,27 @@ allowances:
       everywhere (1.1-1.9x compute speedup vs upstream; no wall-time
       regressions). Intentional, accepted.
     expected_drift_pct: 6.1
+
+  - to_sha: 9dd30dd0
+    pr: fg-labs/bwa-mem3-bench#25
+    date: 2026-07-03
+    summary: >-
+      v0.5.0: no non-meth alignment change and a tiny, bounded meth change vs
+      the v0.4.0 golden (2681143b). Non-meth is byte-identical — wgs-5M / wes-5M
+      / panel-twist-5M / hic-1M / sbx-1M / smoke-1M all 100.00000% concordant vs
+      the v0.4.0 golden on every arch. The 0.5.0 default-path additions
+      (--seed-order, --smem-dedup, --fast, --adaptive-band) are opt-in/off by
+      default, and the ~13% x86 default-path perf regression that #186's
+      --seed-order refactor introduced is fixed by fg-labs/bwa-mem3#200 with no
+      output change; fg-labs/bwa-mem3#201 scopes the #199 overshoot guard to the
+      --meth sub-slice callers. Meth — a small, intentional shift from the
+      --fast --meth placement fixes (fg-labs/bwa-mem3#195 --extend-mate-concordant
+      + chain cap, #198 8-bit gscore/gtle capture, #199 getScores overshoot
+      guard): meth-twist-emseq-5M 99.898% / smoke-meth 99.894% primary
+      concordance vs the v0.4.0 golden (~0.10% drift; meth-twist 10,561 of 10.37M
+      — pos 4701, cigar 4206, mapq 1576, plus mapped-only deltas). These fixes
+      remove the --fast --meth soft-clip / mismap regression; truth-based
+      holodeck eval confirms quality is preserved — sim-meth placement unchanged
+      and per-CpG methylation Pearson r identical to v0.4.0 (sim-meth-place 0.945,
+      sim-meth-vars 0.980). Intentional, accepted.
+    expected_drift_pct: 0.10
