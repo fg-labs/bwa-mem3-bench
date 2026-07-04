@@ -107,3 +107,11 @@ allowances:
       and per-CpG methylation Pearson r identical to v0.4.0 (sim-meth-place 0.945,
       sim-meth-vars 0.980). Intentional, accepted.
     expected_drift_pct: 0.10
+    # The golden lives under 9dd30dd0 — the release-please branch head we benched
+    # and blessed. The shipped v0.5.0 tag (b2fea46) is a code-identical
+    # squash-merge of that release commit, so it is aliased here: a vs-golden run
+    # pinned to the tag resolves to 9dd30dd0's golden with no BAM re-copy (via the
+    # `aliases` support this PR adds to release_allowances + submit).
+    aliases:
+      - 9dd30dd0e5e477ddfd33bec752179978ac9f5a1d   # full benched SHA
+      - b2fea467b776751e665a022c0f01319e7a92155b   # v0.5.0 release tag (squash-merge)
