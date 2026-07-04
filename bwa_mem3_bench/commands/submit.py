@@ -7,6 +7,11 @@ from pathlib import Path
 
 from bwa_mem3_bench import REPO_ROOT, aws_config
 from bwa_mem3_bench.commands._run import run_cmd
+from bwa_mem3_bench.release_allowances import (
+    DEFAULT_ALLOWANCES_PATH,
+    canonical_golden_sha,
+    load_allowances,
+)
 from bwa_mem3_bench.workflow_config import load_config
 
 _cfg = aws_config.load()
@@ -68,6 +73,10 @@ def submit(  # noqa: PLR0913
     :param job_name: Batch job name; defaults to ``<target>-<sha>`` (or
         ``<target>-<sha>-<make_target>`` when make_target is set).
     :param dry_run: print the ``aws batch submit-job`` command without executing.
+    :raises ValueError: if ``golden_ref_sha`` cannot be resolved against the
+        release-allowances registry (ambiguous SHA prefix, or a missing/unreadable
+        allowances file). ``defopt`` renders documented raises as a message-only
+        CLI error rather than a traceback.
     """
     if not archs and target in _FULL_SWEEP_TARGETS:
         archs = ",".join(load_config(Path(REPO_ROOT) / "config").full_archs)
@@ -83,6 +92,26 @@ def submit(  # noqa: PLR0913
     if reps:
         env_overrides.append({"name": "REPS", "value": str(reps)})
     if golden_ref_sha:
+        # Resolve an aliased golden SHA (e.g. a squash-merged release tag) to the
+        # canonical SHA its golden BAMs live under, so the coordinator's
+        # vs-golden path finds them without any BAM re-copy. A non-aliased SHA
+        # passes through unchanged. Resolving here (locally, with the allowances
+        # file at hand) keeps the coordinator image free of an allowances-file
+        # dependency — it just receives the store SHA.
+        #
+        # `submit` is a defopt entrypoint, so an uncaught OSError (missing or
+        # unreadable allowances file) or ValueError (ambiguous SHA prefix) would
+        # surface as a raw traceback. Re-raise one clear CLI error that names the
+        # SHA, the allowances file, and the underlying cause.
+        try:
+            golden_ref_sha = canonical_golden_sha(
+                load_allowances(DEFAULT_ALLOWANCES_PATH), golden_ref_sha
+            )
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                f"could not resolve --golden-ref-sha {golden_ref_sha!r} against "
+                f"{DEFAULT_ALLOWANCES_PATH}: {exc}"
+            ) from exc
         env_overrides.append({"name": "GOLDEN_REF_SHA", "value": golden_ref_sha})
     if make_target:
         # Coordinator entrypoint derives both `image_tag` (worker image to pull)
