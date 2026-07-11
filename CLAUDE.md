@@ -202,9 +202,11 @@ from `arch.baseline_arch` in `config/archs.yaml`:
 - **compare-bams does NOT require name-sorted BAMs — only matching record
   order.** `bwa-mem2` emits records in FASTQ input order, so two runs
   over the same FASTQ produce records in the same order. The align rules
-  use `samtools view -b` (no sort) and compare-bams walks both streams
-  in lockstep. The old `name_sort` rule was pure waste (~15-25% of
-  per-worker wall). See `tools/compare-bams/src/pair_reader.rs`.
+  emit unsorted BAM (timed region uncompressed — `--bam=0` for fg-labs,
+  `samtools view -u` for baseline/minibwa — then an untimed `samtools view
+  -b` compress to the final BAM) and compare-bams walks both streams in
+  lockstep. The old `name_sort` rule was pure waste (~15-25% of per-worker
+  wall). See `tools/compare-bams/src/template_reader.rs`.
 - **`bwa-mem2 index --meth` peaks at ~130 GB RSS / 148 GB virt** on the
   human genome. The doubled C→T/G→A reference (~6.4 GB) drives the FMI
   build memory up. 64 GB and 128 GB hosts both OOM; budget for a 256 GB

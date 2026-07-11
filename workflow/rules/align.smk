@@ -19,8 +19,18 @@ the shm load/drop steps stay outside the timed region. Tricord forwards
 SIGTERM/SIGINT/SIGHUP to the child's process group so spot interruptions
 tear the alignment down cleanly instead of leaking children.
 
-Alignment output is streamed through `samtools view -b` (no sort), so the
-BAM preserves bwa-mem2's FASTQ-input order. `compare-bams` consumes this in
+The timed region emits UNCOMPRESSED BAM (no sort): fg-labs bwa-mem2 writes it
+directly (`--bam=0 -o`), while upstream bwa-mem2 / bwameth (SAM-only) pipe
+through `samtools view -u`. This measures the realistic aligner cost — a real
+pipeline feeds the aligner's BAM straight into sort/zipper, so compressing it
+in the aligner step is wasted work. A second, UNTIMED `samtools view -b` step
+compresses the `.raw` output to the final BAM for the compare + S3 upload, then
+deletes the `.raw`. Peak transient disk is `.raw` + the final BAM held at once
+during that compress: the uncompressed `.raw` is ~3-5x the compressed size, so
+the largest 5M-pair sample (~1.3 GB compressed) peaks around ~5-7 GB of worker
+ephemeral storage per rep (confirm the Batch job definition's storage covers
+this peak before a full run). The final
+BAM preserves bwa-mem2's FASTQ-input order, so `compare-bams` consumes it in
 lockstep order — see tools/compare-bams/src/template_reader.rs — which avoids
 the ~15-25% overhead of a post-alignment sort.
 """
@@ -230,10 +240,10 @@ rule align_fg_labs:
         #   given the plain `<ref>` prefix; a `.bwameth.c2t` path would now error
         #   (fg-labs/bwa-mem3#174). `shm --meth`: fg-labs/bwa-mem3 shm.md.
         #
-        # `set -o pipefail` inside the inner bash -c so an aligner that dies
-        # (e.g. OOM-killed -> SIGKILL, exit 137) fails the pipeline instead of
-        # samtools silently exiting 0 on the partial header stream and caching a
-        # header-only BAM as a "successful" alignment.
+        # The aligner writes BAM directly (`--bam=0 -o`), so there is no pipe to
+        # fail; an aligner that dies (e.g. OOM-killed -> SIGKILL, exit 137)
+        # leaves a truncated/empty `.raw` that the record-count check rejects.
+        # `set -o pipefail` is retained defensively (harmless without a pipe).
         r"""
         set -euo pipefail
         mkdir -p $(dirname {output.bam}) $(dirname {output.timing})
@@ -245,15 +255,29 @@ rule align_fg_labs:
             bwa-mem2.fg-labs shm {input.ref[0]}
             trap 'bwa-mem2.fg-labs shm -d || true' EXIT
         fi
+        # Timed region emits UNCOMPRESSED BAM straight from bwa-mem2 (`--bam=0
+        # -o`): no SAM-text serialization and no separate samtools process, and
+        # no wasted zlib work — realistic, since a real pipeline feeds the
+        # aligner's BAM straight into sort/zipper, which re-read it anyway.
+        # `--meth` (from {params.extra}) already implies BAM output and honors
+        # `-o`, so the one invocation covers both meth and non-meth. bash -c
+        # scopes the `2>` redirect to the aligner so tricorder's own stderr is
+        # untouched; a crashed aligner leaves a truncated/empty `.raw` that the
+        # record-count check below rejects.
         tricorder --out {output.timing} -- \
             bash -c 'set -o pipefail; bwa-mem2.fg-labs mem -t {params.threads} {params.mem_flags} {params.extra} \
-                {input.ref[0]} {input.fastqs} 2>"{output.bwa_stderr}" \
-              | samtools view -@4 -b -o {output.bam} -'
+                --bam=0 -o "{output.bam}.raw" \
+                {input.ref[0]} {input.fastqs} 2>"{output.bwa_stderr}"'
         # Defense in depth: reject a header-only BAM even if the aligner exited 0.
-        if [ "$(samtools view -c {output.bam})" -eq 0 ]; then
-            echo "ERROR: {output.bam} has 0 alignment records (aligner crashed/OOM?)" >&2
+        if [ "$(samtools view -c {output.bam}.raw)" -eq 0 ]; then
+            echo "ERROR: {output.bam}.raw has 0 alignment records (aligner crashed/OOM?)" >&2
             exit 1
         fi
+        # UNTIMED: compress the uncompressed timed output to the final BAM for
+        # the downstream compare + S3 upload. Records are byte-identical to the
+        # `.raw`, so concordance is unaffected.
+        samtools view -@4 -b -o {output.bam} {output.bam}.raw
+        rm -f {output.bam}.raw
         """
 
 
@@ -328,18 +352,26 @@ rule align_baseline:
             tricorder --out {output.timing} -- \
                 bash -c 'set -o pipefail; bwameth.py --threads {params.threads} --reference {input.ref[0]} \
                     {input.fastqs} 2>"{output.bwa_stderr}" \
-                  | samtools view -@4 -b -o {output.bam} -'
+                  | samtools view -@4 -u -o {output.bam}.raw -'
         else
             # `mem_flags` (e.g. -K for Hi-C) applied here too so the baseline
             # matches the fg-labs invocation and concordance stays symmetric.
             tricorder --out {output.timing} -- \
                 bash -c 'set -o pipefail; {params.binary} mem -t {params.threads} {params.mem_flags} \
                     {input.ref[0]} {input.fastqs} 2>"{output.bwa_stderr}" \
-                  | samtools view -@4 -b -o {output.bam} -'
+                  | samtools view -@4 -u -o {output.bam}.raw -'
         fi
+        # Upstream bwa-mem2 / bwameth emit SAM text, so `samtools view -u`
+        # materializes UNCOMPRESSED BAM in the timed region — symmetric with the
+        # fg-labs rule's uncompressed output so the comparison isn't skewed by a
+        # compression step. (bwa-mem2 can't self-emit BAM; that extra samtools
+        # parse is a genuine part of its cost.)
         # Defense in depth: reject a header-only BAM even if the aligner exited 0.
-        if [ "$(samtools view -c {output.bam})" -eq 0 ]; then
-            echo "ERROR: {output.bam} has 0 alignment records (aligner crashed/OOM?)" >&2
+        if [ "$(samtools view -c {output.bam}.raw)" -eq 0 ]; then
+            echo "ERROR: {output.bam}.raw has 0 alignment records (aligner crashed/OOM?)" >&2
             exit 1
         fi
+        # UNTIMED: compress to the final BAM for the compare + S3 upload.
+        samtools view -@4 -b -o {output.bam} {output.bam}.raw
+        rm -f {output.bam}.raw
         """
