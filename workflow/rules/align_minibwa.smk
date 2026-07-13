@@ -1,8 +1,11 @@
 """Rule to run lh3/minibwa and emit an unsorted BAM.
 
 Mirrors `align_baseline` in shape (untimed page-cache prewarm, tricord-timed
-subprocess, `samtools view -b` output) but uses minibwa's index format
-(`.l2b` + `.mbw` sidecars) instead of the bwa-mem2 FMI.
+subprocess emitting UNCOMPRESSED BAM via `samtools view -u`, then an untimed
+`samtools view -b` compress to the final BAM) but uses minibwa's index format
+(`.l2b` + `.mbw` sidecars) instead of the bwa-mem2 FMI. Peak transient disk is
+the uncompressed `.raw` (~3-5x the compressed size) plus the final BAM held at
+once during the compress step — see `align_baseline` for the sizing note.
 
 Caching model — keyed on the minibwa SHA, not the fg-labs SHA. minibwa is an
 independent third tool whose output depends only on its own source pin, so its
@@ -113,14 +116,22 @@ rule align_minibwa:
         set -euo pipefail
         mkdir -p $(dirname {output.bam}) $(dirname {output.timing})
         cat {input.ref[1]} {input.ref[2]} > /dev/null 2>/dev/null || true
+        # minibwa emits SAM text, so `samtools view -u` materializes
+        # UNCOMPRESSED BAM in the timed region — symmetric with the fg-labs /
+        # baseline rules so the wall-time comparison isn't skewed by a
+        # compression step the aligner's real downstream (sort/zipper) discards.
         tricorder --out {output.timing} -- \
             bash -c 'set -o pipefail; minibwa map -t {params.threads} {params.flags} {params.meth_flag} \
                 {input.ref[0]} {input.fastqs} \
                 2> >(tee "{output.minibwa_stderr}" >&2) \
-              | samtools view -@4 -b -o {output.bam} -'
+              | samtools view -@4 -u -o {output.bam}.raw -'
         # Defense in depth: reject a header-only BAM even if minibwa exited 0.
-        if [ "$(samtools view -c {output.bam})" -eq 0 ]; then
-            echo "ERROR: {output.bam} has 0 alignment records (minibwa crashed/OOM?)" >&2
+        if [ "$(samtools view -c {output.bam}.raw)" -eq 0 ]; then
+            echo "ERROR: {output.bam}.raw has 0 alignment records (minibwa crashed/OOM?)" >&2
             exit 1
         fi
+        # UNTIMED: compress to the final BAM for S3 upload (no compare rule for
+        # minibwa, but keep the on-disk artifact compressed for storage parity).
+        samtools view -@4 -b -o {output.bam} {output.bam}.raw
+        rm -f {output.bam}.raw
         """
