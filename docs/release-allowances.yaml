@@ -115,3 +115,31 @@ allowances:
     aliases:
       - 9dd30dd0e5e477ddfd33bec752179978ac9f5a1d   # full benched SHA
       - b2fea467b776751e665a022c0f01319e7a92155b   # v0.5.0 release tag (squash-merge)
+
+  - to_sha: 48cf0a46824e26df2986efe940121d34b2cc7109
+    pr: fg-labs/bwa-mem3#204
+    date: 2026-07-16
+    summary: >-
+      v0.5.1: no alignment change vs the v0.5.0 golden (9dd30dd0) — a pure
+      performance release. All 188 (sample x arch x rep) vs-golden cells are
+      100.00000% concordant, including both meth samples (meth-twist-emseq-5M,
+      smoke-meth) and every DNA sample on all six archs; primary placement, MAPQ,
+      CIGAR, and supplementary counts are byte-identical. The 12 changes (#205-#216)
+      are performance refactors / dead-code removal — unique-mapper fast paths (#209),
+      per-read scratch pooling (#208/#216), counting-sort SMEM sort (#207), NEON
+      backwardExt vectorization (#210), arm64 third-pass reseeding lockstep (#215),
+      SW-kernel dead-store removal (#211/#214), and a faster --bam writer (#212) —
+      none of which touch output. Performance improved broadly vs the v0.5.0 golden
+      (~7-23% wall on AMD/Graviton across wgs/wes/panel/hic/sbx; ~1.2-1.7x compute
+      vs upstream v2.2.1). The gate's flagged perf "regressions" (wgs-5M +10% /
+      panel-twist-5M-fast +6.5% on c7i) are Sapphire-Rapids spot-substrate
+      artifacts, not codegen: output is byte-identical, the effect is c7i-only while
+      every other arch (including the other AVX-512 arch, c7a) improves wgs-5M
+      7-11%, and it is a cross-run spot comparison on the noisiest pool (v0.5.0's
+      c7i baseline had an implausibly tight 0.26% CV). The meth vs-upstream
+      over-budget rows are inherited unchanged from v0.5.0 (no new drift).
+      Intentional (release continuity), accepted.
+    expected_drift_pct: 0.0
+    # Golden lives under 48cf0a4 — the release-please #204 head we benched. The
+    # shipped v0.5.1 tag will be a code-identical squash-merge; add it as an alias
+    # here once #204 merges (mirrors the v0.5.0 b2fea46 aliasing above).
