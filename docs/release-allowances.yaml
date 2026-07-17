@@ -120,7 +120,7 @@ allowances:
     pr: fg-labs/bwa-mem3#204
     date: 2026-07-16
     summary: >-
-      v0.5.1: no alignment change vs the v0.5.0 golden (9dd30dd0) — a pure
+      v0.6.0: no alignment change vs the v0.5.0 golden (9dd30dd0) — a pure
       performance release. All 188 (sample x arch x rep) vs-golden cells are
       100.00000% concordant, including both meth samples (meth-twist-emseq-5M,
       smoke-meth) and every DNA sample on all six archs; primary placement, MAPQ,
@@ -140,6 +140,14 @@ allowances:
       over-budget rows are inherited unchanged from v0.5.0 (no new drift).
       Intentional (release continuity), accepted.
     expected_drift_pct: 0.0
-    # Golden lives under 48cf0a4 — the release-please #204 head we benched. The
-    # shipped v0.5.1 tag will be a code-identical squash-merge; add it as an alias
-    # here once #204 merges (mirrors the v0.5.0 b2fea46 aliasing above).
+    # Golden lives under 48cf0a4 — the release-please #204 head we benched. #204
+    # shipped as v0.6.0 (not the 0.5.1 the PR was titled when benched): the
+    # fg-labs/bwa-mem3#217 `feat` (report whether mimalloc overrides malloc)
+    # landed after 48cf0a4 and bumped the minor. The shipped v0.6.0 tag
+    # (a887e36) therefore equals 48cf0a4 + #217, and #217 changes only the
+    # `version` subcommand banner (src/main.cpp, before its return 0) — it never
+    # touches the mem/alignment path, so v0.6.0 is alignment- and
+    # performance-identical to 48cf0a4 and this golden is the correct v0.6.0
+    # reference. Aliased so a vs-golden run pinned to the tag resolves here.
+    aliases:
+      - a887e36cb8fbdc54bd5a3543cdfd1850bf7e2f52   # v0.6.0 release tag (= 48cf0a4 + #217, banner-only)
