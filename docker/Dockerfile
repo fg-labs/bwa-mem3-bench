@@ -45,12 +45,45 @@ ARG BWAMETH_VERSION
 ARG TARGETARCH
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        build-essential git cmake curl ca-certificates pkg-config \
+        build-essential git cmake curl wget gnupg ca-certificates pkg-config \
         libz-dev libbz2-dev liblzma-dev libcurl4-openssl-dev libssl-dev \
         libncurses-dev libgit2-dev \
         python3 python3-pip python3-venv \
         autoconf automake autoconf-archive libtool \
     && rm -rf /var/lib/apt/lists/*
+
+# clang-19 toolchain (from apt.llvm.org — bookworm ships only clang-14). We
+# build all three aligners (bwa-mem2, bwa-mem3, minibwa) with clang rather than
+# gcc: clang produces ~16% faster bwa-mem3, ~10% faster bwa-mem2, and ~4%
+# faster minibwa on this workload (see fg-labs/bwa-mem3-bench#31 and the
+# bwa-mem3 build docs). Kept on the stable bookworm base so the snakemake /
+# coordinator Python stack is unchanged; only the compiler moves.
+ARG LLVM_VERSION=19
+RUN wget -qO /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key && \
+    echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-${LLVM_VERSION} main" \
+        > /etc/apt/sources.list.d/llvm.list && \
+    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        clang-${LLVM_VERSION} libomp-${LLVM_VERSION}-dev && \
+    rm -rf /var/lib/apt/lists/*
+# `clang` / `clang++` wrappers on /usr/local/bin (ahead of /usr/bin on PATH).
+# They pin clang-19 and append codegen-neutral compat flags so the 2021-era
+# upstream bwa-mem2 v2.2.1 sources build under a modern clang. clang-16+ turned
+# several long-standing C/C++ conformance warnings into hard errors by default:
+#   C (clang wrapper): bwa-mem2's bundled ext/safestringlib calls abort() (and a
+#     few libc functions) without a prototype -> -Werror=implicit-function-
+#     declaration / int-conversion / incompatible-pointer-types. Downgrade to
+#     warnings (the functions are real libc symbols; codegen-neutral).
+#   C++ (clang++ wrapper): bwa-mem2's kseq.h/utils.cpp use the C++17-removed
+#     `register` keyword -> -Werror=register. Downgrade (keyword is a no-op on
+#     modern compilers; codegen-neutral).
+# Baking the flags into the wrappers (rather than CXX="clang++ -Wno-register")
+# makes them ride through `make multi`'s per-tier sub-make recursion, which
+# passes CXX/CC *unquoted*. bwa-mem3 v0.6.0 and minibwa v0.4 build clean under
+# clang-19 and are unaffected by the extra warning suppression.
+RUN printf '#!/bin/sh\nexec clang-%s -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-pointer-types "$@"\n' "${LLVM_VERSION}" > /usr/local/bin/clang && \
+    printf '#!/bin/sh\nexec clang++-%s -Wno-register "$@"\n' "${LLVM_VERSION}" > /usr/local/bin/clang++ && \
+    chmod +x /usr/local/bin/clang /usr/local/bin/clang++ && \
+    clang --version | head -1
 # autoconf-archive + libtool aren't strictly required by the current
 # ext/htslib submodule, but they're on upstream's official prereqs list
 # (fg-labs/bwa-mem3 PR #93 → docs/src/getting-started/installation.md) and an
@@ -85,7 +118,7 @@ RUN if [ "$TARGETARCH" != "arm64" ]; then \
         # wrap the x86 RDTSC instruction).
         sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' upstream/src/utils.h && \
         cd upstream && \
-        make multi -j"$(nproc)" && \
+        make multi -j"$(nproc)" CXX=clang++ CC=clang && \
         install -Dm755 bwa-mem2 /out/bin/bwa-mem2.upstream && \
         for v in sse41 avx avx2 avx512bw; do \
             [ -f bwa-mem2.$v ] && install -Dm755 bwa-mem2.$v /out/bin/bwa-mem2.upstream.$v || true; \
@@ -131,7 +164,7 @@ RUN cd /src && cargo build --release --bin compare-bams && \
 COPY vendor/minibwa /build/minibwa
 RUN cd /build/minibwa && \
     make clean && \
-    make -j"$(nproc)" && \
+    make -j"$(nproc)" CC=clang && \
     install -Dm755 minibwa /out/bin/minibwa
 
 # Install tricorder (fg-labs/tricord) for benchmarking the alignment subprocess
@@ -181,9 +214,9 @@ RUN cd fg-labs && \
     case "${FG_LABS_MAKE_TARGET:-}" in \
       "" ) \
         if [ "$TARGETARCH" = "arm64" ]; then \
-            make arch=arm64 -j"$(nproc)"; \
+            make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
         else \
-            make BASELINE_ARCH="${BASELINE_ARCH:-avx2}" -j"$(nproc)"; \
+            make BASELINE_ARCH="${BASELINE_ARCH:-avx2}" -j"$(nproc)" CXX=clang++ CC=clang; \
         fi ;; \
       lto-build ) \
         # `make lto-build` produces `bwa-mem3.lto`. LTO_ARCH selects the arch
@@ -192,9 +225,9 @@ RUN cd fg-labs && \
         # target's — set it explicitly so the LTO binary matches the
         # corresponding non-LTO build on the same arch.
         if [ "$TARGETARCH" = "arm64" ]; then \
-            make lto-build LTO_ARCH=arm64 -j"$(nproc)"; \
+            make lto-build LTO_ARCH=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
         else \
-            make lto-build LTO_ARCH="${BASELINE_ARCH:-avx2}" -j"$(nproc)"; \
+            make lto-build LTO_ARCH="${BASELINE_ARCH:-avx2}" -j"$(nproc)" CXX=clang++ CC=clang; \
         fi && \
         BUILT_BIN=bwa-mem3.lto ;; \
       * ) \
@@ -211,13 +244,27 @@ ARG BWA_VERSION
 ARG BWAMETH_VERSION
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ca-certificates curl git unzip libz1 libbz2-1.0 liblzma5 libdeflate0 libncurses6 libgomp1 \
+        ca-certificates curl wget gnupg git unzip libz1 libbz2-1.0 liblzma5 libdeflate0 libncurses6 libgomp1 \
         python3 python3-pip python3-setuptools awscli time procps \
         build-essential libz-dev libbz2-dev liblzma-dev libncurses-dev \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/python3 /usr/local/bin/python
 # `python` symlink: snakemake worker invocations use `python -m snakemake`, which
 # is not installed by Debian's `python3` package (they only provide `python3`).
+
+# LLVM OpenMP runtime for the clang-built aligners. bwa-mem2/bwa-mem3/minibwa
+# are compiled with clang -fopenmp, so each binary has a DT_NEEDED on
+# libomp.so.5 and won't load without it. bookworm ships only libomp5-14; pull
+# the exact-matching libomp5-19 from apt.llvm.org (same repo the builder uses)
+# to avoid any OpenMP-runtime symbol mismatch. libgomp1 (above) stays for the
+# gcc-built runtime `bwa` (lh3/bwa).
+ARG LLVM_VERSION=19
+RUN wget -qO /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key && \
+    echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-${LLVM_VERSION} main" \
+        > /etc/apt/sources.list.d/llvm.list && \
+    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libomp5-${LLVM_VERSION} && \
+    rm -rf /var/lib/apt/lists/*
 
 # samtools: build from source
 RUN curl -L -o /tmp/samtools.tar.bz2 https://github.com/samtools/samtools/releases/download/${SAMTOOLS_VERSION}/samtools-${SAMTOOLS_VERSION}.tar.bz2 \
