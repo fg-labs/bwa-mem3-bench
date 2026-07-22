@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from bwa_mem3_bench import REPO_ROOT, aws_config
@@ -133,7 +134,11 @@ def submit(  # noqa: PLR0913
     default_name = (
         f"{target}-{fg_labs_sha}-{make_target}" if make_target else f"{target}-{fg_labs_sha}"
     )
-    name = job_name or default_name
+    # AWS Batch job names allow only [A-Za-z0-9_-] (max 128 chars). Any other
+    # character — most commonly the dots in an upstream tag like "v2.2.1" — makes
+    # `submit-job` reject the request with exit 254. Sanitize defensively so a
+    # dotted identifier (e.g. from bless-baseline) can't break submission.
+    name = re.sub(r"[^A-Za-z0-9_-]", "-", job_name or default_name)[:128]
 
     cmd = [
         "aws",

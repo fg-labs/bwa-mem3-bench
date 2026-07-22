@@ -211,3 +211,43 @@ def test_golden_ref_sha_unreadable_allowances_file_raises_clear_cli_error() -> N
     ):
         submit_module.submit(fg_labs_sha="newsha", target="all", golden_ref_sha="prevsha")
     mock_run.assert_not_called()
+
+
+def test_dotted_default_job_name_is_sanitized() -> None:
+    """AWS Batch job names allow only ``[A-Za-z0-9_-]``; a dotted identifier
+    (e.g. an upstream tag like ``v2.2.1``) otherwise makes ``submit-job`` fail
+    with exit 254. The default name derived from ``fg_labs_sha`` must be
+    sanitized before it reaches the command."""
+    with patch.object(submit_module, "run_cmd") as mock_run:
+        submit_module.submit(fg_labs_sha="v2.2.1", target="baseline_all")
+    name = _captured_job_name(mock_run.call_args_list)
+    assert "." not in name
+    assert name == "baseline_all-v2-2-1"
+    assert all(c.isalnum() or c in "-_" for c in name)
+
+
+def test_explicit_job_name_with_disallowed_chars_is_sanitized() -> None:
+    """An explicit ``job_name`` with disallowed characters is sanitized too."""
+    with patch.object(submit_module, "run_cmd") as mock_run:
+        submit_module.submit(
+            fg_labs_sha="deadbeef", target="baseline_all", job_name="my.baseline/run"
+        )
+    name = _captured_job_name(mock_run.call_args_list)
+    assert all(c.isalnum() or c in "-_" for c in name)
+    assert name == "my-baseline-run"
+
+
+def test_bless_baseline_runs_in_given_image_sha_with_valid_job_name() -> None:
+    """``bless-baseline`` must run the baseline in a real, pushed image SHA (workers
+    pull ``<ECR>:<fg_labs_sha>``) and produce a dot-free job name. The previous
+    behaviour passed the upstream tag as the SHA, which is neither a valid image
+    tag nor a valid job name."""
+    bless_module = importlib.import_module("bwa_mem3_bench.commands.bless_baseline")
+    with patch.object(submit_module, "run_cmd") as mock_run:
+        bless_module.bless_baseline(fg_labs_sha="a887e36cabc")
+    name = _captured_job_name(mock_run.call_args_list)
+    assert name == "baseline_all-a887e36cabc"
+    assert "." not in name
+    assert _captured_env(mock_run.call_args_list, "FG_LABS_SHA") == "a887e36cabc"
+    assert _captured_env(mock_run.call_args_list, "TARGET") == "baseline_all"
+    assert _captured_env(mock_run.call_args_list, "REPS") == "5"
