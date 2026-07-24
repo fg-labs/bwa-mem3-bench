@@ -65,5 +65,31 @@ archs:
     platform: linux/amd64
     baseline_arch: ""
 
+  # c8g64: Graviton4 at 64 vCPU, used ONLY by the thread-scaling ladder
+  # (`--target thread_scaling`). Deliberately excluded from `full_archs` — it is
+  # not part of the cross-arch speed/concordance sweep, and including it would
+  # double-count c8g there.
+  #
+  # Why a 16xlarge rather than right-sizing each thread count to its own
+  # instance: hg38 needs ~16.5 GB resident (measured, every arch), and c8g is
+  # 2 GiB/vCPU, so c8g.4xlarge (32 GB) is already the SMALLEST c8g that can run
+  # the aligner at all — nothing below 16 threads can be right-sized. More
+  # importantly, scaling efficiency E(n) = T(1)/(n*T(n)) is only meaningful on a
+  # FIXED machine: a 4xlarge gets a quarter of the socket's memory bandwidth and
+  # L3, so a curve spanning instance sizes would bend from the instances rather
+  # than from the aligner. The whole ladder therefore runs in ONE job on ONE
+  # host, which also removes host-to-host variance — the dominant noise source.
+  #
+  # Graviton4 has no SMT (ThreadsPerCore=1, verified via describe-instance-types),
+  # so 64 vCPU is 64 PHYSICAL cores and the curve has no hyperthreading knee.
+  # An x86 64-vCPU host would be 32 physical + SMT and would bend at 32 for
+  # reasons unrelated to the aligner.
+  c8g64:
+    instance_type: c8g.16xlarge
+    batch_queue: bwa-mem3-bench-c8g64
+    simd: neon
+    platform: linux/arm64
+    baseline_arch: ""
+
 core_arch: c8g
 full_archs: [c8g, c7g, c6a, c7i, c7a, m7i]

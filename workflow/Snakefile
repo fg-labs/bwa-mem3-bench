@@ -121,6 +121,7 @@ include: "rules/compare.smk"
 include: "rules/benchmark.smk"
 include: "rules/align_minibwa.smk"
 include: "rules/eval.smk"
+include: "rules/scaling.smk"
 
 
 # Aggregator targets have no shell body, so they always run on the coordinator.
@@ -138,6 +139,7 @@ localrules:
     fast,
     fast_meth,
     fast_smoke,
+    thread_scaling,
     emit_meta,
 
 
@@ -398,6 +400,17 @@ rule all:
         ],
 
 
+def _thread_scaling_target() -> str:
+    """The thread-scaling ladder's single output (see rules/scaling.smk).
+
+    Sample and arch come from `thread_scaling` in config/defaults.yaml rather
+    than the run's --config samples/archs: the ladder is a fixed, gated
+    measurement on one pinned low-noise host, not part of the cross-arch sweep.
+    """
+    ts = CONFIG.thread_scaling
+    return f"scaling/{FG_LABS_SHA}/{ts.sample}/{ts.arch}/scaling.tsv"
+
+
 rule bless_release:
     """Full candidate-release validation matrix — run to bless a fg-labs release.
 
@@ -427,6 +440,23 @@ rule bless_release:
         _fast_accuracy_targets(),
         _fast_minibwa_targets(),
         _accuracy_targets(FULL_SIM_SAMPLES, REPS),
+        _thread_scaling_target(),
+
+
+rule thread_scaling:
+    """Thread-scaling ladder on the pinned low-noise host (see rules/scaling.smk).
+
+    Runs `thread_scaling.sample` at every thread count in `thread_scaling.ladder`
+    inside ONE Batch job on ONE instance, so strong-scaling efficiency is measured
+    on fixed hardware. Included in `bless_release` — thread efficiency is gated
+    release-over-release and is not allowed to regress.
+
+    Usage:
+        snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
+            --config fg_labs_sha=<sha> -- thread_scaling
+    """
+    input:
+        _thread_scaling_target(),
 
 
 rule baseline_all:

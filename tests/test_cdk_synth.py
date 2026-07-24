@@ -10,7 +10,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CDK_DIR = REPO_ROOT / "cdk"
 
-EXPECTED_BATCH_QUEUE_COUNT = 7  # 6 per-arch queues (incl. m7i) + 1 coordinator
+# 7 per-arch queues + 1 coordinator. The per-arch set is the 6 sweep archs
+# (c8g, c7g, c6a, c7i, c7a, m7i) plus c8g64 — the 64-vCPU Graviton4 host the
+# thread-scaling ladder runs on, which is intentionally NOT in `full_archs`.
+EXPECTED_BATCH_QUEUE_COUNT = 8
 
 
 def _synth(out_dir: Path) -> None:
@@ -42,8 +45,8 @@ def test_storage_stack_has_bucket_and_ecr(tmp_path: Path) -> None:
     assert "AWS::ECR::Repository" in resource_types
 
 
-def test_batch_stack_has_six_queues(tmp_path: Path) -> None:
-    """Six per-arch worker queues (c8g, c7g, c6a, c7i, c7a, m7i) + one coordinator."""
+def test_batch_stack_has_a_queue_per_arch(tmp_path: Path) -> None:
+    """One worker queue per configured arch (incl. the c8g64 scaling host) + coordinator."""
     out_dir = tmp_path / "cdk.out"
     _synth(out_dir)
     template = json.loads((out_dir / "BwaMem3BenchBatch.template.json").read_text())

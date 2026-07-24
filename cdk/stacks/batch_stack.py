@@ -36,6 +36,20 @@ ARCHS: tuple[ArchSpec, ...] = (
     # identical hardware. Replaces earlier r7i.4xlarge choice — r7i was noisier
     # (σ/μ up to 55%) and the extra 128 GB was unused.
     ArchSpec("M7i", "m7i", "m7i.4xlarge", "linux/amd64"),
+    # c8g64: Graviton4 at 64 vCPU, used ONLY by the thread-scaling ladder
+    # (`--target thread_scaling`), never by the cross-arch sweep — it is absent
+    # from `full_archs` in config/archs.yaml.
+    #
+    # A 16xlarge rather than a per-thread-count right-size because strong-scaling
+    # efficiency is only meaningful on fixed hardware (different instance sizes
+    # get different shares of memory bandwidth and L3, which is what bounds
+    # bwa-mem's scaling), and because hg38 needs ~16.5 GB resident while c8g is
+    # 2 GiB/vCPU — so c8g.4xlarge is already the smallest c8g that can run the
+    # aligner at all and nothing below 16 threads could be right-sized anyway.
+    #
+    # Graviton4 has no SMT (ThreadsPerCore=1), so 64 vCPU is 64 physical cores
+    # and the scaling curve has no hyperthreading knee at 32.
+    ArchSpec("C8g64", "c8g64", "c8g.16xlarge", "linux/arm64"),
 )
 
 

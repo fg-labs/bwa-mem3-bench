@@ -30,6 +30,7 @@ from pathlib import Path
 import pytest
 
 from bwa_mem3_bench import REPO_ROOT
+from bwa_mem3_bench.workflow_config import load_config
 
 # Rules whose shell body launches a multi-threaded aligner. Each must reserve
 # the vCPUs it actually uses so Batch cannot co-schedule two on one host.
@@ -97,4 +98,26 @@ def test_batch_profile_sets_no_cores() -> None:
     assert not re.search(r"^\s*cores\s*:", text, re.MULTILINE), (
         "the aws-batch profile sets `cores:`; snakemake clamps `threads` to it, "
         "silently reducing the Batch VCPU request for every align job."
+    )
+
+
+def test_batch_profile_jobs_covers_thread_ladder() -> None:
+    """`jobs` also caps `threads`, so it must clear the ladder's largest rung.
+
+    In remote-executor mode snakemake clamps every rule's `threads` to `--jobs`,
+    not just to `--cores`. Observed directly: with `jobs: 50`, the ladder's
+    `threads: 64` came back as `threads: 50`. That understates the vCPU
+    reservation, and if `jobs` ever dropped below half the host's vCPUs two
+    ladder jobs could co-schedule and corrupt every point on the curve.
+    """
+    config = load_config(Path(REPO_ROOT) / "config")
+    text = PROFILE_TEMPLATE.read_text()
+    match = re.search(r"^jobs:\s*(\d+)", text, re.MULTILINE)
+    assert match, "aws-batch profile does not set `jobs:`"
+    jobs = int(match.group(1))
+    needed = config.thread_scaling.max_threads
+    assert jobs >= needed, (
+        f"profile sets `jobs: {jobs}` but the thread-scaling ladder needs "
+        f"`threads: {needed}`; snakemake clamps threads to jobs, so the ladder "
+        f"job would reserve only {jobs} vCPUs."
     )

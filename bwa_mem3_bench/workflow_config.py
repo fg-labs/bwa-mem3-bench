@@ -139,6 +139,40 @@ class Arch:
 
 
 @dataclass(frozen=True)
+class ThreadScalingStep:
+    """One rung of the thread-scaling ladder: a thread count and its replication.
+
+    Replication is per-rung rather than global because cost is wildly uneven —
+    a 1-thread run is ~16x the wall of a 16-thread run — while the high thread
+    counts are the ones the regression gate reads.
+    """
+
+    threads: int
+    reps: int
+
+
+@dataclass(frozen=True)
+class ThreadScaling:
+    """Configuration for the thread-scaling ladder (`--target thread_scaling`).
+
+    The whole ladder runs as ONE job on ONE host: strong-scaling efficiency
+    ``E(n) = T(1) / (n * T(n))`` is only meaningful on fixed hardware, since
+    different instance sizes get different shares of memory bandwidth and L3 —
+    which is precisely what bounds bwa-mem's scaling.
+    """
+
+    sample: str
+    arch: str
+    ladder: list[ThreadScalingStep]
+    max_efficiency_drop_pp: float
+
+    @property
+    def max_threads(self) -> int:
+        """Largest thread count in the ladder — what the job must reserve."""
+        return max(step.threads for step in self.ladder)
+
+
+@dataclass(frozen=True)
 class WorkflowConfig:
     samples: dict[str, Sample]
     archs: dict[str, Arch]
@@ -153,6 +187,7 @@ class WorkflowConfig:
     threads: int
     reps_default: int
     reps_baseline: int
+    thread_scaling: ThreadScaling
     references: dict[str, dict[str, str]]
     runs_prefix: str
     baseline_prefix: str
@@ -202,6 +237,76 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     with path.open("r") as fh:
         result: dict[str, Any] = yaml.safe_load(fh)
         return result
+
+
+def _thread_scaling_from(
+    raw: Any, *, samples: dict[str, Sample], archs: dict[str, Arch]
+) -> ThreadScaling:
+    """Validate and build the `thread_scaling` block from `defaults.yaml`.
+
+    Fails loudly at load time rather than mid-run: the ladder drives a single
+    long Batch job, so a typo here would otherwise surface as a failed job an
+    hour in.
+
+    :param raw: the `thread_scaling` mapping read from YAML.
+    :param samples: parsed samples, to check the referenced sample exists.
+    :param archs: parsed archs, to check the referenced arch exists.
+    :return: the validated `ThreadScaling`.
+    :raises ValueError: on a missing key, unknown sample/arch, malformed ladder,
+        a ladder without a 1-thread rung, duplicate thread counts, or a
+        non-positive threads/reps value.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError(f"`thread_scaling` must be a mapping; got {raw!r}")
+    for key in ("sample", "arch", "ladder", "max_efficiency_drop_pp"):
+        if key not in raw:
+            raise ValueError(f"`thread_scaling` is missing required key {key!r}")
+
+    sample, arch = raw["sample"], raw["arch"]
+    if sample not in samples:
+        raise ValueError(f"`thread_scaling.sample` {sample!r} is not a configured sample")
+    if arch not in archs:
+        raise ValueError(f"`thread_scaling.arch` {arch!r} is not a configured arch")
+
+    raw_ladder = raw["ladder"]
+    if not isinstance(raw_ladder, list) or not raw_ladder:
+        raise ValueError(f"`thread_scaling.ladder` must be a non-empty list; got {raw_ladder!r}")
+
+    ladder: list[ThreadScalingStep] = []
+    for entry in raw_ladder:
+        if not isinstance(entry, dict) or "threads" not in entry or "reps" not in entry:
+            raise ValueError(
+                f"each `thread_scaling.ladder` entry needs `threads` and `reps`; got {entry!r}"
+            )
+        threads, reps = int(entry["threads"]), int(entry["reps"])
+        if threads < 1 or reps < 1:
+            raise ValueError(
+                f"`thread_scaling.ladder` entry {entry!r} must have threads >= 1 and reps >= 1"
+            )
+        ladder.append(ThreadScalingStep(threads=threads, reps=reps))
+
+    counts = [step.threads for step in ladder]
+    if len(set(counts)) != len(counts):
+        raise ValueError(f"`thread_scaling.ladder` has duplicate thread counts: {counts}")
+    # E(n) = T(1) / (n * T(n)) is undefined without a single-thread measurement,
+    # and the gate reads efficiency, so a ladder missing the 1-thread rung would
+    # produce a job whose output cannot be scored.
+    if 1 not in counts:
+        raise ValueError(
+            f"`thread_scaling.ladder` must include a 1-thread rung (the T(1) baseline "
+            f"every efficiency is computed against); got thread counts {sorted(counts)}"
+        )
+
+    drop = float(raw["max_efficiency_drop_pp"])
+    if drop < 0:
+        raise ValueError(f"`thread_scaling.max_efficiency_drop_pp` must be >= 0; got {drop}")
+
+    return ThreadScaling(
+        sample=sample,
+        arch=arch,
+        ladder=sorted(ladder, key=lambda s: s.threads),
+        max_efficiency_drop_pp=drop,
+    )
 
 
 def load_config(config_dir: Path) -> WorkflowConfig:
@@ -257,6 +362,9 @@ def load_config(config_dir: Path) -> WorkflowConfig:
         threads=int(defaults["threads"]),
         reps_default=int(defaults["reps_default"]),
         reps_baseline=int(defaults["reps_baseline"]),
+        thread_scaling=_thread_scaling_from(
+            defaults["thread_scaling"], samples=samples, archs=archs
+        ),
         references=defaults["references"],
         runs_prefix=defaults["runs_prefix"],
         baseline_prefix=defaults["baseline_prefix"],
