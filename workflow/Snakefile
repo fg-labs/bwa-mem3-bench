@@ -118,14 +118,21 @@ wildcard_constraints:
 
 include: "rules/align.smk"
 include: "rules/compare.smk"
-include: "rules/benchmark.smk"
 include: "rules/align_minibwa.smk"
 include: "rules/eval.smk"
 include: "rules/scaling.smk"
 
 
 # Aggregator targets have no shell body, so they always run on the coordinator.
-# `emit_meta` is a tiny JSON write — no point burning a c8g.4xlarge spin-up for it.
+#
+# NOTE: host metadata is deliberately NOT a localrule (and no longer a rule at
+# all). The old `emit_meta` lived here for cost reasons — "a tiny JSON write, no
+# point burning a worker spin-up" — but running on the coordinator meant it
+# recorded the COORDINATOR's instance identity, so an m7i job reported
+# `instance_type: c6a.large` and two different m7i workers shared one
+# instance_id. It is now written by the align rules themselves via
+# `emit-host-meta`, which is the only place guaranteed to be the machine that
+# ran the alignment.
 localrules:
     all,
     baseline_all,
@@ -140,7 +147,6 @@ localrules:
     fast_meth,
     fast_smoke,
     thread_scaling,
-    emit_meta,
 
 
 def _is_meth_sample(sample_name: str) -> bool:

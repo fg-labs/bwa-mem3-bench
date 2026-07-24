@@ -214,6 +214,13 @@ rule align_fg_labs:
         # in the same format; we redirect bwa's stderr only (samtools' stderr
         # still goes to the worker log).
         bwa_stderr = "runs/{sha}/{sample}/{arch}/rep-{rep}/benchmarks/bwa.stderr.log",
+        # Host identity is produced HERE, not by a separate rule. The old
+        # `emit_meta` rule was a localrule, so it ran on the coordinator and
+        # recorded the coordinator's instance (a c6a.large) for jobs that
+        # actually ran on m7i workers — and two different workers reported the
+        # same instance_id. Only writing it in this shell body guarantees the
+        # metadata describes the machine that ran the alignment.
+        meta = "runs/{sha}/{sample}/{arch}/rep-{rep}/benchmarks/meta.json",
     resources:
         batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
         mem_mb = lambda wc: _mem_mb_for(wc.sample),
@@ -266,6 +273,17 @@ rule align_fg_labs:
         r"""
         set -euo pipefail
         mkdir -p $(dirname {output.bam}) $(dirname {output.timing})
+        # Record the host BEFORE aligning, so the identity is captured even if
+        # the alignment is later killed (e.g. spot reclaim) and the artifact is
+        # inspected post-mortem.
+        #
+        # Unguarded on purpose: under `set -e` a non-zero exit here would abort
+        # the alignment before any work starts, so emit-host-meta guarantees a
+        # valid record and exit 0 for every environmental failure (no IMDS, no
+        # curl, no python3) and reserves non-zero for a malformed ARGUMENT list,
+        # which is a workflow bug that must not reach a worker quietly.
+        # tests/test_host_metadata.py pins both halves of that contract.
+        emit-host-meta "{wildcards.sha}" "{wildcards.sample}" "{wildcards.arch}" "{wildcards.rep}" > {output.meta}
         if [ "{params.is_meth}" = "1" ]; then
             bwa-mem2.fg-labs shm --meth {input.ref[0]}
             trap 'bwa-mem2.fg-labs shm -d || true' EXIT
