@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from bwa_mem3_bench import REPO_ROOT
 from bwa_mem3_bench.registry import (
     DEFAULT_REGISTRY_PATH,
     DivergenceEntry,
@@ -32,6 +33,7 @@ from bwa_mem3_bench.registry import (
 from bwa_mem3_bench.report.tables import md_table
 from bwa_mem3_bench.storage import VS_BASELINE, VS_GOLDEN
 from bwa_mem3_bench.storage.queries import query_df
+from bwa_mem3_bench.workflow_config import load_config
 
 # Gate #2 (vs the blessed golden / last release): two fg-labs builds should be
 # ~identical, so this stays tight. Loosening it must be deliberate (re-bless +
@@ -143,6 +145,110 @@ def _missing_baseline_cells(
     return merged[merged["_merge"] == "left_only"][["sample", "arch"]].reset_index(drop=True)
 
 
+def _scaling_efficiency(db_path: Path, sha: str) -> pd.DataFrame:
+    """Per-thread-count strong-scaling efficiency for one run.
+
+    ``E(n) = T(1) / (n * T(n))`` using the aligner's own PROCESS() time, falling
+    back to wall when PROCESS() could not be parsed. PROCESS() is preferred
+    because it excludes the fixed per-run overhead (thread setup, output
+    writing) that otherwise dominates the shortest, highest-thread rungs and
+    would make the gate fire on I/O noise rather than on parallel efficiency.
+
+    Returns an empty frame when the run has no ladder, so callers can no-op.
+    """
+    df = query_df(
+        db_path,
+        """
+        SELECT sample, arch, threads, wall_seconds, process_seconds
+        FROM scaling WHERE fg_labs_sha = ?
+        """,
+        params=(sha,),
+    )
+    if df.empty:
+        return df
+    df["t"] = df["process_seconds"].fillna(df["wall_seconds"])
+    # A rep with neither PROCESS() nor a wall time (both stored NULL when the
+    # rung's timing could not be parsed) leaves NaN, and every downstream
+    # comparison reads NaN as "no regression" — `NaN > tolerance` is False, so a
+    # rung with no data would render as `ok` and quietly pass the gate. Drop
+    # those reps instead; a rung with no usable rep then vanishes from the gate,
+    # the same way a ladder with no T(1) does.
+    df = df[df["t"].notna()]
+    med = df.groupby(["sample", "arch", "threads"])["t"].median().reset_index()
+    out = []
+    for (sample, arch), grp in med.groupby(["sample", "arch"]):
+        base = grp.loc[grp["threads"] == 1, "t"]
+        if base.empty or base.iloc[0] <= 0:
+            # No 1-thread rung -> efficiency is undefined. Config validation
+            # requires one, so this only happens on a truncated ladder.
+            continue
+        t1 = float(base.iloc[0])
+        for _, row in grp.iterrows():
+            n = int(row["threads"])
+            if n <= 1:
+                continue
+            out.append(
+                {
+                    "sample": sample,
+                    "arch": arch,
+                    "threads": n,
+                    "efficiency_pct": t1 / (n * float(row["t"])) * 100.0,
+                }
+            )
+    return pd.DataFrame(out)
+
+
+def _scaling_gate(db_path: Path, new_sha: str, prev_sha: str, max_drop_pp: float) -> pd.DataFrame:
+    """Gate #3: thread-scaling efficiency must not regress vs the last release.
+
+    Gated release-over-release rather than against absolute targets: an absolute
+    floor would be a guess, while the previous release is a measured fact. Same
+    principle as Gate #2.
+
+    Returns an empty frame when either run lacks a ladder — notably the FIRST
+    run after this gate is introduced, which has no predecessor to compare
+    against and must not fail closed for that reason alone.
+    """
+    new = _scaling_efficiency(db_path, new_sha)
+    prev = _scaling_efficiency(db_path, prev_sha)
+    if new.empty or prev.empty:
+        return pd.DataFrame()
+    merged = new.merge(prev, on=["sample", "arch", "threads"], suffixes=("_new", "_prev"))
+    if merged.empty:
+        return merged
+    merged["drop_pp"] = merged["efficiency_pct_prev"] - merged["efficiency_pct_new"]
+    merged["verdict"] = ["REGRESSION" if d > max_drop_pp else "ok" for d in merged["drop_pp"]]
+    return merged.sort_values(["sample", "arch", "threads"]).reset_index(drop=True)
+
+
+def _scaling_section(scaling: pd.DataFrame) -> list[str]:
+    """Markdown for Gate #3, or nothing when neither run carried a ladder."""
+    if scaling.empty:
+        return []
+    return [
+        "## Gate #3 — thread-scaling efficiency vs last release",
+        "",
+        md_table(
+            ["sample", "arch", "threads", "prev_eff_%", "new_eff_%", "drop_pp", "verdict"],
+            scaling[
+                [
+                    "sample",
+                    "arch",
+                    "threads",
+                    "efficiency_pct_prev",
+                    "efficiency_pct_new",
+                    "drop_pp",
+                    "verdict",
+                ]
+            ]
+            .to_records(index=False)
+            .tolist(),
+            float_fmt="{:.2f}",
+        ),
+        "",
+    ]
+
+
 def check_regression(
     *,
     db_path: Path,
@@ -235,11 +341,21 @@ def check_regression(
     # a genuinely-missing x86/meth comparison fails rather than silently passing.
     missing_baseline = _missing_baseline_cells(db_path, new_df, baseline_conc)
 
+    # Gate #3: thread-scaling efficiency vs the last release. Empty (and thus
+    # non-failing) when either run has no ladder — including the first run after
+    # this gate lands, which has no predecessor and must not fail for that.
+    scaling_cfg = load_config(Path(REPO_ROOT) / "config").thread_scaling
+    scaling = _scaling_gate(db_path, new_sha, prev_sha, scaling_cfg.max_efficiency_drop_pp)
+    scaling_fails = (
+        scaling[scaling["verdict"] == "REGRESSION"] if not scaling.empty else pd.DataFrame()
+    )
+
     failing = (
         not concordance_fails.empty
         or not perf_fails.empty
         or not budget_fails.empty
         or not missing_baseline.empty
+        or not scaling_fails.empty
     )
     verdict = "FAIL" if failing else "PASS"
 
@@ -249,6 +365,8 @@ def check_regression(
         f"- Gate #1 (vs upstream): observed drift must stay within the "
         f"per-sample registry budget (margin {DRIFT_MARGIN_PCT}%).",
         f"- Gate #2 (vs golden / last release): concordance ≥ {CONCORDANCE_THRESHOLD}%.",
+        f"- Gate #3 (thread scaling): efficiency may drop at most "
+        f"{scaling_cfg.max_efficiency_drop_pp} pp vs the last release.",
         f"- Performance regression threshold: ≤ {PERF_REGRESSION_THRESHOLD_PCT}%",
         "- Reps aggregated by median; perf verdict is `REGRESSION` /",
         "  `improvement` only when the new and prev wall_s ranges do **not**",
@@ -372,5 +490,7 @@ def check_regression(
             )
         )
         lines.append("")
+
+    lines.extend(_scaling_section(scaling))
 
     return not failing, "\n".join(lines)
