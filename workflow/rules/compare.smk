@@ -11,6 +11,26 @@
 # cheapest x86 SIMD path (AVX2) and is part of every standard arch set.
 ARM_X86_REFERENCE_ARCH = "c6a"
 
+# Batch cgroup memory for the compare rules.
+#
+# `compare-bams` walks both BAMs in lockstep and holds only ONE template's
+# records at a time (see tools/compare-bams/src/template_reader.rs), so its
+# footprint is a few hundred MB and is independent of sample size — a 5M-pair
+# wgs BAM costs no more than the 63K-read smoke.
+#
+# Without an explicit value these rules inherit the profile's
+# `default-resources: mem_mb: 28000`, which is sized for the ALIGNERS (hg38 FMI
+# + per-batch working set) and is ~70x what a compare needs. Because Batch packs
+# by the cgroup request, a 28 GB reservation lets only ONE compare job land on a
+# 32 GB *.4xlarge while 15 of its 16 vCPUs sit idle — so the compare tail
+# serializes one-job-per-instance exactly when spot capacity is tight. Observed
+# on c7i during the 394f8f8 sweep: 31 queued compares draining singly behind a
+# single instance while every other queue had already emptied.
+#
+# 4 GB keeps a wide safety margin over actual usage and fits ~7 concurrent
+# compares per *.4xlarge.
+COMPARE_MEM_MB = 4000
+
 
 def _ignore_tag_args(sample_name: str) -> str:
     tags = CONFIG.samples[sample_name].compare_options.get("ignore_tags", [])
@@ -43,6 +63,7 @@ rule compare_vs_baseline:
     resources:
         batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
         container_image = lambda wc: image_for_arch(wc.arch),
+        mem_mb = COMPARE_MEM_MB,
     params:
         ignore_tag_args = lambda wc: _ignore_tag_args(wc.sample),
     shell:
@@ -66,6 +87,7 @@ rule compare_vs_x86:
     resources:
         batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
         container_image = lambda wc: image_for_arch(wc.arch),
+        mem_mb = COMPARE_MEM_MB,
     params:
         ignore_tag_args = lambda wc: _ignore_tag_args(wc.sample),
     shell:
@@ -102,6 +124,7 @@ rule compare_vs_default:
     resources:
         batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
         container_image = lambda wc: image_for_arch(wc.arch),
+        mem_mb = COMPARE_MEM_MB,
     params:
         ignore_tag_args = lambda wc: _ignore_tag_args(wc.sample),
     shell:
@@ -127,6 +150,7 @@ rule compare_vs_golden:
     resources:
         batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
         container_image = lambda wc: image_for_arch(wc.arch),
+        mem_mb = COMPARE_MEM_MB,
     params:
         ignore_tag_args = lambda wc: _ignore_tag_args(wc.sample),
     shell:
