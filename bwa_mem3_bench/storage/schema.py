@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 # Increment this whenever the schema changes in a backward-incompatible way.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
-SCHEMA_SQL = """
-PRAGMA user_version = 4;
+# `user_version` is INTERPOLATED from SCHEMA_VERSION, never written literally.
+# It used to be hardcoded, so bumping SCHEMA_VERSION without editing the PRAGMA
+# left the DB stamped with the old number while the code believed it was current
+# — migrations would then either re-run or be skipped depending on direction.
+SCHEMA_SQL = f"""
+PRAGMA user_version = {SCHEMA_VERSION};
 
 CREATE TABLE IF NOT EXISTS runs (
     fg_labs_sha     TEXT PRIMARY KEY,
@@ -93,7 +97,37 @@ CREATE TABLE IF NOT EXISTS accuracy (
     UNIQUE (fg_labs_sha, sample, arch, rep, tool)
 );
 
+-- Thread-scaling ladder (workflow/rules/scaling.smk), one row per
+-- (sha, sample, arch, threads, rep).
+--
+-- A SEPARATE table rather than a `threads` column on trials: trials is
+-- UNIQUE(fg_labs_sha, sample, arch, rep), and the ladder runs the same sample
+-- and arch at several thread counts within one rep, which that constraint
+-- forbids. Keeping it separate also keeps `trials` meaning "one row per
+-- benchmark cell at the standard thread count", which every existing report
+-- assumes.
+--
+-- Every row of a given (sha, sample, arch) comes from ONE Batch job on ONE
+-- host, by construction — see the rule's docstring for why efficiency is only
+-- meaningful measured that way.
+CREATE TABLE IF NOT EXISTS scaling (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    fg_labs_sha     TEXT NOT NULL REFERENCES runs(fg_labs_sha),
+    sample          TEXT NOT NULL,
+    arch            TEXT NOT NULL,
+    threads         INTEGER NOT NULL,
+    rep             INTEGER NOT NULL,
+    wall_seconds    REAL,
+    cpu_time        REAL,
+    max_rss_mb      REAL,
+    -- The aligner's own PROCESS() compute time, parsed with the same regex as
+    -- trials.process_seconds so the two are directly comparable.
+    process_seconds REAL,
+    UNIQUE (fg_labs_sha, sample, arch, threads, rep)
+);
+
 CREATE INDEX IF NOT EXISTS idx_trials_run ON trials(fg_labs_sha);
 CREATE INDEX IF NOT EXISTS idx_trials_sample_arch ON trials(sample, arch);
 CREATE INDEX IF NOT EXISTS idx_accuracy_run ON accuracy(fg_labs_sha);
+CREATE INDEX IF NOT EXISTS idx_scaling_run ON scaling(fg_labs_sha);
 """

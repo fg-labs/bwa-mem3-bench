@@ -13,6 +13,7 @@ from bwa_mem3_bench.storage.sqlite import (
     upsert_accuracy,
     upsert_comparison,
     upsert_run,
+    upsert_scaling,
     upsert_trial,
 )
 
@@ -50,6 +51,18 @@ _INDEX_READ_RE = re.compile(r"^\s*Index read time avg:\s*([0-9.]+),", re.MULTILI
 # `baseline-bwa-mem2-<upstream_tag>` (e.g. `baseline-bwa-mem2-v2.2.1`).
 # This keeps a single query path for both fg-labs and baseline timings.
 BASELINE_SHA_PREFIX = "baseline-bwa-mem2-"
+
+
+# scaling.tsv columns: threads, rep, wall_s, cpu_s, max_rss_mb, process_s.
+_SCALING_COLUMNS = 6
+
+
+def _maybe_float(cell: str) -> float | None:
+    """Parse a TSV cell to float, or None for the rule's "NA" sentinel."""
+    try:
+        return float(cell)
+    except ValueError:
+        return None
 
 
 def baseline_sha_for(tool_version: str) -> str:
@@ -564,3 +577,60 @@ def ingest_accuracy(
 
     conn.commit()
     return count
+
+
+def ingest_scaling(
+    conn: sqlite3.Connection,
+    *,
+    scaling_root: Path,
+    fg_labs_sha: str,
+) -> int:
+    """Ingest thread-scaling ladders under ``scaling/<sha>/<sample>/<arch>/``.
+
+    Each ``scaling.tsv`` is written by `align_thread_scaling` (one Batch job on
+    one host) with a header plus one row per (threads, rep):
+    ``threads, rep, wall_s, cpu_s, max_rss_mb, process_s``.
+
+    :param conn: open benchmark DB connection.
+    :param scaling_root: local mirror of the ``scaling/`` prefix.
+    :param fg_labs_sha: run whose ladders should be ingested.
+    :return: number of rows ingested (0 when the run has no ladder).
+    """
+    run_dir = scaling_root / fg_labs_sha
+    if not run_dir.is_dir():
+        return 0
+
+    # The scaling ladder may be ingested for a SHA whose standard sweep was
+    # never collected, so ensure the runs row exists; `complete` matches what
+    # ingest_run stamps, and the ON CONFLICT upsert leaves it alone if the
+    # sweep already created it.
+    upsert_run(conn, fg_labs_sha=fg_labs_sha, status="complete", commit=False)
+
+    ingested = 0
+    for tsv in sorted(run_dir.glob("*/*/scaling.tsv")):
+        sample = tsv.parent.parent.name
+        arch = tsv.parent.name
+        for line in tsv.read_text().splitlines()[1:]:  # skip header
+            fields = line.split("\t")
+            if len(fields) < _SCALING_COLUMNS:
+                continue
+            threads, rep, wall, cpu, rss, proc = fields[:_SCALING_COLUMNS]
+            upsert_scaling(
+                conn,
+                fg_labs_sha=fg_labs_sha,
+                sample=sample,
+                arch=arch,
+                threads=int(threads),
+                rep=int(rep),
+                wall_seconds=_maybe_float(wall),
+                cpu_time=_maybe_float(cpu),
+                max_rss_mb=_maybe_float(rss),
+                # The rule writes the literal "NA" when PROCESS() could not be
+                # parsed from the aligner's stderr; store NULL rather than
+                # crashing, so one unparseable rung does not lose the ladder.
+                process_seconds=_maybe_float(proc),
+                commit=False,
+            )
+            ingested += 1
+    conn.commit()
+    return ingested

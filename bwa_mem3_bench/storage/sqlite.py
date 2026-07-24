@@ -17,6 +17,8 @@ EXPECTED_SCHEMA_VERSION = SCHEMA_VERSION
 #   v2 → v3: added comparisons.supp_json (compare-bams supplementary metrics).
 #   v3 → v4: added the `accuracy` table (holodeck truth-based eval) — a new
 #            table, so no ALTER is needed; executescript creates it in place.
+#   v4 → v5: added the `scaling` table (thread-scaling ladder) — likewise a new
+#            table, created in place by executescript, no ALTER needed.
 _SCHEMA_V1 = 1
 _SCHEMA_V2 = 2
 _SCHEMA_V3 = 3
@@ -263,6 +265,53 @@ def upsert_comparison(  # noqa: PLR0913
             supp_json = excluded.supp_json
         """,
         (trial_id, kind, concordant, total, concordance_pct, by_class_json, supp_json),
+    )
+    if commit:
+        conn.commit()
+
+
+def upsert_scaling(  # noqa: PLR0913
+    conn: sqlite3.Connection,
+    *,
+    fg_labs_sha: str,
+    sample: str,
+    arch: str,
+    threads: int,
+    rep: int,
+    wall_seconds: float | None,
+    cpu_time: float | None,
+    max_rss_mb: float | None,
+    process_seconds: float | None,
+    commit: bool = True,
+) -> None:
+    """Insert or update one rung of a thread-scaling ladder.
+
+    Keyed on (sha, sample, arch, threads, rep) so re-ingesting a run is
+    idempotent, matching how `upsert_trial` behaves for the standard sweep.
+    """
+    conn.execute(
+        """
+        INSERT INTO scaling
+            (fg_labs_sha, sample, arch, threads, rep,
+             wall_seconds, cpu_time, max_rss_mb, process_seconds)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(fg_labs_sha, sample, arch, threads, rep) DO UPDATE SET
+            wall_seconds = excluded.wall_seconds,
+            cpu_time = excluded.cpu_time,
+            max_rss_mb = excluded.max_rss_mb,
+            process_seconds = excluded.process_seconds
+        """,
+        (
+            fg_labs_sha,
+            sample,
+            arch,
+            threads,
+            rep,
+            wall_seconds,
+            cpu_time,
+            max_rss_mb,
+            process_seconds,
+        ),
     )
     if commit:
         conn.commit()

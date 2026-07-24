@@ -12,6 +12,7 @@ from bwa_mem3_bench.storage.ingest import (
     ingest_baseline,
     ingest_minibwa,
     ingest_run,
+    ingest_scaling,
 )
 from bwa_mem3_bench.storage.sqlite import connect
 from bwa_mem3_bench.workflow_config import load_config
@@ -59,12 +60,16 @@ def collect(
     runs_root = LOCAL_MIRROR_ROOT / "runs"
     baseline_root = LOCAL_MIRROR_ROOT / "baseline"
     minibwa_root = LOCAL_MIRROR_ROOT / "minibwa"
+    scaling_root = LOCAL_MIRROR_ROOT / "scaling"
     run_dir = runs_root / fg_labs_sha
 
     if dry_run:
         _sync_prefix(f"s3://{bucket}/runs/{fg_labs_sha}/", str(run_dir), dry_run=True)
         _sync_prefix(f"s3://{bucket}/baseline/", str(baseline_root), dry_run=True)
         _sync_prefix(f"s3://{bucket}/minibwa/", str(minibwa_root), dry_run=True)
+        _sync_prefix(
+            f"s3://{bucket}/scaling/{fg_labs_sha}/", str(scaling_root / fg_labs_sha), dry_run=True
+        )
         if ingest:
             print(f"[dry-run] ingest {run_dir} → {DB_PATH}")
         return
@@ -72,9 +77,15 @@ def collect(
     run_dir.mkdir(parents=True, exist_ok=True)
     baseline_root.mkdir(parents=True, exist_ok=True)
     minibwa_root.mkdir(parents=True, exist_ok=True)
+    (scaling_root / fg_labs_sha).mkdir(parents=True, exist_ok=True)
     _sync_prefix(f"s3://{bucket}/runs/{fg_labs_sha}/", str(run_dir), dry_run=False)
     _sync_prefix(f"s3://{bucket}/baseline/", str(baseline_root), dry_run=False)
     _sync_prefix(f"s3://{bucket}/minibwa/", str(minibwa_root), dry_run=False)
+    # Thread-scaling ladders are per-SHA (unlike the SHA-independent baseline
+    # and minibwa caches), so sync only this run's subtree.
+    _sync_prefix(
+        f"s3://{bucket}/scaling/{fg_labs_sha}/", str(scaling_root / fg_labs_sha), dry_run=False
+    )
 
     if ingest:
         conn = connect(DB_PATH)
@@ -88,6 +99,12 @@ def collect(
             a = ingest_accuracy(conn, runs_root=runs_root, fg_labs_sha=fg_labs_sha)
             if a:
                 print(f"ingested {a} accuracy rows into {DB_PATH}", file=sys.stderr)
+
+            # Thread-scaling ladder (--target thread_scaling). Absent for runs
+            # that did not request it, hence the truthiness guard.
+            sc = ingest_scaling(conn, scaling_root=scaling_root, fg_labs_sha=fg_labs_sha)
+            if sc:
+                print(f"ingested {sc} scaling rows into {DB_PATH}", file=sys.stderr)
 
             # Ingest baselines from each upstream tag known to the workflow
             # config so that `bench report`/`bench speedup` can join fg-labs
