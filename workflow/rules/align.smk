@@ -232,10 +232,12 @@ rule align_fg_labs:
     # 63-96% while cpu_time FELL. meth was immune (its 48 GB request cannot
     # double-pack), which is what identified the mechanism.
     #
-    # NOTE: snakemake clamps `threads` to `--cores` when that flag is given.
-    # coordinator-entrypoint.sh deliberately passes only `--jobs`, so the value
-    # survives; adding `cores:` to the profile would silently clamp vCPU here
-    # and reintroduce the bug. tests/test_thread_packing.py guards that.
+    # NOTE: the directive alone is not enough — snakemake then clamps `threads`
+    # to the core count, and with `--cores` OMITTED that resolves to the
+    # coordinator's own 2 vCPUs, so this rule was submitted as VCPU=2 anyway.
+    # coordinator-entrypoint.sh therefore passes an explicit `--cores`, and the
+    # profile's `jobs:` (a second clamp) must likewise clear the largest
+    # `threads:` any rule declares. tests/test_thread_packing.py pins all three.
     threads: CONFIG.threads
     params:
         extra   = lambda wc: _fg_labs_flags(wc.sample),

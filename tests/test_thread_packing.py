@@ -13,10 +13,16 @@ Two things therefore have to hold, and neither fails loudly:
    non-meth alignments (28 GB each) then land on one 16-vCPU host and each runs
    16 threads against ~8 effective CPUs.
 
-2. Snakemake must not be given ``--cores``. It clamps ``threads`` to the core
-   count, so a ``--cores 2`` coordinator would silently emit ``VCPU=2`` and
-   reintroduce the same over-packing. Verified empirically: ``--jobs 50`` alone
-   preserves ``threads: 16``; ``--jobs 50 --cores 2`` yields ``threads: 2``.
+2. The coordinator must pass a LARGE ``--cores``. Snakemake clamps ``threads``
+   to the core count, and with ``--cores`` omitted that resolves to the local
+   core count -- the coordinator runs on a c6a.large (2 vCPUs). A real run
+   without the flag submitted ``align_fg_labs`` (threads: 16) as ``VCPU=2``.
+   ``--jobs`` clamps it too, so the profile's ``jobs:`` must also clear the
+   largest ``threads:`` any rule declares.
+
+   None of this is visible to ``--dry-run``, which prints the unclamped rule
+   value: a 12-core laptop reported ``threads: 16`` for a rule that a real
+   submission turned into ``VCPU=2``. Only a submitted job exposes it.
 
 Both were live bugs on the 394f8f8 sweep (m7i mean_load 1494 -> 792, parallel
 efficiency 93% -> 50% on wgs-5M/wes-5M) and are cheap to regress into again.
@@ -79,25 +85,31 @@ def test_align_rule_has_no_threads_param(smk_path: str, rule_name: str) -> None:
     )
 
 
-def test_coordinator_does_not_pass_cores() -> None:
-    """Snakemake clamps `threads` to `--cores`, which would shrink the vCPU request."""
+def test_coordinator_passes_enough_cores() -> None:
+    """The coordinator MUST pass a large `--cores`, or every vCPU request shrinks.
+
+    Snakemake clamps `threads` to the core count, and with `--cores` omitted that
+    resolves to the LOCAL core count — the coordinator is a c6a.large, i.e. 2
+    vCPUs. A real run with the flag absent submitted `align_fg_labs`
+    (threads: 16) as VCPU=2.
+
+    This is invisible to `--dry-run`, which reports the unclamped rule value: a
+    12-core laptop happily printed `threads: 16`. Only a submitted job reveals
+    it, which is why this assertion exists rather than a dry-run check.
+    """
     text = ENTRYPOINT.read_text()
-    # Match the flag only as an argument, so prose in comments cannot trip it.
-    assert not re.search(r"(?<![\w-])--cores(?![\w-])", text), (
-        "coordinator-entrypoint.sh passes --cores; snakemake clamps `threads` to "
-        "it, silently reducing the Batch VCPU request for every align job."
+    match = re.search(r"(?<![\w-])--cores[= ]+(\d+)", text)
+    assert match, (
+        "coordinator-entrypoint.sh does not pass --cores; snakemake then clamps "
+        "every rule's `threads` to the coordinator's own 2 vCPUs, so each worker "
+        "is submitted as a 2-vCPU Batch job and Batch over-packs the host."
     )
-    assert not re.search(r"(?<![\w-])-c\s+\d", text), (
-        "coordinator-entrypoint.sh passes -c <n> (--cores); same clamping problem."
-    )
-
-
-def test_batch_profile_sets_no_cores() -> None:
-    """A `cores:` profile key is equivalent to passing --cores."""
-    text = PROFILE_TEMPLATE.read_text()
-    assert not re.search(r"^\s*cores\s*:", text, re.MULTILINE), (
-        "the aws-batch profile sets `cores:`; snakemake clamps `threads` to it, "
-        "silently reducing the Batch VCPU request for every align job."
+    cores = int(match.group(1))
+    needed = load_config(Path(REPO_ROOT) / "config").thread_scaling.max_threads
+    assert cores >= needed, (
+        f"coordinator passes --cores {cores}, below the largest `threads:` any "
+        f"rule declares ({needed}, the thread-scaling ladder); that rule's vCPU "
+        f"reservation would be clamped to {cores}."
     )
 
 

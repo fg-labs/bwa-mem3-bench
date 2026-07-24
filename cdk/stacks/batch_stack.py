@@ -123,6 +123,28 @@ class BatchStack(cdk.Stack):
                     ),
                 )
             ],
+            # IMDS must be reachable FROM INSIDE the task container, not just
+            # from the host: `emit-host-meta` (docker/emit-host-meta.sh, run by
+            # `align_fg_labs` in workflow/rules/align.smk) records instance-type /
+            # AZ / instance-id so a timing difference between two runs can be
+            # attributed to a host rather than guessed at.
+            #
+            # A container sits one network hop further from IMDS than the host,
+            # and the default HttpPutResponseHopLimit of 1 drops the IMDSv2
+            # token PUT before it arrives — so the container can never obtain a
+            # token no matter how the request is written. 2 is the documented
+            # minimum for containerized workloads.
+            #
+            # Without this the metadata silently degrades to "unknown"; it does
+            # not fail the job, which is exactly why the previous IMDSv1 bug
+            # went unnoticed for the entire history of the project.
+            http_put_response_hop_limit=2,
+            # The widened hop limit puts IMDS in reach of anything running in the
+            # container, so pair it with REQUIRED: a tokenless IMDSv1 GET could
+            # otherwise read the instance role's credentials from in there. Both
+            # consumers already speak IMDSv2 — emit-host-meta does the token PUT
+            # itself, and the ECS agent on AL2023 uses v2.
+            http_tokens=ec2.LaunchTemplateHttpTokens.REQUIRED,
         )
         cdk.Tags.of(launch_template).add("Project", project_name)
         if cost_center:
