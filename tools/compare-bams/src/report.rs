@@ -42,9 +42,12 @@ pub struct TagCounter {
     /// Records on the baseline side carrying this tag at all.
     #[serde(default)]
     pub baseline_present: u64,
-    /// True when this tag is on the `ignore_tags` list, so its divergence is
-    /// reported here but excluded from `concordance_pct`. Present so a reader
-    /// can tell "diverges and we accepted it" from "diverges and it counted".
+    /// True when this tag is on the `ignore_tags` list, so any divergence it has
+    /// is reported here but excluded from `concordance_pct`. Set for every
+    /// ignored tag, including ones that never diverged or never appeared at all,
+    /// so the block states the whole policy rather than the part that fired.
+    /// Present so a reader can tell "diverges and we accepted it" from "diverges
+    /// and it counted".
     #[serde(default)]
     pub ignored: bool,
 }
@@ -71,10 +74,12 @@ pub struct ConcordanceReport {
     pub concordance_pct: f64,
     pub by_class: BTreeMap<String, ClassCounter>,
 
-    /// Per-tag divergence, keyed by tag name. Populated for EVERY tag that
-    /// diverged, including those on `ignore_tags` — those carry `ignored: true`
-    /// and are excluded from `concordance_pct` but never hidden, so a
-    /// misclassified tag is diagnosable from this block alone.
+    /// Per-tag census, keyed by tag name. Holds an entry for EVERY tag observed
+    /// on either side — not only those that diverged (see [`Self::record_presence`])
+    /// — plus every `ignore_tags` entry (see [`Self::mark_ignored`]), which may
+    /// have all-zero counts when it matched no record. Ignored tags carry
+    /// `ignored: true` and are excluded from `concordance_pct` but never hidden,
+    /// so a misclassified tag is diagnosable from this block alone.
     #[serde(default)]
     pub by_tag: BTreeMap<String, TagCounter>,
 

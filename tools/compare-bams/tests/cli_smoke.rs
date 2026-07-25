@@ -205,6 +205,44 @@ fn a_dead_ignore_entry_exits_3() {
     let violations = value["tag_guard_violations"].as_array().unwrap();
     assert_eq!(violations[0]["kind"], "dead_ignore_entry");
     assert_eq!(violations[0]["tag"], "MQ");
+    // The dead entry is also stated in by_tag -- flagged ignored, with all-zero
+    // counts -- so the report describes the whole policy, not just what fired.
+    assert_eq!(value["by_tag"]["MQ"]["ignored"], true);
+    assert_eq!(value["by_tag"]["MQ"]["query_present"], 0);
+    assert_eq!(value["by_tag"]["MQ"]["baseline_present"], 0);
+}
+
+/// An ignored tag that IS present and never diverges must still read as ignored
+/// in `by_tag`; `ignored` is otherwise only set when a tag diverges, so the
+/// block would understate the policy.
+#[test]
+fn a_live_ignore_entry_that_never_diverges_is_still_flagged_ignored() {
+    let (code, text) = run_guarded(
+        &["NM", "MQ"],
+        &["NM", "MQ"],
+        &["--expect-tag", "NM", "--ignore-tag", "MQ"],
+    );
+    assert_eq!(code, 0, "MQ is present, so the entry is not dead");
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value["by_tag"]["MQ"]["ignored"], true);
+    assert_eq!(value["by_tag"]["MQ"]["query_present"], 1);
+    assert_eq!(value["by_tag"]["MQ"]["value_diff"], 0);
+}
+
+/// Excusing a tag nobody ignores is inert config, and the guard holds its own
+/// inputs to the rule it enforces.
+#[test]
+fn a_redundant_absent_ok_entry_exits_3() {
+    let (code, text) = run_guarded(
+        &["NM"],
+        &["NM"],
+        &["--expect-tag", "NM", "--absent-ok-tag", "ZZ"],
+    );
+    assert_eq!(code, 3);
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let violations = value["tag_guard_violations"].as_array().unwrap();
+    assert_eq!(violations[0]["kind"], "redundant_absent_ok");
+    assert_eq!(violations[0]["tag"], "ZZ");
 }
 
 #[test]
@@ -228,4 +266,49 @@ fn no_tag_guard_suppresses_the_failure_but_not_the_report() {
 fn omitting_expect_tag_disables_only_the_unexpected_tag_check() {
     let (code, _) = run_guarded(&["NM", "ZZ"], &["NM", "ZZ"], &[]);
     assert_eq!(code, 0);
+}
+
+/// The guard's own CLI is held to the rule the guard enforces: a tag name that
+/// can never match a record is inert config, so it is rejected at the boundary
+/// rather than silently allowlisting/ignoring nothing.
+#[test]
+fn a_malformed_tag_name_is_a_usage_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let q = tmp.path().join("q.bam");
+    let b = tmp.path().join("b.bam");
+    write_bam_with_tags(&["NM"], &q);
+    write_bam_with_tags(&["NM"], &b);
+
+    for (flag, bad) in [
+        ("--expect-tag", "XYZ"),
+        ("--ignore-tag", "1N"),
+        ("--absent-ok-tag", "@X"),
+        ("--expect-tag", "N"),
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_compare-bams"))
+            .args([
+                "--query",
+                q.to_str().unwrap(),
+                "--baseline",
+                b.to_str().unwrap(),
+                "--out",
+                tmp.path().join("report.json").to_str().unwrap(),
+                "--expect-tag",
+                "NM",
+                flag,
+                bad,
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{flag} {bad}: clap usage error");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("SAM aux tag name"),
+            "{flag} {bad}: {stderr}"
+        );
+        assert!(
+            !tmp.path().join("report.json").exists(),
+            "{flag} {bad}: must fail before doing any work"
+        );
+    }
 }

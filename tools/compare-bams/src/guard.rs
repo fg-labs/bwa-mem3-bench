@@ -46,6 +46,12 @@ pub enum TagGuardViolation {
     },
     /// An `ignore_tags` entry matched no record on either side.
     DeadIgnoreEntry { tag: String, total_reads: u64 },
+    /// An `absent_ok_tags` entry that is not on `ignore_tags`.
+    ///
+    /// Only ignore entries are audited, so such an entry is never consulted —
+    /// it is itself the inert config this guard exists to reject, and exempting
+    /// the guard's own inputs from that rule would be the same bug one level up.
+    RedundantAbsentOk { tag: String },
 }
 
 impl TagGuardViolation {
@@ -69,6 +75,12 @@ impl TagGuardViolation {
                  (0 of {total_reads} primaries). A tag nobody emits cannot be \
                  suppressed, so this entry does nothing. Either the aligner \
                  stopped emitting it, or the entry is dead config."
+            ),
+            Self::RedundantAbsentOk { tag } => format!(
+                "absent-ok entry {tag:?} is not on the ignore list. Only \
+                 ignore_tags entries are audited for absence, so this entry is \
+                 never consulted and excuses nothing. Drop it, or add {tag:?} to \
+                 ignore_tags if it was meant to be skipped."
             ),
         }
     }
@@ -99,6 +111,15 @@ pub fn check(report: &ConcordanceReport, opts: &CompareOptions) -> Vec<TagGuardV
                     baseline_present: counter.baseline_present,
                 });
             }
+        }
+    }
+
+    // The guard's own config is subject to the rule the guard enforces: an
+    // absent-ok entry naming a tag nobody ignores is never read by the loop
+    // below, so it is inert config in exactly the sense this module rejects.
+    for tag in &opts.absent_ok_tags {
+        if !opts.ignore_tags.contains(tag) {
+            violations.push(TagGuardViolation::RedundantAbsentOk { tag: tag.clone() });
         }
     }
 
@@ -253,5 +274,20 @@ mod tests {
         let r = report_with(100, &["NM", "YY", "ZZ"]);
         let v = check(&r, &opts(&["MQ", "HN"], &["NM"], &[]));
         assert_eq!(v.len(), 4, "{v:?}");
+    }
+
+    /// The guard's own config obeys the rule the guard enforces: excusing a tag
+    /// nobody ignores is inert, since only ignore entries are ever audited.
+    #[test]
+    fn an_absent_ok_entry_that_is_not_ignored_is_itself_a_violation() {
+        let r = report_with(100, &["NM"]);
+        assert_eq!(
+            check(&r, &opts(&[], &["NM"], &["ZZ"])),
+            vec![TagGuardViolation::RedundantAbsentOk {
+                tag: "ZZ".to_string()
+            }]
+        );
+        // Excusing a tag that IS ignored stays silent — that is its whole job.
+        assert!(check(&r, &opts(&["MQ"], &["NM"], &["MQ"])).is_empty());
     }
 }

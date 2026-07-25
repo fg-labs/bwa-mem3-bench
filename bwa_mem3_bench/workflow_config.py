@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+# A SAM aux tag name: exactly two characters, `[A-Za-z][A-Za-z0-9]` (SAMv1 §1.5).
+_AUX_TAG_RE = re.compile(r"[A-Za-z][A-Za-z0-9]")
+
 # The `compare-bams` invocations the workflow makes, one per rule in
 # `workflow/rules/compare.smk`. Three flavours, not two:
 #   - `vs_baseline` — a DIFFERENT aligner (upstream bwa-mem2, or bwameth for
-#     meth samples), so it needs the largest exclusion list.
+#     meth samples), so it skips the tags the two never share.
 #   - `vs_golden` / `vs_x86` — same binary AND same search settings, so every
 #     tag is comparable and nothing is skipped.
-#   - `vs_default` — same binary but preset-pruned (`--fast` vs default), so the
-#     tags describing the candidate set diverge mechanically and are excluded
-#     while the tags describing the chosen alignment stay strict.
+#   - `vs_default` — the exception to the "same binary, skip nothing" rule:
+#     `--fast` prunes the candidate set on purpose, so the tags describing that
+#     set are skipped while the tags describing the chosen alignment stay strict.
 COMPARE_KINDS = frozenset({"vs_baseline", "vs_golden", "vs_x86", "vs_default"})
 
 # Mate tags. A single-end read has no mate, so these cannot exist on one -- a
@@ -77,10 +81,13 @@ class Sample:
     # the mate-SW reference windows and OOMs the cgroup.
     mem_flags: list[str] = field(default_factory=list)
     # Per-comparison-kind compare-bams overrides, keyed by kind (see
-    # `COMPARE_KINDS`), e.g. `{"vs_baseline": {"ignore_tags": [...]}}`. Each
-    # kind's `ignore_tags` EXTENDS the matching `compare_defaults` entry rather
-    # than replacing it. Resolve via `WorkflowConfig.ignore_tags()` — never read
-    # this directly, or the defaults get silently dropped.
+    # `COMPARE_KINDS`). Each kind's body accepts two tag lists:
+    #     {"vs_baseline": {"ignore_tags": [...], "expect_tags": [...]}}
+    # `ignore_tags` excludes a tag from the score; `expect_tags` declares a tag
+    # MAY appear, so the guard does not flag it as unexpected. BOTH EXTEND the
+    # matching `compare_defaults` entry rather than replacing it. Resolve via
+    # `WorkflowConfig.ignore_tags()` / `.expect_tags()` — never read this
+    # directly, or the defaults get silently dropped.
     compare_options: dict[str, Any] = field(default_factory=dict)
     # Truth-based accuracy sample (holodeck-simulated). When True, the sample's
     # S3 `source` prefix also holds the truth artifacts (`golden.bam`,
@@ -356,6 +363,42 @@ def _as_str_list(owner: str, key: str, value: Any) -> list[str]:
     return list(value)
 
 
+def _as_tag_list(owner: str, key: str, value: Any) -> list[str]:
+    """Validate a tag list is a `list[str]` of well-formed SAM aux tag names.
+
+    A SAM aux tag is exactly two characters, `[A-Za-z][A-Za-z0-9]`. Anything else
+    can never match a tag `compare-bams` reads off a record, so a typo like
+    `NMX` would sit in the config doing nothing.
+
+    That matters asymmetrically. A typo in `ignore_tags` IS caught at run time --
+    the tag matches no record, so the dead-entry check fires. A typo in
+    `expect_tags` is not: the list means "may appear", so an entry that can never
+    appear is indistinguishable from one that legitimately does not. Validating
+    the shape here is what keeps the guard's own config subject to the rule the
+    guard exists to enforce -- config that silently does nothing is the bug.
+
+    :param owner: what the list belongs to, rendered verbatim into the error
+        message (e.g. `"sample 'wgs-5M'"` or ``"`compare_defaults`"``). The
+        top-level block uses this helper too, so it is not always a sample.
+    :param key: config key being validated (e.g. `compare_defaults.vs_x86`).
+    :param value: raw value read from YAML.
+    :return: the value as a `list[str]`.
+    :raises ValueError: if `value` is not a list of strings, or any entry is not
+        a well-formed two-character aux tag name.
+    """
+    tags = _as_str_list(owner, key, value)
+    malformed = [t for t in tags if not _AUX_TAG_RE.fullmatch(t)]
+    if malformed:
+        raise ValueError(
+            f"{owner} `{key}` has malformed aux tag name(s) "
+            f"{malformed}. A SAM aux tag is exactly two characters matching "
+            f"[A-Za-z][A-Za-z0-9] (e.g. NM, MD, XS). An entry of any other shape "
+            f"can never match a tag on a record, so it would sit in the config "
+            f"doing nothing."
+        )
+    return tags
+
+
 def _as_bool(sample_name: str, key: str, value: Any) -> bool:
     """Validate a YAML flag value is a real ``bool`` before use.
 
@@ -491,7 +534,7 @@ def _validate_compare_options(sample_name: str, options: Any) -> dict[str, Any]:
                 f"(e.g. `{{ignore_tags: [NM]}}`); got {body!r}"
             )
         for list_key in ("ignore_tags", "expect_tags"):
-            _as_str_list(
+            _as_tag_list(
                 f"sample {sample_name!r}",
                 f"compare_options.{key}.{list_key}",
                 body.get(list_key, []),
@@ -533,7 +576,7 @@ def _validate_compare_defaults(raw: Any) -> dict[str, dict[str, list[str]]]:
                 f"(e.g. `{{ignore_tags: [MQ, HN]}}`); got {body!r}"
             )
         out[kind] = {
-            list_key: _as_str_list(
+            list_key: _as_tag_list(
                 "`compare_defaults`", f"{kind}.{list_key}", body.get(list_key, [])
             )
             for list_key in ("ignore_tags", "expect_tags")

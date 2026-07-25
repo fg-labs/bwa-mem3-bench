@@ -159,7 +159,7 @@ observed — not only those that diverged — which is what the checks read.
 Pass `--no-tag-guard` for exploratory comparisons against an unfamiliar BAM pair,
 where the tag set is what you are trying to find out.
 
-**Coverage.** Sixteen (sample, kind) pairs ever reach `compare-bams`:
+**Coverage.** Sixteen samples — 33 (sample, kind) pairs — ever reach `compare-bams`:
 `SWEEP_SAMPLES` (which excludes `truth` samples, so no `sim-*` dataset runs a
 comparison at all), the six `FAST_REAL_BASES` siblings for `vs_default`, and the
 hard-coded `fast_smoke` targets. The allowlist is the measured union over a

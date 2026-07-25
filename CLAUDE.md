@@ -290,8 +290,9 @@ from `arch.baseline_arch` in `config/archs.yaml`:
   friends live next to `COMPARE_KINDS` and are applied by the resolvers.
 - **`sim-*` (truth) samples never run `compare-bams`.** `SWEEP_SAMPLES` filters
   on `not truth and not _is_fast_sample`, and `_accuracy_targets` requests only
-  `eval/*.variants.tsv` — no compare JSON. Exactly 16 (sample, kind) pairs reach
-  a compare rule: SWEEP_SAMPLES × {vs_baseline, vs_golden, +vs_x86 if non-meth},
+  `eval/*.variants.tsv` — no compare JSON. Exactly 16 samples, i.e. 33
+  (sample, kind) pairs, reach a compare rule: don't conflate the two counts.
+  They are SWEEP_SAMPLES × {vs_baseline, vs_golden, +vs_x86 if non-meth},
   the six `FAST_REAL_BASES` siblings for `vs_default`, and the hard-coded
   targets in `rule fast_smoke` (`workflow/Snakefile`; named rather than cited by
   line, which had already rotted once). Don't size tag-policy or

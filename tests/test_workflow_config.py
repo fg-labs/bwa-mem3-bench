@@ -604,6 +604,35 @@ def test_absent_ok_tags_never_exceeds_the_ignore_list() -> None:
     assert cfg.absent_ok_tags("sbx-1M", "vs_golden") == []
 
 
+def test_malformed_tag_names_are_rejected_at_load(tmp_path: Path) -> None:
+    """A typo in `expect_tags` cannot be caught at run time the way one in
+    `ignore_tags` can -- the list means "may appear", so an entry that can never
+    appear is indistinguishable from one that legitimately does not. Reject the
+    shape at load instead, or the guard's own config escapes the rule the guard
+    enforces.
+    """
+    for bad in ("NMX", "N", "1N", ""):
+        _write_minimal_config(
+            tmp_path,
+            compare_options={},
+            compare_defaults={kind: {"expect_tags": ["NM", bad]} for kind in COMPARE_KINDS},
+        )
+        with pytest.raises(ValueError, match="malformed aux tag name"):
+            load_config(tmp_path)
+
+
+def test_well_formed_tag_names_are_accepted(tmp_path: Path) -> None:
+    """Guard against the validator being too strict: digits are legal in the
+    second position (`X1`), and case is not constrained (`pa`)."""
+    _write_minimal_config(
+        tmp_path,
+        compare_options={},
+        compare_defaults={kind: {"expect_tags": ["NM", "X1", "pa"]} for kind in COMPARE_KINDS},
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.expect_tags("probe", "vs_baseline") == ["NM", "X1", "pa"]
+
+
 def test_expect_tags_rejects_unknown_comparison_kind() -> None:
     cfg = load_config(CONFIG_DIR)
     for resolver in (cfg.expect_tags, cfg.absent_ok_tags):
@@ -637,7 +666,6 @@ def test_known_but_unemitted_tags_are_deliberately_not_allowlisted() -> None:
     means, and the guard should force that decision rather than absorb it.
     """
     cfg = load_config(CONFIG_DIR)
-    assert "pa" in KNOWN_UNEMITTED_TAGS
     for kind in COMPARE_KINDS:
         allowed = set(cfg.expect_tags("wgs-5M", kind))
         assert not (allowed & KNOWN_UNEMITTED_TAGS), (
