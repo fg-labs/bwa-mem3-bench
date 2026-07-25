@@ -7,6 +7,9 @@ import pytest
 import yaml
 
 from bwa_mem3_bench.workflow_config import (
+    COMPARE_KINDS,
+    METH_EXTRA_TAGS,
+    METH_UNEMITTED_TAGS,
     Arch,
     Sample,
     ThreadScaling,
@@ -36,8 +39,10 @@ def _write_minimal_config(
     """Stage a loadable config whose single sample carries `compare_options`.
 
     Copies the real `archs.yaml` / `defaults.yaml` so only the sample block
-    under test differs from production. `compare_defaults`, when given, is
-    written as the top-level block so its validation branches are reachable.
+    under test differs from production. `compare_defaults` defaults to a valid
+    block for every kind, because `load_config` validates it BEFORE the samples
+    and would otherwise mask whatever the test is actually probing; passing it
+    explicitly is what makes its own validation branches reachable.
 
     `defaults.yaml`'s `thread_scaling.sample` is repointed at the synthetic
     sample: it names a production sample (`wgs-5M`) that this config does not
@@ -51,16 +56,17 @@ def _write_minimal_config(
     if "thread_scaling" in defaults:
         defaults["thread_scaling"]["sample"] = "probe"
     (config_dir / "defaults.yaml").write_text(yaml.safe_dump(defaults))
+    if compare_defaults is None:
+        compare_defaults = {kind: {"expect_tags": ["NM"]} for kind in COMPARE_KINDS}
     sample = {
         "baseline_tool": "bwa-mem2-upstream",
         "reference": "hg38",
         "source": "data/test/",
         "compare_options": compare_options,
     }
-    doc: dict[str, object] = {"samples": {"probe": sample}}
-    if compare_defaults is not None:
-        doc["compare_defaults"] = compare_defaults
-    (config_dir / "samples.yaml").write_text(yaml.safe_dump(doc))
+    (config_dir / "samples.yaml").write_text(
+        yaml.safe_dump({"compare_defaults": compare_defaults, "samples": {"probe": sample}})
+    )
 
 
 def test_load_config_returns_expected_samples() -> None:
@@ -518,6 +524,101 @@ def test_compare_defaults_must_be_a_mapping(tmp_path: Path) -> None:
     _write_minimal_config(tmp_path, compare_options={}, compare_defaults=["vs_baseline"])
     with pytest.raises(ValueError, match="`compare_defaults` must be a mapping"):
         load_config(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Tag-set guard: expect_tags / absent_ok_tags resolution
+# ---------------------------------------------------------------------------
+
+
+def test_every_comparison_kind_declares_a_non_empty_allowlist() -> None:
+    """compare-bams skips its unexpected-tag check when handed no allowlist, so
+    an empty `expect_tags` would leave the guard silently inert — the exact
+    failure shape (config that does nothing) the guard exists to reject."""
+    cfg = load_config(CONFIG_DIR)
+    for kind in COMPARE_KINDS:
+        assert cfg.expect_tags("wgs-5M", kind), f"{kind} has no expect_tags"
+
+
+def test_missing_expect_tags_is_rejected_at_load(tmp_path: Path) -> None:
+    _write_minimal_config(
+        tmp_path,
+        compare_options={},
+        compare_defaults={kind: {"ignore_tags": ["MQ"]} for kind in COMPARE_KINDS},
+    )
+    with pytest.raises(ValueError, match="non-empty `expect_tags`"):
+        load_config(tmp_path)
+
+
+def test_expect_tags_extend_rather_than_replace_the_kind_default(tmp_path: Path) -> None:
+    """Same extend-not-replace invariant `ignore_tags` relies on: a per-sample
+    addition must not drop the kind's default out from under it."""
+    _write_minimal_config(
+        tmp_path,
+        compare_options={"vs_baseline": {"expect_tags": ["ZZ"]}},
+        compare_defaults={kind: {"expect_tags": ["NM", "MD"]} for kind in COMPARE_KINDS},
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.expect_tags("probe", "vs_baseline") == ["MD", "NM", "ZZ"]
+
+
+def test_meth_samples_get_the_bisulfite_tags_without_declaring_them() -> None:
+    """One fact about bisulfite alignment, derived rather than restated across
+    ~10 meth samples x 3 comparison kinds."""
+    cfg = load_config(CONFIG_DIR)
+    for kind in ("vs_baseline", "vs_golden", "vs_default"):
+        expected = set(cfg.expect_tags("meth-twist-emseq-5M", kind))
+        assert expected >= METH_EXTRA_TAGS, f"{kind} missing bisulfite tags"
+    # ...and non-meth samples do not get them.
+    assert not (METH_EXTRA_TAGS & set(cfg.expect_tags("wgs-5M", "vs_baseline")))
+
+
+def test_single_end_samples_excuse_the_mate_tags_from_the_audit() -> None:
+    """`sbx-1M` is single-end, so MQ cannot exist and `vs_baseline`'s MQ ignore
+    entry would otherwise read as dead config."""
+    cfg = load_config(CONFIG_DIR)
+    assert cfg.samples["sbx-1M"].layout == "single"
+    assert "MQ" in cfg.absent_ok_tags("sbx-1M", "vs_baseline")
+    # Paired-end samples emit MQ, so nothing is excused there.
+    assert cfg.absent_ok_tags("wgs-5M", "vs_baseline") == []
+
+
+def test_meth_samples_excuse_mq_and_hn_from_the_audit() -> None:
+    """fg-labs/bwa-mem3#296: neither side emits MQ or HN under `--meth`, so both
+    `vs_baseline` ignore entries match no record."""
+    cfg = load_config(CONFIG_DIR)
+    assert set(cfg.absent_ok_tags("meth-twist-emseq-5M", "vs_baseline")) == METH_UNEMITTED_TAGS
+
+
+def test_absent_ok_tags_never_exceeds_the_ignore_list() -> None:
+    """Excusing a tag that is not ignored would itself be inert config: only
+    ignore entries are ever audited. `vs_golden` ignores nothing, so nothing can
+    be excused there even though the sample is single-end and meth-adjacent."""
+    cfg = load_config(CONFIG_DIR)
+    for sample in ("sbx-1M", "meth-twist-emseq-5M"):
+        for kind in COMPARE_KINDS:
+            excused = set(cfg.absent_ok_tags(sample, kind))
+            ignored = set(cfg.ignore_tags(sample, kind))
+            assert excused <= ignored, f"{sample}/{kind}: {excused - ignored} not ignored"
+    assert cfg.absent_ok_tags("sbx-1M", "vs_golden") == []
+
+
+def test_expect_tags_rejects_unknown_comparison_kind() -> None:
+    cfg = load_config(CONFIG_DIR)
+    for resolver in (cfg.expect_tags, cfg.absent_ok_tags):
+        with pytest.raises(ValueError, match="unknown comparison kind"):
+            resolver("wgs-5M", "vs_nonsense")
+
+
+def test_shipped_allowlist_covers_every_tag_the_shipped_policy_ignores() -> None:
+    """An ignored tag absent from `expect_tags` is fine for the guard (ignore
+    membership alone anticipates it), but it means the two lists disagree about
+    what this comparison emits. Keep them consistent for the non-derived tags."""
+    cfg = load_config(CONFIG_DIR)
+    for kind in COMPARE_KINDS:
+        ignored = set(cfg.ignore_tags("wgs-5M", kind))
+        expected = set(cfg.expect_tags("wgs-5M", kind))
+        assert ignored <= expected, f"{kind}: {ignored - expected} ignored but not in expect_tags"
 
 
 def test_as_str_list_accepts_list_of_strings() -> None:

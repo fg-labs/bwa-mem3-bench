@@ -267,6 +267,27 @@ from `arch.baseline_arch` in `config/archs.yaml`:
   Blessed-golden SHAs are preserved, so they are the reliable place to find
   historical BAMs — e.g. the `*-fast` arms needed for a `vs_default`
   measurement survived only under the v0.7.0 golden `04777b3`.
+- **`bwa-mem3 --meth` emits no `MQ` and no `HN`** — neither does bwameth, so both
+  are absent from *both* sides of every meth comparison. Methylation output goes
+  through a third SAM/BAM writer (`src/meth_bam.cpp`) separate from the text-SAM
+  and generic-BAM paths, and that writer simply lacks the two `bam_aux_append`
+  calls; `mp->mapq` and `p.HN` are both in scope where they would go. Filed as
+  fg-labs/bwa-mem3#296. Consequence for this repo: `vs_baseline`'s
+  `ignore_tags: [MQ, HN]` is two DEAD entries on every meth sample, and
+  `vs_default`'s list is two dead on meth plus one on single-end `sbx-1M`. They
+  are excused from the guard's dead-entry audit via `METH_UNEMITTED_TAGS` /
+  `MATE_ONLY_TAGS` in `workflow_config.py` — delete the former when #296 lands.
+- **Excuse a known-absent ignore entry from the AUDIT, never by removing it from
+  `ignore_tags`.** The two look interchangeable and are not. Dropping meth's
+  `MQ`/`HN` from the ignore list would make them strict, so the day #296 is fixed
+  bwa-mem3 would start emitting them, bwameth still would not, and meth
+  `vs_baseline` would go to ~100% `query_only` on two tags — a cratered score
+  caused by an upstream *fix*. `--absent-ok-tag` exempts the check only, so the
+  exemption quietly becomes redundant instead of becoming a landmine.
+- **Derive per-sample tag facts from `layout` / `is_meth`, don't restate them in
+  YAML.** There are ~10 meth samples × 3 comparison kinds; declaring the bisulfite
+  tag set on each is ~30 places for the one fact to drift. `METH_EXTRA_TAGS` and
+  friends live next to `COMPARE_KINDS` and are applied by the resolvers.
 - **Spot capacity varies per AZ.** `InsufficientInstanceCapacity` on
   `ec2 run-instances` → iterate subnets/AZs in your VPC rather than
   retrying in the same AZ.

@@ -297,6 +297,7 @@ mod tests {
         CompareOptions {
             ignore_tags: ignore.iter().map(|s| (*s).to_string()).collect(),
             mapq_tolerance: 0,
+            ..CompareOptions::default()
         }
     }
 

@@ -15,19 +15,36 @@
 # by design, so the tags describing that set are skipped (see its block below).
 #
 # Per-sample `compare_options.<kind>.ignore_tags` EXTENDS these defaults.
+#
+# `expect_tags` is the companion allowlist: the tags that MAY appear. Any tag
+# compare-bams observes that is on neither list fails the run BY NAME, so a tag
+# nobody anticipated is not just an unexplained drop in concordance. Semantics
+# are "may", not "must" -- a listed tag that never appears is a harmless no-op,
+# which is what lets one per-kind list cover samples whose tag sets legitimately
+# differ (single-end reads carry no mate tags). Methylation adds XM/XG/XR and
+# YD/YC/RG automatically; see METH_EXTRA_TAGS in workflow_config.py.
+#
+# The value below is the measured union over 46 (kind x sample x arch) census
+# cells covering wgs / wes / panel-twist / smoke / hic / sbx / meth. It must stay
+# non-empty for every kind: compare-bams skips the check when handed no
+# allowlist, and `_validate_compare_defaults` rejects an empty one so the guard
+# can never be silently inert.
 compare_defaults:
   # bwa-mem3 emits MQ on every record and HN on every mapped one; upstream
   # bwa-mem2 emits neither, so comparing either scores 0% concordance.
   vs_baseline:
     ignore_tags: ["MQ", "HN"]
+    expect_tags: ["AS", "HN", "MC", "MD", "MQ", "NM", "SA", "XA", "XS"]
   # bwa-mem3 vs bwa-mem3 at the same search settings: same binary, same
   # candidate set, so every tag is comparable and any difference is a real
   # finding. Measured cost of full strictness: 0.0000pp on vs_x86, <=0.094pp
   # on vs_golden.
   vs_golden:
     ignore_tags: []
+    expect_tags: ["AS", "HN", "MC", "MD", "MQ", "NM", "SA", "XA", "XS"]
   vs_x86:
     ignore_tags: []
+    expect_tags: ["AS", "HN", "MC", "MD", "MQ", "NM", "SA", "XA", "XS"]
   # `--fast` vs default is the ONE same-binary comparison that is not
   # same-behaviour: the preset prunes the candidate set on purpose
   # (`--smem-dedup`, the score-gated chain-extension cap), and `--extend-csub`
@@ -46,6 +63,7 @@ compare_defaults:
   # under 1% divergent.
   vs_default:
     ignore_tags: ["XS", "HN", "XA", "SA", "MQ"]
+    expect_tags: ["AS", "HN", "MC", "MD", "MQ", "NM", "SA", "XA", "XS"]
 
 # Anchor for the vs_baseline exclusions every meth sample shares. Four samples
 # reference it (the real and `--fast` arms of twist-emseq and smoke-meth), and a

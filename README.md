@@ -127,6 +127,38 @@ zero cost — full strictness costs 0.0000 pp on `vs_x86` and at most 0.094 pp o
 A skipped tag is still counted in the report's `by_tag` block with
 `ignored: true`, so a wrong entry is diagnosable rather than silent.
 
+### Guarding the policy
+
+The lists above are load-bearing on the headline number, so `compare-bams` fails
+the run — exit code **3**, distinct from I/O (1) and usage (2) errors — when the
+tags it actually observes are not the ones the config anticipated:
+
+- **Unexpected tag.** A tag on neither `expect_tags` nor `ignore_tags` is named
+  in the error. Such a tag lands in the strict set and diverges on ~100% of
+  reads, so the score already collapses; without the guard it collapses without
+  saying which tag did it.
+- **Dead ignore entry.** An `ignore_tags` entry matching no record on either side
+  suppresses nothing, so no field in the report moves at all. This is the silent
+  half, and it is the shape of the bug the whole tag policy came out of
+  (bench #34): config that reads as though it filters tags while doing nothing.
+
+`expect_tags` means a tag **may** appear, not that it must. A listed tag that
+never shows up is a harmless no-op, which is what lets one per-kind list serve
+samples whose tag sets legitimately differ. Two such differences are derived
+rather than declared (`workflow_config.py`): single-end samples carry no mate
+tags, and methylation samples add `XM`/`XG`/`XR`/`YD`/`YC`/`RG` while emitting no
+`MQ`/`HN` (fg-labs/bwa-mem3#296). The latter two are excused from the dead-entry
+audit via `--absent-ok-tag`, which exempts an entry from the *check* without
+un-ignoring it.
+
+The report is written **before** the non-zero exit and carries the violations in
+a `tag_guard_violations` block, so a failed run is still diagnosable from its own
+JSON. `by_tag` now records `query_present` / `baseline_present` for every tag
+observed — not only those that diverged — which is what the checks read.
+
+Pass `--no-tag-guard` for exploratory comparisons against an unfamiliar BAM pair,
+where the tag set is what you are trying to find out.
+
 ### Measuring the policy (`tag-census`)
 
 `tag-census` answers the prior question — *which tags would it be safe to
