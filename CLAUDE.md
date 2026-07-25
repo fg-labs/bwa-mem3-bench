@@ -321,6 +321,30 @@ from `arch.baseline_arch` in `config/archs.yaml`:
   `unknown` rather than failing the job — which is why this went unnoticed
   so long, so verify a real worker's `meta.json` after touching it.
 
+- **bwa-mem3's FASTQ reader does not scale — but it is overlapped, so it does
+  NOT inflate `PROCESS()`.** `src/fast_reader.c` is a single-threaded
+  decompress+parse loop, and it measures dead flat: **7.27 / 7.12 / 7.25 s at
+  t=16 / 32 / 64** (c8g.16xlarge, wgs-5M, bare metal, index pinned in
+  /dev/shm, 2 reps, spread <0.1 %). Only 0.12 s of that is disk wait with a
+  warm page cache — it is CPU work, not IO. The tempting conclusion, that a
+  flat 7 s inside a 25 s `PROCESS()` at t=64 makes the efficiency number
+  meaningless, is **wrong**: bwa-mem3 runs a 3-step read/process/write
+  pipeline with 3 workers, so reading overlaps compute and is not additive.
+  The compute step scales 92.65 -> 46.51 -> 24.21 s, and only ~1.6 s of
+  read+write is left unhidden as fill/drain at t=64 — reading is ~6 % of
+  `PROCESS()`, not ~50 %. Core utilization inside the compute step is
+  98.8 / 98.1 / 95.6 %, and kernel time scales 48.30 -> 12.67 s (95.3 %),
+  independently corroborating that the efficiency dip at 64 threads is real
+  compute-side loss rather than an IO artifact. Two caveats that ARE real:
+  (a) `PROCESS()`-based efficiency understates pure kernel scaling by ~5 pp at
+  t=64 (90.5 % vs 95.3 % over 16->64) because of that flat fill/drain, so call
+  it pipeline efficiency, never kernel efficiency; (b) the flat read stage
+  becomes binding once the compute step falls below it, extrapolating to
+  **t ~ 256** — re-measure the phase breakdown before extending the ladder
+  past ~128 threads. Note also that the 256 M-base chunk cap engages at
+  t >= 26, so t=32 and t=64 use identical chunking (identical output bytes)
+  while t=16 differs — expected, per the cap's comment in `fastmap.cpp`.
+
 ## Known issues
 
 - fg-labs bwa-mem3 @ `690914f`: `mem_reg2aln` assertion on `avx512bw` variant

@@ -150,9 +150,40 @@ def _scaling_efficiency(db_path: Path, sha: str) -> pd.DataFrame:
 
     ``E(n) = T(1) / (n * T(n))`` using the aligner's own PROCESS() time, falling
     back to wall when PROCESS() could not be parsed. PROCESS() is preferred
-    because it excludes the fixed per-run overhead (thread setup, output
-    writing) that otherwise dominates the shortest, highest-thread rungs and
-    would make the gate fire on I/O noise rather than on parallel efficiency.
+    because it excludes the per-run overhead outside ``process()``, which grows
+    with thread count (measured 1.70 s at t=16 to 3.80 s at t=64) and would
+    otherwise dominate the shortest, highest-thread rungs. That overhead's
+    mechanism has not been isolated; only its size is known.
+
+    What PROCESS() *does* include is the serial FASTQ reader and BAM writer —
+    which is why the efficiency it yields is a whole-pipeline number, not a
+    kernel-parallelism number. Measured on c8g.16xlarge / wgs-5M (bare metal,
+    index pinned in /dev/shm, 2 reps, spread <0.1 %):
+
+        threads   read stage   compute step   write stage   PROCESS
+           16        7.27 s        92.65 s        2.59 s      93.52 s
+           32        7.12 s        46.51 s        2.65 s      48.10 s
+           64        7.25 s        24.21 s        2.78 s      25.82 s
+
+    The read stage is FLAT — it is a single-threaded decompress+parse (see
+    ``src/fast_reader.c``; disk wait is only 0.12 s of it with warm cache), so
+    it does not scale and never will. But bwa-mem3's 3-step pipeline overlaps
+    it with compute, so it is not additive: at t=64 only ~1.6 s of read+write
+    is left unhidden as pipeline fill/drain. Reading is therefore ~6 % of
+    PROCESS() at t=64, NOT the ~50 % a naive "read IO lives inside PROCESS()"
+    reading would suggest.
+
+    Consequence for this gate: efficiency from PROCESS() understates pure
+    kernel scaling by ~5 pp at 64 threads (95.3 % kernel vs 90.5 % PROCESS over
+    the 16->64 span). That gap is a property of the aligner's pipeline, not of
+    any one release, so a release-over-release comparison still compares like
+    with like and the gate remains valid. Do not, however, describe the number
+    it produces as kernel efficiency.
+
+    Ceiling: the flat read stage becomes the binding constraint once the
+    compute step drops below it, which on this host extrapolates to t ~ 256.
+    Re-validate the phase breakdown before extending the ladder past ~128
+    threads, or the gate starts measuring the reader instead of the aligner.
 
     Returns an empty frame when the run has no ladder, so callers can no-op.
     """
