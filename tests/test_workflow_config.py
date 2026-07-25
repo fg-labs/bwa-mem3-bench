@@ -8,8 +8,8 @@ import yaml
 
 from bwa_mem3_bench.workflow_config import (
     COMPARE_KINDS,
-    KNOWN_UNEMITTED_TAGS,
     METH_EXTRA_TAGS,
+    METH_IGNORE_TAGS,
     METH_UNEMITTED_TAGS,
     Arch,
     Sample,
@@ -379,14 +379,12 @@ def test_meth_fast_sibling_keeps_compare_ignore_tags() -> None:
     assert fast == base
 
 
-def test_meth_samples_share_one_anchored_ignore_list() -> None:
-    """All four meth arms resolve to the same vs_baseline list, and the YAML
-    anchor holding it is not mistaken for a sample.
+def test_every_meth_arm_resolves_the_same_ignore_list() -> None:
+    """All four meth arms resolve to one identical vs_baseline list.
 
-    The list is shared via a `meth_vs_baseline` anchor declared beside
-    `compare_defaults`. Two things must hold: every meth arm resolves to the
-    same tags (so the smoke/fast arms cannot drift from the real ones), and the
-    top-level anchor key is inert rather than being loaded as a sample.
+    The list is derived from `METH_IGNORE_TAGS` off `is_meth` rather than
+    declared per sample, so the smoke and `--fast` arms cannot drift from the
+    real ones by someone editing one YAML block and missing the others.
     """
     cfg = load_config(CONFIG_DIR)
     meth_samples = [
@@ -397,7 +395,7 @@ def test_meth_samples_share_one_anchored_ignore_list() -> None:
     ]
     resolved = {s: cfg.ignore_tags(s, "vs_baseline") for s in meth_samples}
     assert len(set(map(tuple, resolved.values()))) == 1, resolved
-    assert "meth_vs_baseline" not in cfg.samples
+    assert set(resolved["smoke-meth"]) >= METH_IGNORE_TAGS
 
 
 def test_ignore_tags_extend_rather_than_replace_the_kind_default() -> None:
@@ -445,12 +443,6 @@ def test_vs_default_skips_the_candidate_set_tags() -> None:
         assert kept not in skipped, f"{kept} describes the chosen alignment; keep it strict"
 
 
-def test_ignore_tags_rejects_unknown_comparison_kind() -> None:
-    cfg = load_config(CONFIG_DIR)
-    with pytest.raises(ValueError, match="unknown comparison kind"):
-        cfg.ignore_tags("wgs-5M", "vs_nonsense")
-
-
 def test_retired_flat_ignore_tags_is_rejected(tmp_path: Path) -> None:
     """A config from before the policy was per-kind must fail, not be ignored.
 
@@ -481,6 +473,37 @@ def test_non_mapping_compare_options_is_rejected_clearly(tmp_path: Path, options
     """
     _write_minimal_config(tmp_path, compare_options=options)
     with pytest.raises(ValueError, match="compare_options"):
+        load_config(tmp_path)
+
+
+def test_unknown_key_in_a_per_sample_kind_body_is_rejected(tmp_path: Path) -> None:
+    """A typo'd key inside a kind body reads nothing and does nothing.
+
+    `expect_tag` (singular) would load clean and allowlist exactly zero tags --
+    the silently-inert config this guard exists to reject, arriving through the
+    one door that was not checking.
+    """
+    _write_minimal_config(tmp_path, compare_options={"vs_baseline": {"expect_tag": ["XM"]}})
+    with pytest.raises(ValueError, match="unknown key"):
+        load_config(tmp_path)
+
+
+def test_unknown_key_in_a_compare_defaults_kind_body_is_rejected(tmp_path: Path) -> None:
+    """Same rule for the top-level block. A typo'd `ignore_tag` there is not
+    caught by the non-empty `expect_tags` requirement, so it needs its own check.
+    """
+    _write_minimal_config(
+        tmp_path,
+        compare_options={},
+        compare_defaults={
+            kind: {
+                "expect_tags": ["NM"],
+                **({"ignore_tag": ["MQ"]} if kind == "vs_baseline" else {}),
+            }
+            for kind in COMPARE_KINDS
+        },
+    )
+    with pytest.raises(ValueError, match="unknown key"):
         load_config(tmp_path)
 
 
@@ -532,15 +555,6 @@ def test_compare_defaults_must_be_a_mapping(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_every_comparison_kind_declares_a_non_empty_allowlist() -> None:
-    """compare-bams skips its unexpected-tag check when handed no allowlist, so
-    an empty `expect_tags` would leave the guard silently inert — the exact
-    failure shape (config that does nothing) the guard exists to reject."""
-    cfg = load_config(CONFIG_DIR)
-    for kind in COMPARE_KINDS:
-        assert cfg.expect_tags("wgs-5M", kind), f"{kind} has no expect_tags"
-
-
 def test_missing_expect_tags_is_rejected_at_load(tmp_path: Path) -> None:
     _write_minimal_config(
         tmp_path,
@@ -563,15 +577,43 @@ def test_expect_tags_extend_rather_than_replace_the_kind_default(tmp_path: Path)
     assert cfg.expect_tags("probe", "vs_baseline") == ["MD", "NM", "ZZ"]
 
 
-def test_meth_samples_get_the_bisulfite_tags_without_declaring_them() -> None:
-    """One fact about bisulfite alignment, derived rather than restated across
-    ~10 meth samples x 3 comparison kinds."""
+def test_every_meth_sample_excludes_the_bisulfite_tags_from_vs_baseline() -> None:
+    """The ignore half of the bisulfite fact must be derived in lockstep with the
+    allowlist half, on EVERY meth sample -- not just the ones somebody annotated.
+
+    When only `expect_tags` was derived, 8 of 12 meth samples carried nothing but
+    the MQ/HN default. Promoting one into `SWEEP_SAMPLES` would have sent
+    NM/MD/XA/SA strict against bwameth (each >99.5% divergent, so a ~100% crater)
+    while the guard stayed silent, because METH_EXTRA_TAGS had already
+    allowlisted every tag involved. That is the bench #34 shape exactly.
+    """
+    # The real config carries the two twist/smoke meth samples, their `-fast`
+    # siblings, and the sim-meth family; guard against the loop silently
+    # iterating over nothing if that set is ever pared back.
+    min_meth_samples = 10
     cfg = load_config(CONFIG_DIR)
-    for kind in ("vs_baseline", "vs_golden", "vs_default"):
-        expected = set(cfg.expect_tags("meth-twist-emseq-5M", kind))
-        assert expected >= METH_EXTRA_TAGS, f"{kind} missing bisulfite tags"
-    # ...and non-meth samples do not get them.
-    assert not (METH_EXTRA_TAGS & set(cfg.expect_tags("wgs-5M", "vs_baseline")))
+    meth = [n for n, s in cfg.samples.items() if s.is_meth]
+    assert len(meth) >= min_meth_samples, "expected the full sim-meth family in the config"
+    for name in meth:
+        assert set(cfg.ignore_tags(name, "vs_baseline")) >= METH_IGNORE_TAGS, name
+        # Only the cross-tool kind: the other three are meth-vs-meth, where every
+        # tag is comparable and excluding these would blind a real regression.
+        for kind in ("vs_golden", "vs_x86"):
+            assert not (METH_IGNORE_TAGS & set(cfg.ignore_tags(name, kind))), f"{name}/{kind}"
+    # Non-meth samples are untouched by the derivation.
+    assert set(cfg.ignore_tags("wgs-5M", "vs_baseline")) == {"MQ", "HN"}
+
+
+def test_the_two_halves_of_the_bisulfite_fact_stay_consistent() -> None:
+    """Every tag excluded from the meth score must also be anticipated by the
+    allowlist, or the dead-entry audit would have nothing to check it against."""
+    cfg = load_config(CONFIG_DIR)
+    for name, sample in cfg.samples.items():
+        if not sample.is_meth:
+            continue
+        ignored = set(cfg.ignore_tags(name, "vs_baseline"))
+        expected = set(cfg.expect_tags(name, "vs_baseline"))
+        assert ignored <= expected, f"{name}: {ignored - expected} ignored but not expected"
 
 
 def test_single_end_samples_excuse_the_mate_tags_from_the_audit() -> None:
@@ -633,44 +675,60 @@ def test_well_formed_tag_names_are_accepted(tmp_path: Path) -> None:
     assert cfg.expect_tags("probe", "vs_baseline") == ["NM", "X1", "pa"]
 
 
-def test_expect_tags_rejects_unknown_comparison_kind() -> None:
+def test_every_resolver_rejects_an_unknown_comparison_kind() -> None:
+    """All three delegate to the same `_resolve_tags` guard clause."""
     cfg = load_config(CONFIG_DIR)
-    for resolver in (cfg.expect_tags, cfg.absent_ok_tags):
+    for resolver in (cfg.ignore_tags, cfg.expect_tags, cfg.absent_ok_tags):
         with pytest.raises(ValueError, match="unknown comparison kind"):
             resolver("wgs-5M", "vs_nonsense")
 
 
-def test_the_allowlist_resolves_for_every_sample_and_kind() -> None:
+def test_the_whole_policy_resolves_for_every_sample_and_kind() -> None:
     """Truth (`sim-*`) samples are excluded from the concordance sweep today, so
-    they never reach compare-bams. They must still resolve to a usable policy:
-    the derived rules key off `layout` / `is_meth`, which those samples already
-    set, so adding one to the sweep later cannot silently produce an unguarded
-    comparison.
+    they never reach compare-bams. They must still resolve to a usable policy on
+    BOTH halves: the derived rules key off `layout` / `is_meth`, which those
+    samples already set, so adding one to the sweep later cannot silently
+    produce an unguarded comparison.
+
+    Both halves is the load-bearing word. An earlier version of this test
+    asserted only the allowlist, which made its own docstring false -- the ignore
+    half was still per-sample YAML that 8 of 12 meth samples did not carry.
     """
     cfg = load_config(CONFIG_DIR)
     for name, sample in cfg.samples.items():
         for kind in COMPARE_KINDS:
             assert cfg.expect_tags(name, kind), f"{name}/{kind} has no allowlist"
-            # Meth samples -- including every sim-meth-* -- pick the bisulfite
-            # tags up from `is_meth` with no per-sample YAML.
+            # Meth samples -- including every sim-meth-* -- pick both halves of
+            # the bisulfite fact up from `is_meth` with no per-sample YAML.
             if sample.is_meth:
                 assert set(cfg.expect_tags(name, kind)) >= METH_EXTRA_TAGS, f"{name}/{kind}"
+                if kind == "vs_baseline":
+                    assert set(cfg.ignore_tags(name, kind)) >= METH_IGNORE_TAGS, f"{name}/{kind}"
 
 
 def test_known_but_unemitted_tags_are_deliberately_not_allowlisted() -> None:
-    """`pa` (ALT-contig scoring) and non-meth `RG` are emittable by bwa-mem3's
-    source but produced by nothing this benchmark runs -- 0 of 46 census cells.
+    """`pa` and non-meth `RG` are emittable by bwa-mem3's source but produced by
+    nothing this benchmark runs -- 0 of 46 census cells.
+
+    Statically, the three writers can emit
+    `AS HN MC MD MQ NM pa RG SA XA XG XM XR XS`; these two are the difference
+    between that set and what we allowlist. `pa` needs `p.alt_sc > 0`, i.e. a
+    `.alt` file our hg38 does not ship; `RG` needs `-R`, which nothing passes on
+    the bwa-mem3 side (bwameth sets it on its own output, which is why RG is in
+    METH_EXTRA_TAGS but not in the non-meth allowlist).
 
     Leaving them out is the point: either appearing signals a configuration
-    change (a `.alt` file added, or `-R` passed) that alters what concordance
-    means, and the guard should force that decision rather than absorb it.
+    change that alters what concordance MEANS -- ALT-aware mapping, or read
+    groups -- and the guard should force that decision rather than absorb it.
+    The set lives here rather than in the production module because nothing in
+    production reads it; it is a pinned decision, and this is what pins it.
     """
+    known_unemitted = frozenset({"pa", "RG"})
     cfg = load_config(CONFIG_DIR)
     for kind in COMPARE_KINDS:
         allowed = set(cfg.expect_tags("wgs-5M", kind))
-        assert not (allowed & KNOWN_UNEMITTED_TAGS), (
-            f"{kind} allowlists a tag we deliberately want to fail on: "
-            f"{allowed & KNOWN_UNEMITTED_TAGS}"
+        assert not (allowed & known_unemitted), (
+            f"{kind} allowlists a tag we deliberately want to fail on: {allowed & known_unemitted}"
         )
     # RG is the one exception, and only on the meth side, where bwameth emits it.
     assert "RG" in cfg.expect_tags("meth-twist-emseq-5M", "vs_baseline")

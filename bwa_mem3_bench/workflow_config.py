@@ -24,6 +24,10 @@ _AUX_TAG_RE = re.compile(r"[A-Za-z][A-Za-z0-9]")
 #     set are skipped while the tags describing the chosen alignment stay strict.
 COMPARE_KINDS = frozenset({"vs_baseline", "vs_golden", "vs_x86", "vs_default"})
 
+# The per-kind tag lists a `compare_options` / `compare_defaults` body may carry.
+# Enumerated once so adding a third list is one edit, not three.
+_TAG_LIST_KEYS = ("ignore_tags", "expect_tags")
+
 # Mate tags. A single-end read has no mate, so these cannot exist on one -- a
 # logical impossibility, not an aligner choice. Measured: `sbx-1M` carries
 # neither on either side of any comparison.
@@ -47,21 +51,23 @@ METH_UNEMITTED_TAGS = frozenset({"MQ", "HN"})
 # to catch.
 METH_EXTRA_TAGS = frozenset({"XM", "XG", "XR", "YD", "YC", "RG"})
 
-# Tags bwa-mem3's source can emit that this benchmark has never observed, and
-# that are deliberately NOT allowlisted -- their appearance should fail the run.
+# Tags not comparable between `bwa-mem3 --meth` and bwameth, excluded from the
+# score on the `vs_baseline` kind only (the other three are meth-vs-meth, where
+# every tag is comparable).
 #
-#   pa  emitted when `p.alt_sc > 0`, i.e. ALT-contig scoring. Our hg38 has ALT
-#       contigs but no `.alt` file, so alt_sc is never set (0 of 46 census
-#       cells). If a `.alt` file were added, ALT-aware mapping would change what
-#       concordance MEANS, so a loud failure is the correct outcome, not a
-#       silently absorbed new tag.
-#   RG  emitted when `-R` is passed. Nothing passes it on the bwa-mem3 side;
-#       bwameth sets it on its own output, which is why RG is in
-#       METH_EXTRA_TAGS but not in the non-meth allowlist.
+# NM/MD are edit distances against a C->T/G->A converted reference; XA
+# (`rname,pos,CIGAR,NM`) and SA (`rname,pos,strand,CIGAR,mapQ,NM`) embed that
+# edit distance AND doubled-reference contig names (`fchr1`). XM/XG/XR and
+# YD/YC/RG are the two tools' disjoint bisulfite tag sets. Measured: each
+# diverges on >99.5% of reads, and excluding them leaves +0.14pp of added drift.
 #
-# Listed here so the omission is a recorded decision rather than an oversight;
-# `test_known_but_unemitted_tags_are_deliberately_not_allowlisted` pins it.
-KNOWN_UNEMITTED_TAGS = frozenset({"pa", "RG"})
+# Derived rather than declared for the same reason as METH_EXTRA_TAGS, and the
+# two must stay derived TOGETHER. When only the allowlist half was derived, the
+# ignore half sat copy-pasted on 3 of 12 meth samples and absent from the other
+# 9 -- so promoting a `sim-meth-*` sample into SWEEP_SAMPLES would have sent
+# NM/MD/XA/SA strict against bwameth (a ~100% crater) while the guard stayed
+# silent, because METH_EXTRA_TAGS had already allowlisted every tag involved.
+METH_IGNORE_TAGS = frozenset({"NM", "MD", "XA", "SA", "XM", "XG", "XR", "YD", "YC", "RG"})
 
 
 @dataclass(frozen=True)
@@ -288,11 +294,20 @@ class WorkflowConfig:
     def ignore_tags(self, sample_name: str, kind: str) -> list[str]:
         """Aux tags `compare-bams` must skip for one (sample, comparison kind).
 
+        Methylation samples get `METH_IGNORE_TAGS` added automatically on
+        `vs_baseline` -- the cross-tool kind, and the only one where the two
+        sides are different aligners. See that constant for why it is derived
+        rather than declared, and why it must stay derived in lockstep with
+        `METH_EXTRA_TAGS` in `expect_tags`.
+
         :param sample_name: sample being compared.
         :param kind: comparison kind, one of `COMPARE_KINDS`.
         :return: sorted, de-duplicated tag names.
         """
-        return sorted(self._resolve_tags(sample_name, kind, "ignore_tags"))
+        tags = self._resolve_tags(sample_name, kind, "ignore_tags")
+        if kind == "vs_baseline" and self.samples[sample_name].is_meth:
+            tags |= METH_IGNORE_TAGS
+        return sorted(tags)
 
     def expect_tags(self, sample_name: str, kind: str) -> list[str]:
         """Aux tags that MAY appear for one (sample, comparison kind).
@@ -324,9 +339,10 @@ class WorkflowConfig:
         definition) and MQ/HN on methylation samples (absent by defect --
         fg-labs/bwa-mem3#296).
 
-        The result is intersected with the resolved `ignore_tags` because only
-        ignore entries are ever audited; naming a tag that is not ignored would
-        be inert config, which is the very thing this guard exists to reject.
+        The result is intersected with `ignore_tags()` -- the DERIVED list, not
+        the raw config -- because only ignore entries are ever audited; naming a
+        tag that is not ignored would be inert config, which is the very thing
+        this guard exists to reject (`TagGuardViolation::RedundantAbsentOk`).
 
         :param sample_name: sample being compared.
         :param kind: comparison kind, one of `COMPARE_KINDS`.
@@ -338,7 +354,7 @@ class WorkflowConfig:
             absent |= MATE_ONLY_TAGS
         if sample.is_meth:
             absent |= METH_UNEMITTED_TAGS
-        return sorted(absent & self._resolve_tags(sample_name, kind, "ignore_tags"))
+        return sorted(absent.intersection(self.ignore_tags(sample_name, kind)))
 
 
 def _as_str_list(owner: str, key: str, value: Any) -> list[str]:
@@ -485,6 +501,27 @@ def parse_ladder_override(spec: str) -> list[ThreadScalingStep]:
     return sorted(steps, key=lambda step: step.threads)
 
 
+def _reject_unknown_keys(owner: str, where: str, body: dict[str, Any]) -> None:
+    """Reject keys nothing reads inside a comparison-kind body.
+
+    Only `_TAG_LIST_KEYS` are consulted, so a near-miss like `expect_tag`
+    (singular) would load clean and configure nothing -- inert config, which is
+    the exact failure mode the tag guard exists to reject. Catch it at load.
+
+    :param owner: what the body belongs to, for the error message.
+    :param where: the config path being validated (e.g. `compare_options.vs_x86`).
+    :param body: the kind body read from YAML.
+    :raises ValueError: if `body` carries any key outside `_TAG_LIST_KEYS`.
+    """
+    unknown = sorted(set(body) - set(_TAG_LIST_KEYS))
+    if unknown:
+        raise ValueError(
+            f"{owner} `{where}` has unknown key(s) {unknown}; expected one of "
+            f"{sorted(_TAG_LIST_KEYS)}. A key nothing reads would sit in the "
+            f"config doing nothing."
+        )
+
+
 def _validate_compare_options(sample_name: str, options: Any) -> dict[str, Any]:
     """Validate a sample's `compare_options` is keyed by comparison kind.
 
@@ -533,7 +570,8 @@ def _validate_compare_options(sample_name: str, options: Any) -> dict[str, Any]:
                 f"sample {sample_name!r} `compare_options.{key}` must be a mapping "
                 f"(e.g. `{{ignore_tags: [NM]}}`); got {body!r}"
             )
-        for list_key in ("ignore_tags", "expect_tags"):
+        _reject_unknown_keys(f"sample {sample_name!r}", f"compare_options.{key}", body)
+        for list_key in _TAG_LIST_KEYS:
             _as_tag_list(
                 f"sample {sample_name!r}",
                 f"compare_options.{key}.{list_key}",
@@ -562,7 +600,7 @@ def _validate_compare_defaults(raw: Any) -> dict[str, dict[str, list[str]]]:
     if not isinstance(raw, dict):
         raise ValueError(f"`compare_defaults` must be a mapping; got {raw!r}")
     out: dict[str, dict[str, list[str]]] = {
-        kind: {"ignore_tags": [], "expect_tags": []} for kind in COMPARE_KINDS
+        kind: {k: [] for k in _TAG_LIST_KEYS} for kind in COMPARE_KINDS
     }
     for kind, body in raw.items():
         if kind not in COMPARE_KINDS:
@@ -575,11 +613,12 @@ def _validate_compare_defaults(raw: Any) -> dict[str, dict[str, list[str]]]:
                 f"`compare_defaults.{kind}` must be a mapping "
                 f"(e.g. `{{ignore_tags: [MQ, HN]}}`); got {body!r}"
             )
+        _reject_unknown_keys("`compare_defaults`", kind, body)
         out[kind] = {
             list_key: _as_tag_list(
                 "`compare_defaults`", f"{kind}.{list_key}", body.get(list_key, [])
             )
-            for list_key in ("ignore_tags", "expect_tags")
+            for list_key in _TAG_LIST_KEYS
         }
 
     missing = sorted(kind for kind, body in out.items() if not body["expect_tags"])

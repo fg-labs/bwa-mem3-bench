@@ -43,11 +43,14 @@ pub struct CompareOptions {
     /// carry no mate tags, bisulfite alignment carries six extra ones — without
     /// needing a per-sample subtraction operation.
     ///
-    /// An empty set means the allowlist is unconfigured, and the unexpected-tag
-    /// check is skipped: there is no way to distinguish "no allowlist" from
-    /// "the allowlist is empty", and failing every tag would be useless. The
-    /// workflow closes that hole in config validation instead, by requiring
-    /// every comparison kind to declare a non-empty set.
+    /// An empty set skips the unexpected-tag check: there is no way to
+    /// distinguish "no allowlist" from "the allowlist is empty", and failing
+    /// every tag would be useless. Reaching that state is not possible through
+    /// the CLI — `--expect-tag` is `required_unless_present = "no_tag_guard"`,
+    /// so a caller must either declare the allowlist or ask for the guard off.
+    /// `_validate_compare_defaults` enforces the same thing a layer up, which
+    /// turns a misconfigured `samples.yaml` into an early error rather than a
+    /// worker that dies on a usage message.
     pub expect_tags: BTreeSet<String>,
 
     /// `ignore_tags` entries exempt from the dead-entry check, because they are

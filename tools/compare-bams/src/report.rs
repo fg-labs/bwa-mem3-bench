@@ -2,11 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use noodles_sam::alignment::record::data::field::Tag;
 use noodles_sam::alignment::record_buf::RecordBuf;
 use serde::{Deserialize, Serialize};
 
-use crate::classify::{Classification, Discordance};
+use crate::classify::{tag_str, Classification, Discordance};
 use crate::guard::TagGuardViolation;
 
 /// Per-class count and percentage bucket in a [`ConcordanceReport`].
@@ -50,6 +49,19 @@ pub struct TagCounter {
     /// and it counted".
     #[serde(default)]
     pub ignored: bool,
+}
+
+impl TagCounter {
+    /// Whether this tag appeared on at least one record of either side.
+    ///
+    /// The meaning of the two presence counters, and the predicate both of
+    /// [`crate::guard`]'s checks turn on — an entry can exist with all-zero
+    /// counts (see [`ConcordanceReport::mark_ignored`]), so "has an entry" and
+    /// "was observed" are different questions.
+    #[must_use]
+    pub fn observed(&self) -> bool {
+        self.query_present > 0 || self.baseline_present > 0
+    }
 }
 
 /// Aggregated result of comparing two BAMs, suitable for JSON serialization.
@@ -100,9 +112,14 @@ pub struct ConcordanceReport {
     /// on a healthy run, and omitted from the JSON when empty so the schema is
     /// unchanged for every passing comparison.
     ///
-    /// The verdict lives in the report, rather than only on stderr, because the
-    /// run that trips the guard exits non-zero *after* writing this file — the
-    /// report has to be able to explain its own failure.
+    /// The verdict lives in the report as well as on stderr, because the run
+    /// that trips the guard exits non-zero *after* writing this file. Note the
+    /// limit of that: under the workflow this JSON is the compare rule's
+    /// `output:`, and snakemake deletes the outputs of a failed job, so the
+    /// file survives only for a direct/manual invocation. In the Batch pipeline
+    /// the verdict reaches an operator through the worker's `CloudWatch` stderr,
+    /// which is why [`crate::guard::TagGuardViolation::message`] is written to
+    /// stand alone rather than to annotate this block.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tag_guard_violations: Vec<TagGuardViolation>,
 }
@@ -164,9 +181,15 @@ impl ConcordanceReport {
                 // read, where the diff path runs only on the ones that differ.
                 // BTreeMap<String, _> looks up by &str, so the only allocation
                 // is on first sight of a tag.
-                let Ok(name) = std::str::from_utf8(Tag::as_ref(&tag)) else {
-                    continue;
-                };
+                //
+                // Measured on panel-twist-5M (7.9M primaries, ~9 tags/side, so
+                // ~140M lookups) against the same binary with this call stubbed
+                // out, interleaved A/B over a warm page cache: 72.3s without vs
+                // 75.8s with, i.e. under 5% — and the two distributions overlap
+                // (75.8s worst without, 68.6s best with), so the effect is not
+                // separable from run-to-run noise at n=4. Not worth a
+                // hand-rolled tag-interning structure.
+                let Some(name) = tag_str(&tag) else { continue };
                 let entry = match self.by_tag.get_mut(name) {
                     Some(entry) => entry,
                     None => self.by_tag.entry(name.to_string()).or_default(),
@@ -283,6 +306,7 @@ mod tests {
 
     /// A record carrying `tags`, for exercising the presence path.
     fn with_tags(tags: &[(&str, i32)]) -> RecordBuf {
+        use noodles_sam::alignment::record::data::field::Tag;
         use noodles_sam::alignment::record_buf::data::field::Value;
         use noodles_sam::alignment::record_buf::Data;
         let data: Data = tags

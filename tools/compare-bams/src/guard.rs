@@ -27,7 +27,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::config::CompareOptions;
-use crate::report::ConcordanceReport;
+use crate::report::{ConcordanceReport, TagCounter};
 
 /// One way the observed tag set deviated from what the config declared.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,8 +103,10 @@ pub fn check(report: &ConcordanceReport, opts: &CompareOptions) -> Vec<TagGuardV
 
     if !opts.expect_tags.is_empty() {
         for (tag, counter) in &report.by_tag {
-            let observed = counter.query_present > 0 || counter.baseline_present > 0;
-            if observed && !opts.expect_tags.contains(tag) && !opts.ignore_tags.contains(tag) {
+            if counter.observed()
+                && !opts.expect_tags.contains(tag)
+                && !opts.ignore_tags.contains(tag)
+            {
                 violations.push(TagGuardViolation::UnexpectedTag {
                     tag: tag.clone(),
                     query_present: counter.query_present,
@@ -127,11 +129,7 @@ pub fn check(report: &ConcordanceReport, opts: &CompareOptions) -> Vec<TagGuardV
         if opts.absent_ok_tags.contains(tag) {
             continue;
         }
-        let observed = report
-            .by_tag
-            .get(tag)
-            .is_some_and(|c| c.query_present > 0 || c.baseline_present > 0);
-        if !observed {
+        if !report.by_tag.get(tag).is_some_and(TagCounter::observed) {
             violations.push(TagGuardViolation::DeadIgnoreEntry {
                 tag: tag.clone(),
                 total_reads: report.total_reads,

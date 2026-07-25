@@ -156,8 +156,11 @@ a `tag_guard_violations` block, so a failed run is still diagnosable from its ow
 JSON. `by_tag` now records `query_present` / `baseline_present` for every tag
 observed — not only those that diverged — which is what the checks read.
 
-Pass `--no-tag-guard` for exploratory comparisons against an unfamiliar BAM pair,
-where the tag set is what you are trying to find out.
+`--expect-tag` is required unless `--no-tag-guard` is given. An empty allowlist
+is indistinguishable from an unconfigured one, so rather than skip the check
+silently the CLI makes the choice explicit — pass `--no-tag-guard` for
+exploratory comparisons against an unfamiliar BAM pair, where the tag set is
+what you are trying to find out.
 
 **Coverage.** Sixteen samples — 33 (sample, kind) pairs — ever reach `compare-bams`:
 `SWEEP_SAMPLES` (which excludes `truth` samples, so no `sim-*` dataset runs a

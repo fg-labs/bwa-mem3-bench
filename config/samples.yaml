@@ -14,37 +14,43 @@
 # vs_default is the exception: same binary, but `--fast` prunes the candidate set
 # by design, so the tags describing that set are skipped (see its block below).
 #
-# Per-sample `compare_options.<kind>.ignore_tags` EXTENDS these defaults.
+# Per-sample `compare_options.<kind>.ignore_tags` EXTENDS these defaults. The
+# bisulfite lists are NOT declared per sample -- both halves are derived from
+# `is_meth` (METH_IGNORE_TAGS / METH_EXTRA_TAGS in workflow_config.py), so they
+# cannot drift apart or go missing on a sample nobody remembered to annotate.
 #
 # `expect_tags` is the companion allowlist: the tags that MAY appear. Any tag
 # compare-bams observes that is on neither list fails the run BY NAME, so a tag
 # nobody anticipated is not just an unexplained drop in concordance. Semantics
 # are "may", not "must" -- a listed tag that never appears is a harmless no-op,
 # which is what lets one per-kind list cover samples whose tag sets legitimately
-# differ (single-end reads carry no mate tags). Methylation adds XM/XG/XR and
-# YD/YC/RG automatically; see METH_EXTRA_TAGS in workflow_config.py.
+# differ (single-end reads carry no mate tags).
 #
-# The value below is the measured union over 46 (kind x sample x arch) census
-# cells covering wgs / wes / panel-twist / smoke / hic / sbx / meth. It must stay
-# non-empty for every kind: compare-bams skips the check when handed no
-# allowlist, and `_validate_compare_defaults` rejects an empty one so the guard
-# can never be silently inert.
+# The anchored value below is the measured union over 46 (kind x sample x arch)
+# census cells covering wgs / wes / panel-twist / smoke / hic / sbx / meth. All
+# four kinds share it because the emitted vocabulary is a property of the
+# ALIGNER PAIR, not of the comparison: three of the four kinds are
+# bwa-mem3-vs-bwa-mem3 by construction, so their vocabulary is identical by
+# definition rather than by coincidence. The anchor makes that structural while
+# keeping each kind's declaration literally non-empty --
+# `_validate_compare_defaults` rejects an empty one, because compare-bams skips
+# the check when handed no allowlist and the guard would go silently inert.
 compare_defaults:
   # bwa-mem3 emits MQ on every record and HN on every mapped one; upstream
   # bwa-mem2 emits neither, so comparing either scores 0% concordance.
   vs_baseline:
     ignore_tags: ["MQ", "HN"]
-    expect_tags: ["AS", "HN", "MC", "MD", "MQ", "NM", "SA", "XA", "XS"]
+    expect_tags: &core_expect_tags ["AS", "HN", "MC", "MD", "MQ", "NM", "SA", "XA", "XS"]
   # bwa-mem3 vs bwa-mem3 at the same search settings: same binary, same
   # candidate set, so every tag is comparable and any difference is a real
   # finding. Measured cost of full strictness: 0.0000pp on vs_x86, <=0.094pp
   # on vs_golden.
   vs_golden:
     ignore_tags: []
-    expect_tags: ["AS", "HN", "MC", "MD", "MQ", "NM", "SA", "XA", "XS"]
+    expect_tags: *core_expect_tags
   vs_x86:
     ignore_tags: []
-    expect_tags: ["AS", "HN", "MC", "MD", "MQ", "NM", "SA", "XA", "XS"]
+    expect_tags: *core_expect_tags
   # `--fast` vs default is the ONE same-binary comparison that is not
   # same-behaviour: the preset prunes the candidate set on purpose
   # (`--smem-dedup`, the score-gated chain-extension cap), and `--extend-csub`
@@ -63,27 +69,7 @@ compare_defaults:
   # under 1% divergent.
   vs_default:
     ignore_tags: ["XS", "HN", "XA", "SA", "MQ"]
-    expect_tags: ["AS", "HN", "MC", "MD", "MQ", "NM", "SA", "XA", "XS"]
-
-# Anchor for the vs_baseline exclusions every meth sample shares. Four samples
-# reference it (the real and `--fast` arms of twist-emseq and smoke-meth), and a
-# tag added to one arm but not the others would silently make the smoke/fast
-# arms measure something different from the real ones -- an anchor makes them
-# provably identical instead of identical by inspection.
-#
-# This lives outside `samples:` deliberately: `load_config` reads only the
-# `samples` and `compare_defaults` keys, so this top-level key is inert config
-# rather than a sample. `test_meth_samples_share_one_anchored_ignore_list` pins
-# both halves of that.
-#
-# Bisulfite alignment against bwameth: NM/MD are edit distances against a
-# C->T/G->A converted reference, and XA/SA embed both NM and the
-# doubled-reference contig names (`fchr1`), so all four diverge on >99.5%
-# of reads for reasons unrelated to placement. XM/XG/XR and YD/YC/RG are
-# the two aligners' disjoint bisulfite tag sets. Extends the vs_baseline
-# default (MQ/HN). Measured: this leaves +0.14pp of added drift.
-meth_vs_baseline: &meth_vs_baseline
-  ignore_tags: ["NM", "MD", "XA", "SA", "XM", "XG", "XR", "YD", "YC", "RG"]
+    expect_tags: *core_expect_tags
 
 samples:
   wgs-5M:
@@ -109,9 +95,6 @@ samples:
     reference: hg38-meth
     source: data/meth/twist-emseq/downsampled-5M/
     fg_labs_flags: ["--meth"]
-    compare_options:
-      # See the `meth_vs_baseline` anchor above for the rationale.
-      vs_baseline: *meth_vs_baseline
 
   smoke-1M:
     baseline_tool: bwa-mem2-upstream
@@ -127,9 +110,6 @@ samples:
     reference: hg38-meth
     source: data/smoke-meth/10K/
     fg_labs_flags: ["--meth"]
-    compare_options:
-      # See the `meth_vs_baseline` anchor above for the rationale.
-      vs_baseline: *meth_vs_baseline
 
   # 1M Hi-C read pairs (HG002, 2x151 PE). Chimeric / long-range-mate structure
   # produces heavy supplementary alignments — exercises the supplementary
@@ -291,9 +271,6 @@ samples:
     reference: hg38-meth
     source: data/meth/twist-emseq/downsampled-5M/
     fg_labs_flags: ["--meth", "--fast"]
-    compare_options:
-      # See the `meth_vs_baseline` anchor above for the rationale.
-      vs_baseline: *meth_vs_baseline
 
   # Remaining real datasets, so `--fast` is compared on every dataset the
   # benchmark carries. Each mirrors its base sample's layout / mem_flags so the
@@ -367,9 +344,6 @@ samples:
     reference: hg38-meth
     source: data/smoke-meth/10K/
     fg_labs_flags: ["--meth", "--fast"]
-    compare_options:
-      # See the `meth_vs_baseline` anchor above for the rationale.
-      vs_baseline: *meth_vs_baseline
 
   sim-smoke-vars-fast:
     baseline_tool: bwa-mem2-upstream
