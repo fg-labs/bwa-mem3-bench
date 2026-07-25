@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 # Increment this whenever the schema changes in a backward-incompatible way.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # `user_version` is INTERPOLATED from SCHEMA_VERSION, never written literally.
 # It used to be hardcoded, so bumping SCHEMA_VERSION without editing the PRAGMA
@@ -123,6 +123,18 @@ CREATE TABLE IF NOT EXISTS scaling (
     -- The aligner's own PROCESS() compute time, parsed with the same regex as
     -- trials.process_seconds so the two are directly comparable.
     process_seconds REAL,
+    -- Phase breakdown from bwa-mem3's runtime profile. These EXPLAIN the
+    -- efficiency number rather than just reporting it.
+    --
+    -- Critically, read_io_seconds lives INSIDE process_seconds. If FASTQ
+    -- reading does not scale with thread count it becomes a large fraction of
+    -- PROCESS() at high thread counts, so an efficiency computed from PROCESS()
+    -- alone would attribute an IO limit to the aligner. Keeping the phases
+    -- separate is what distinguishes those two cases.
+    main_mem_seconds REAL,
+    read_io_seconds  REAL,
+    sam_io_seconds   REAL,
+    kernel_seconds   REAL,
     UNIQUE (fg_labs_sha, sample, arch, threads, rep)
 );
 

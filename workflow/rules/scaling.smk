@@ -40,6 +40,23 @@ rule align_thread_scaling:
         fastqs = _query_fastqs,
     output:
         tsv = "scaling/{sha}/{sample}/{arch}/scaling.tsv",
+        # The aligner's own runtime profile, one tarball for the whole ladder.
+        #
+        # This is NOT optional detail. scaling.tsv reduces each rung to
+        # wall/cpu/rss/PROCESS(), which is enough to compute efficiency but NOT
+        # enough to explain it. bwa-mem3's stderr decomposes the run into
+        # main_mem, read IO, SAM-write IO, index read, MEM_PROCESS_SEQ, and the
+        # per-kernel breakdown (MEM_CHAIN / MEM_SA / BSW) — the only way to say
+        # WHY a rung scaled the way it did.
+        #
+        # The first ladder shipped without this and immediately needed it: at 64
+        # threads wall exceeded PROCESS() by 7.4 s (vs 2.2 s at 16), and nothing
+        # in scaling.tsv could attribute that. Worse, PROCESS() *includes* read
+        # IO (13.2 s of a 92 s run at 16 threads), so if FASTQ reading does not
+        # scale it silently becomes a large fraction of PROCESS() at high thread
+        # counts — making the efficiency number itself misleading. Keeping the
+        # profile is what distinguishes an aligner limit from an IO limit.
+        profile = "scaling/{sha}/{sample}/{arch}/runtime-profiles.tar.gz",
     # Reserve the whole instance. Anything less and Batch could co-schedule a
     # second job onto the host, which would corrupt every point on the curve.
     threads: CONFIG.thread_scaling.max_threads
@@ -69,7 +86,7 @@ rule align_thread_scaling:
         bwa-mem2.fg-labs shm {input.ref[0]}
         trap 'bwa-mem2.fg-labs shm -d || true' EXIT
 
-        printf 'threads\trep\twall_s\tcpu_s\tmax_rss_mb\tprocess_s\n' > {output.tsv}
+        printf 'threads\trep\twall_s\tcpu_s\tmax_rss_mb\tprocess_s\tmain_mem_s\tread_io_s\tsam_io_s\tkernel_s\n' > {output.tsv}
 
         for spec in {params.ladder}; do
             T=${{spec%%:*}}
@@ -96,9 +113,25 @@ rule align_thread_scaling:
                 # are directly comparable to trials.process_seconds.
                 PROC=$(grep -oE 'PROCESS\(\).*?:[[:space:]]*[0-9.]+' "$ERR" \
                        | grep -oE '[0-9.]+$' | head -1 || true)
-                printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-                    "$T" "$rep" "$WALL" "$CPU" "$RSS" "${{PROC:-NA}}" >> {output.tsv}
+                # Additional phase timings from the aligner's own runtime
+                # profile. These explain the efficiency number rather than just
+                # reporting it — in particular `read_io`, which lives INSIDE
+                # PROCESS() and does not necessarily scale with thread count.
+                prof() {{ grep -oE "$1[^:]*:[[:space:]]*[0-9.]+" "$ERR" \
+                          | grep -oE '[0-9.]+$' | head -1 || true; }}
+                MAINMEM=$(prof 'Time taken for main_mem function')
+                READIO=$(prof 'Reading IO time \(reads\) avg')
+                SAMIO=$(prof 'Writing IO time \(SAM\) avg')
+                KERNEL=$(prof 'Total kernel \(smem\+sal\+bsw\) time avg')
+                printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                    "$T" "$rep" "$WALL" "$CPU" "$RSS" "${{PROC:-NA}}" \
+                    "${{MAINMEM:-NA}}" "${{READIO:-NA}}" "${{SAMIO:-NA}}" "${{KERNEL:-NA}}" \
+                    >> {output.tsv}
                 rm -f "$OUTDIR/runs/o.bam"
             done
         done
+        # Keep every rung's raw stderr + tricorder TSV. Without this the profile
+        # is unrecoverable once the worker exits, which is exactly what happened
+        # to the first ladder.
+        tar -czf {output.profile} -C "$OUTDIR" runs
         """

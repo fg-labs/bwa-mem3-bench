@@ -53,8 +53,12 @@ _INDEX_READ_RE = re.compile(r"^\s*Index read time avg:\s*([0-9.]+),", re.MULTILI
 BASELINE_SHA_PREFIX = "baseline-bwa-mem2-"
 
 
-# scaling.tsv columns: threads, rep, wall_s, cpu_s, max_rss_mb, process_s.
+# scaling.tsv columns: threads, rep, wall_s, cpu_s, max_rss_mb, process_s,
+# main_mem_s, read_io_s, sam_io_s, kernel_s. The first six are required; the
+# phase-breakdown columns were added later, so a shorter row is still ingested
+# (older ladders simply have NULL phases rather than being rejected).
 _SCALING_COLUMNS = 6
+_SCALING_COLUMNS_FULL = 10
 
 
 def _maybe_float(cell: str) -> float | None:
@@ -589,7 +593,10 @@ def ingest_scaling(
 
     Each ``scaling.tsv`` is written by `align_thread_scaling` (one Batch job on
     one host) with a header plus one row per (threads, rep):
-    ``threads, rep, wall_s, cpu_s, max_rss_mb, process_s``.
+    ``threads, rep, wall_s, cpu_s, max_rss_mb, process_s, main_mem_s, read_io_s,
+    sam_io_s, kernel_s``. Only the first six are required — the phase columns
+    were added later, so a six-column row from an older ladder still loads, with
+    NULL phases (see `_SCALING_COLUMNS`).
 
     :param conn: open benchmark DB connection.
     :param scaling_root: local mirror of the ``scaling/`` prefix.
@@ -615,6 +622,8 @@ def ingest_scaling(
             if len(fields) < _SCALING_COLUMNS:
                 continue
             threads, rep, wall, cpu, rss, proc = fields[:_SCALING_COLUMNS]
+            phases = fields[_SCALING_COLUMNS:_SCALING_COLUMNS_FULL]
+            mainmem, readio, samio, kernel = (list(phases) + ["NA"] * 4)[:4]
             upsert_scaling(
                 conn,
                 fg_labs_sha=fg_labs_sha,
@@ -629,6 +638,10 @@ def ingest_scaling(
                 # parsed from the aligner's stderr; store NULL rather than
                 # crashing, so one unparseable rung does not lose the ladder.
                 process_seconds=_maybe_float(proc),
+                main_mem_seconds=_maybe_float(mainmem),
+                read_io_seconds=_maybe_float(readio),
+                sam_io_seconds=_maybe_float(samio),
+                kernel_seconds=_maybe_float(kernel),
                 commit=False,
             )
             ingested += 1
