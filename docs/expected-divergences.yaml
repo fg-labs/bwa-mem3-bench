@@ -43,10 +43,14 @@ divergences:
     pr: fg-labs/bwa-mem3#90
     date: 2026-06-07
     summary: >-
-      Bisulfite (--meth) mode against the bwameth.py baseline diverges beyond the
-      ignored YD/XM/XG tag set (Bismark-compatible XR/XG/XM tags and C->T/G->A
-      conversion handling), giving a larger but still-bounded concordance drift
-      on methylation workloads.
+      Bisulfite (--meth) mode against the bwameth.py baseline diverges in
+      placement (C->T/G->A conversion handling), giving a larger but still
+      bounded concordance drift on methylation workloads. The two aligners'
+      bisulfite tags are not comparable at all and are excluded rather than
+      budgeted: bwameth computes NM/MD — and the NM embedded in XA/SA — against
+      the converted reference, and the Bismark-compatible XM/XG/XR set has no
+      bwameth counterpart (bwameth writes YD/YC/RG instead). See
+      `compare_options` in config/samples.yaml.
     affected: meth_alignment
     expected_drift_pct: 1.50
     samples: [meth-twist-emseq-5M, smoke-meth]

@@ -2,8 +2,9 @@
 //!
 //! For each template (read pair) the two BAMs are compared on two axes:
 //!   * **primary concordance** — each read end's primary alignment is classified
-//!     via [`classify`] (position / CIGAR / MAPQ / placement flags); this drives
-//!     the headline `concordance_pct`.
+//!     via [`classify`] (position / CIGAR / MAPQ / placement flags, plus every
+//!     aux tag not excluded by `ignore_tags`); this drives the headline
+//!     `concordance_pct`.
 //!   * **supplementary disagreement** — supplementary alignments are counted and
 //!     position-matched separately, since `bwa-mem3` legitimately emits a
 //!     different number of them than `bwa-mem2 v2.2.1` (non-bit-identical
@@ -15,7 +16,7 @@ use std::io::Read;
 use anyhow::Result;
 use noodles_sam::alignment::record_buf::RecordBuf;
 
-use crate::classify::{classify, Discordance};
+use crate::classify::{classify, Classification, Discordance};
 use crate::config::CompareOptions;
 use crate::report::ConcordanceReport;
 use crate::template_reader::{template_iter, Template};
@@ -106,13 +107,13 @@ fn compare_template(t: &Template, opts: &CompareOptions, report: &mut Concordanc
     ends.sort_unstable();
     ends.dedup();
     for end in ends {
-        let d = match (q_primary.get(&end), b_primary.get(&end)) {
+        let classification = match (q_primary.get(&end), b_primary.get(&end)) {
             (Some(q), Some(b)) => classify(q, b, opts),
-            (Some(_), None) => Discordance::MappedOnlyQuery,
-            (None, Some(_)) => Discordance::MappedOnlyBaseline,
+            (Some(_), None) => Classification::only_diff(Discordance::MappedOnlyQuery),
+            (None, Some(_)) => Classification::only_diff(Discordance::MappedOnlyBaseline),
             (None, None) => continue,
         };
-        report.record(&d);
+        report.record(&classification);
     }
 
     // Supplementary disagreement axis.

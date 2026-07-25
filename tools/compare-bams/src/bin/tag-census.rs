@@ -18,10 +18,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use compare_bams::classify::Discordance;
-use compare_bams::{classify, template_iter, CompareOptions, Template};
+use compare_bams::{classify, template_iter, CompareOptions, Discordance, Template};
 use noodles_sam::alignment::record::data::field::Tag;
-use noodles_sam::alignment::record_buf::data::field::Value;
 use noodles_sam::alignment::record_buf::RecordBuf;
 
 #[derive(Parser, Debug)]
@@ -54,52 +52,6 @@ struct Args {
     /// Permitted absolute MAPQ difference before a read counts as discordant.
     #[arg(long, default_value_t = 0)]
     mapq_tolerance: u8,
-}
-
-/// A tag value normalized so that equality ignores on-disk encoding width.
-///
-/// BAM stores integers in the narrowest type that fits, so the same logical
-/// value can appear as `c`, `s`, or `i` in two files that agree completely.
-/// Comparing `noodles`' `Value` variants directly would report those as
-/// differences; collapsing every integer variant to `i64` first is what makes
-/// the comparison value-semantic rather than encoding-semantic.
-#[derive(Debug, PartialEq)]
-enum Norm {
-    Int(i64),
-    Float(f32),
-    /// `Z` (printable string) and `H` (hex byte array) are kept apart even when
-    /// their bytes match: they are distinct SAM types written with distinct BAM
-    /// type codes, so equal bytes under different types are a real difference
-    /// rather than an encoding artifact the way `c` vs `i` is.
-    Str(Vec<u8>),
-    Hex(Vec<u8>),
-    /// `A` (character), for the same reason: it is its own SAM type, not a
-    /// one-byte integer, so `XX:A:A` and `XX:i:65` are genuinely different.
-    Char(u8),
-    /// Arrays (`B`) and anything else, compared via their debug rendering.
-    /// No `B` tag appears in this workload; this arm exists so an unexpected
-    /// one is compared rather than silently ignored.
-    Other(String),
-}
-
-fn normalize(v: &Value) -> Norm {
-    match v {
-        Value::Int8(n) => Norm::Int(i64::from(*n)),
-        Value::UInt8(n) => Norm::Int(i64::from(*n)),
-        Value::Int16(n) => Norm::Int(i64::from(*n)),
-        Value::UInt16(n) => Norm::Int(i64::from(*n)),
-        Value::Int32(n) => Norm::Int(i64::from(*n)),
-        Value::UInt32(n) => Norm::Int(i64::from(*n)),
-        Value::Character(c) => Norm::Char(*c),
-        Value::Float(f) => Norm::Float(*f),
-        Value::String(s) => Norm::Str(s.to_vec()),
-        Value::Hex(s) => Norm::Hex(s.to_vec()),
-        Value::Array(array) => Norm::Other(format!("{array:?}")),
-    }
-}
-
-fn tag_name(tag: Tag) -> String {
-    String::from_utf8_lossy(tag.as_ref()).into_owned()
 }
 
 /// Per-tag presence tally across one side of the comparison.
@@ -143,47 +95,65 @@ fn end_key(r: &RecordBuf) -> u8 {
     u8::from(f.is_first_segment()) | (u8::from(f.is_last_segment()) << 1)
 }
 
-/// Tags differing between two paired primaries, plus per-tag presence bookkeeping.
-fn diff_tags(q: &RecordBuf, b: &RecordBuf, census: &mut Census) -> Vec<String> {
-    let q_tags: BTreeMap<String, &Value> = q.data().iter().map(|(t, v)| (tag_name(t), v)).collect();
-    let b_tags: BTreeMap<String, &Value> = b.data().iter().map(|(t, v)| (tag_name(t), v)).collect();
-
-    for name in q_tags.keys() {
-        census.tag_presence.entry(name.clone()).or_default().query += 1;
+/// Record each side's tag presence, then return the names of the tags that
+/// differ, reusing `compare-bams`' own comparison so the census can never drift
+/// from what the comparator would score.
+fn diff_tags(
+    diffs: &[Discordance],
+    q: &RecordBuf,
+    b: &RecordBuf,
+    census: &mut Census,
+) -> Vec<String> {
+    for (t, _) in q.data().iter() {
+        let name = String::from_utf8_lossy(Tag::as_ref(&t)).into_owned();
+        census.tag_presence.entry(name).or_default().query += 1;
     }
-    for name in b_tags.keys() {
-        census
-            .tag_presence
-            .entry(name.clone())
-            .or_default()
-            .baseline += 1;
+    for (t, _) in b.data().iter() {
+        let name = String::from_utf8_lossy(Tag::as_ref(&t)).into_owned();
+        census.tag_presence.entry(name).or_default().baseline += 1;
     }
 
     let mut differing = Vec::new();
-    let mut names: Vec<&String> = q_tags.keys().chain(b_tags.keys()).collect();
-    names.sort_unstable();
-    names.dedup();
-
-    for name in names {
-        match (q_tags.get(name), b_tags.get(name)) {
-            (Some(qv), Some(bv)) => {
-                if normalize(qv) != normalize(bv) {
-                    *census.tag_value_diff.entry(name.clone()).or_default() += 1;
-                    differing.push(name.clone());
-                }
+    for d in diffs {
+        let Some(tag) = d.tag() else { continue };
+        match d {
+            Discordance::TagValueDiff { .. } => {
+                *census.tag_value_diff.entry(tag.to_string()).or_default() += 1;
             }
-            (Some(_), None) => {
-                *census.tag_query_only.entry(name.clone()).or_default() += 1;
-                differing.push(name.clone());
+            Discordance::TagQueryOnly { .. } => {
+                *census.tag_query_only.entry(tag.to_string()).or_default() += 1;
             }
-            (None, Some(_)) => {
-                *census.tag_baseline_only.entry(name.clone()).or_default() += 1;
-                differing.push(name.clone());
+            Discordance::TagBaselineOnly { .. } => {
+                *census.tag_baseline_only.entry(tag.to_string()).or_default() += 1;
             }
-            (None, None) => unreachable!("name came from one of the two maps"),
+            _ => {}
         }
+        differing.push(tag.to_string());
     }
+    differing.sort();
     differing
+}
+
+/// Every tag on a record whose counterpart is absent, as one-sided differences.
+///
+/// `classify` short-circuits a mapping disagreement to a single `MappedOnly*`
+/// finding and never reaches the tag comparison, so the one-sided branch cannot
+/// reuse it. The answer is exact without comparing anything: if the opposing
+/// record does not exist, every tag this one carries is present on exactly one
+/// side.
+fn one_sided_tag_diffs(record: &RecordBuf, is_query: bool) -> Vec<Discordance> {
+    record
+        .data()
+        .iter()
+        .map(|(t, _)| {
+            let tag = String::from_utf8_lossy(Tag::as_ref(&t)).into_owned();
+            if is_query {
+                Discordance::TagQueryOnly { tag }
+            } else {
+                Discordance::TagBaselineOnly { tag }
+            }
+        })
+        .collect()
 }
 
 fn census_template(t: &Template, opts: &CompareOptions, census: &mut Census) {
@@ -219,7 +189,8 @@ fn census_template(t: &Template, opts: &CompareOptions, census: &mut Census) {
             // honest about why it diverged.
             (Some(q), None) => {
                 census.total_primaries += 1;
-                let differing = diff_tags(q, &RecordBuf::default(), census);
+                let diffs = one_sided_tag_diffs(q, true);
+                let differing = diff_tags(&diffs, q, &RecordBuf::default(), census);
                 *census
                     .patterns_core_discordant
                     .entry(differing.join("|"))
@@ -228,7 +199,8 @@ fn census_template(t: &Template, opts: &CompareOptions, census: &mut Census) {
             }
             (None, Some(b)) => {
                 census.total_primaries += 1;
-                let differing = diff_tags(&RecordBuf::default(), b, census);
+                let diffs = one_sided_tag_diffs(b, false);
+                let differing = diff_tags(&diffs, &RecordBuf::default(), b, census);
                 *census
                     .patterns_core_discordant
                     .entry(differing.join("|"))
@@ -239,8 +211,12 @@ fn census_template(t: &Template, opts: &CompareOptions, census: &mut Census) {
         };
 
         census.total_primaries += 1;
-        let core_concordant = classify(q, b, opts) == Discordance::Concordant;
-        let differing = diff_tags(q, b, census);
+        // An empty ignore list means classify() reports every tag difference,
+        // so the census stays policy-free: the tiering decision is made later,
+        // by arithmetic over these patterns.
+        let diffs = classify(q, b, opts).diffs;
+        let core_concordant = !diffs.iter().any(|d| d.tag().is_none());
+        let differing = diff_tags(&diffs, q, b, census);
         let key = differing.join("|");
 
         if core_concordant {
@@ -260,7 +236,7 @@ fn main() -> Result<()> {
     // tolerance), so an unflagged run still matches today's invocation — but a
     // policy added to the workflow no longer silently desyncs the two.
     let opts = CompareOptions {
-        ignore_tags: args.ignore_tags,
+        ignore_tags: args.ignore_tags.into_iter().collect(),
         mapq_tolerance: args.mapq_tolerance,
     };
 
@@ -297,6 +273,7 @@ mod tests {
     use super::*;
     use noodles_core::Position;
     use noodles_sam::alignment::record::{Flags, MappingQuality};
+    use noodles_sam::alignment::record_buf::data::field::Value;
     use noodles_sam::alignment::record_buf::Data;
 
     const R1: u16 = 0x40;
@@ -333,51 +310,6 @@ mod tests {
         let mut census = Census::default();
         census_template(&t, &CompareOptions::default(), &mut census);
         census
-    }
-
-    /// The whole point of `Norm`: BAM picks the narrowest integer type that
-    /// fits, so two files that agree can still encode the same value as `c` and
-    /// `i`. Comparing `Value`s directly would call that a difference.
-    #[test]
-    fn integer_width_does_not_make_tags_differ() {
-        assert_eq!(normalize(&Value::Int8(7)), normalize(&Value::Int32(7)));
-        assert_eq!(normalize(&Value::UInt8(7)), normalize(&Value::Int16(7)));
-        assert_ne!(normalize(&Value::Int8(7)), normalize(&Value::Int8(8)));
-    }
-
-    /// Width collapsing is deliberate; type collapsing is not. `Z` and `H` are
-    /// distinct SAM types that BAM writes with different type codes, so the same
-    /// bytes under the two types are a real on-disk difference, not an encoding
-    /// artifact the way `c` vs `i` is.
-    #[test]
-    fn string_and_hex_with_the_same_bytes_still_differ() {
-        assert_ne!(
-            normalize(&Value::String("7F".into())),
-            normalize(&Value::Hex("7F".into()))
-        );
-        assert_eq!(
-            normalize(&Value::String("7F".into())),
-            normalize(&Value::String("7F".into()))
-        );
-    }
-
-    /// Same rule for `A`: a character is its own SAM type, not a narrow integer.
-    /// Folding it into `Norm::Int` would make `XX:A:A` and `XX:i:65` compare
-    /// equal, which is a type difference the BAM records faithfully.
-    #[test]
-    fn character_and_integer_with_the_same_code_point_still_differ() {
-        assert_ne!(
-            normalize(&Value::Character(b'A')),
-            normalize(&Value::Int32(i32::from(b'A')))
-        );
-        assert_eq!(
-            normalize(&Value::Character(b'A')),
-            normalize(&Value::Character(b'A'))
-        );
-        assert_ne!(
-            normalize(&Value::Character(b'A')),
-            normalize(&Value::Character(b'B'))
-        );
     }
 
     /// A primary present on only one side still carries tags, and the report

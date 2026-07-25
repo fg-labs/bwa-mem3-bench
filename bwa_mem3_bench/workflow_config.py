@@ -9,6 +9,17 @@ from typing import Any
 
 import yaml
 
+# The `compare-bams` invocations the workflow makes, one per rule in
+# `workflow/rules/compare.smk`. Three flavours, not two:
+#   - `vs_baseline` — a DIFFERENT aligner (upstream bwa-mem2, or bwameth for
+#     meth samples), so it needs the largest exclusion list.
+#   - `vs_golden` / `vs_x86` — same binary AND same search settings, so every
+#     tag is comparable and nothing is skipped.
+#   - `vs_default` — same binary but preset-pruned (`--fast` vs default), so the
+#     tags describing the candidate set diverge mechanically and are excluded
+#     while the tags describing the chosen alignment stay strict.
+COMPARE_KINDS = frozenset({"vs_baseline", "vs_golden", "vs_x86", "vs_default"})
+
 
 @dataclass(frozen=True)
 class Sample:
@@ -26,6 +37,11 @@ class Sample:
     # which disable the (Hi-C-inappropriate) mate rescue that otherwise blows up
     # the mate-SW reference windows and OOMs the cgroup.
     mem_flags: list[str] = field(default_factory=list)
+    # Per-comparison-kind compare-bams overrides, keyed by kind (see
+    # `COMPARE_KINDS`), e.g. `{"vs_baseline": {"ignore_tags": [...]}}`. Each
+    # kind's `ignore_tags` EXTENDS the matching `compare_defaults` entry rather
+    # than replacing it. Resolve via `WorkflowConfig.ignore_tags()` — never read
+    # this directly, or the defaults get silently dropped.
     compare_options: dict[str, Any] = field(default_factory=dict)
     # Truth-based accuracy sample (holodeck-simulated). When True, the sample's
     # S3 `source` prefix also holds the truth artifacts (`golden.bam`,
@@ -194,9 +210,35 @@ class WorkflowConfig:
     baseline_prefix: str
     golden_prefix: str
     data_prefix: str
+    # Per-comparison-kind default `ignore_tags`, keyed by kind. Per-sample
+    # `compare_options` extend these.
+    compare_defaults: dict[str, list[str]] = field(default_factory=dict)
+
+    def ignore_tags(self, sample_name: str, kind: str) -> list[str]:
+        """Aux tags `compare-bams` must skip for one (sample, comparison kind).
+
+        The kind default and the sample's override are UNIONed, not replaced:
+        a meth sample needs both the cross-tool default (`MQ`/`HN`) and its own
+        bisulfite additions, and a config that replaced instead of extending
+        would silently drop the former.
+
+        :param sample_name: sample being compared.
+        :param kind: comparison kind, one of `COMPARE_KINDS`.
+        :return: sorted, de-duplicated tag names.
+        :raises KeyError: if `sample_name` is not a configured sample.
+        :raises ValueError: if `kind` is not a known comparison kind.
+        """
+        if kind not in COMPARE_KINDS:
+            raise ValueError(
+                f"unknown comparison kind {kind!r}; expected one of {sorted(COMPARE_KINDS)}"
+            )
+        tags = set(self.compare_defaults.get(kind, []))
+        override = self.samples[sample_name].compare_options.get(kind, {})
+        tags.update(override.get("ignore_tags", []))
+        return sorted(tags)
 
 
-def _as_str_list(sample_name: str, key: str, value: Any) -> list[str]:
+def _as_str_list(owner: str, key: str, value: Any) -> list[str]:
     """Validate a YAML flag value is a ``list[str]`` before coercion.
 
     ``list(...)`` on a bare YAML scalar (e.g. ``mem_flags: -5``) silently
@@ -204,14 +246,17 @@ def _as_str_list(sample_name: str, key: str, value: Any) -> list[str]:
     alignment arguments. Reject anything that is not already a list of
     strings so a misconfiguration fails loudly at load time.
 
-    :param sample_name: sample the flags belong to (for the error message).
+    :param owner: what the key belongs to, rendered verbatim into the error
+        message (e.g. ``"sample 'wgs-5M'"`` or ``"`compare_defaults`"``). Not
+        every caller is a sample — the top-level `compare_defaults` block uses
+        this helper too, and naming it a sample would misdirect the fix.
     :param key: config key being validated (e.g. ``"mem_flags"``).
     :param value: raw value read from YAML.
     :return: the value as a ``list[str]``.
     :raises ValueError: if ``value`` is not a list of strings.
     """
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
-        raise ValueError(f"sample {sample_name!r} `{key}` must be a list of strings; got {value!r}")
+        raise ValueError(f"{owner} `{key}` must be a list of strings; got {value!r}")
     return list(value)
 
 
@@ -299,6 +344,92 @@ def parse_ladder_override(spec: str) -> list[ThreadScalingStep]:
     if len(set(counts)) != len(counts):
         raise ValueError(f"ladder override {spec!r} repeats a thread count: {counts}")
     return sorted(steps, key=lambda step: step.threads)
+
+
+def _validate_compare_options(sample_name: str, options: Any) -> dict[str, Any]:
+    """Validate a sample's `compare_options` is keyed by comparison kind.
+
+    `compare_options` was once a flat `{"ignore_tags": [...]}` that applied to
+    every comparison — and, for the whole of this project's history, to none of
+    them, because nothing read it (bench #34). Rejecting the flat shape means a
+    config carried over from that era fails at load instead of quietly reverting
+    to the defaults, which is the exact failure mode that bug was.
+
+    :param sample_name: sample the options belong to (for the error message).
+    :param options: raw `compare_options` value from YAML. Typed `Any` because
+        the caller passes it unconverted: a bare `compare_options:` header
+        yields `None` and a mistyped one yields a list or string, and coercing
+        those with `dict(...)` before the guard raises `TypeError` /
+        "dictionary update sequence" instead of naming the sample. Mirrors
+        `_validate_compare_defaults`.
+    :return: the validated mapping.
+    :raises ValueError: if the value is not a mapping, is not keyed by a known
+        comparison kind, or a kind's body is not a mapping.
+    """
+    if options is None:
+        options = {}
+    if not isinstance(options, dict):
+        raise ValueError(
+            f"sample {sample_name!r} `compare_options` must be a mapping keyed by "
+            f"comparison kind (e.g. `{{vs_baseline: {{ignore_tags: [NM]}}}}`); "
+            f"got {options!r}"
+        )
+    for key, body in options.items():
+        if key == "ignore_tags":
+            raise ValueError(
+                f"sample {sample_name!r} uses the retired flat "
+                f"`compare_options.ignore_tags`. Tag policy is now per comparison "
+                f"kind: nest it under the kind it applies to, e.g.\n"
+                f"    compare_options:\n"
+                f"      vs_baseline:\n"
+                f"        ignore_tags: {body!r}"
+            )
+        if key not in COMPARE_KINDS:
+            raise ValueError(
+                f"sample {sample_name!r} `compare_options` has unknown comparison "
+                f"kind {key!r}; expected one of {sorted(COMPARE_KINDS)}"
+            )
+        if not isinstance(body, dict):
+            raise ValueError(
+                f"sample {sample_name!r} `compare_options.{key}` must be a mapping "
+                f"(e.g. `{{ignore_tags: [NM]}}`); got {body!r}"
+            )
+        _as_str_list(
+            f"sample {sample_name!r}",
+            f"compare_options.{key}.ignore_tags",
+            body.get("ignore_tags", []),
+        )
+    return options
+
+
+def _validate_compare_defaults(raw: Any) -> dict[str, list[str]]:
+    """Validate the top-level `compare_defaults` block and flatten it to lists.
+
+    :param raw: the raw `compare_defaults` mapping from `samples.yaml`.
+    :return: kind -> ignore-tag list, with every known kind present.
+    :raises ValueError: on an unknown kind, a non-mapping body, or a kind whose
+        `ignore_tags` is not a list of strings.
+    """
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"`compare_defaults` must be a mapping; got {raw!r}")
+    out: dict[str, list[str]] = {kind: [] for kind in COMPARE_KINDS}
+    for kind, body in raw.items():
+        if kind not in COMPARE_KINDS:
+            raise ValueError(
+                f"`compare_defaults` has unknown comparison kind {kind!r}; "
+                f"expected one of {sorted(COMPARE_KINDS)}"
+            )
+        if not isinstance(body, dict):
+            raise ValueError(
+                f"`compare_defaults.{kind}` must be a mapping "
+                f"(e.g. `{{ignore_tags: [MQ, HN]}}`); got {body!r}"
+            )
+        out[kind] = _as_str_list(
+            "`compare_defaults`", f"{kind}.ignore_tags", body.get("ignore_tags", [])
+        )
+    return out
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -397,7 +528,9 @@ def _thread_scaling_from(
 
 def load_config(config_dir: Path) -> WorkflowConfig:
     """Load and validate the three-file config into a `WorkflowConfig`."""
-    samples_raw = _read_yaml(config_dir / "samples.yaml")["samples"]
+    samples_yaml = _read_yaml(config_dir / "samples.yaml")
+    samples_raw = samples_yaml["samples"]
+    compare_defaults = _validate_compare_defaults(samples_yaml.get("compare_defaults"))
     archs_raw = _read_yaml(config_dir / "archs.yaml")
     defaults = _read_yaml(config_dir / "defaults.yaml")
 
@@ -416,9 +549,11 @@ def load_config(config_dir: Path) -> WorkflowConfig:
             reference=data["reference"],
             source=source,
             layout=data.get("layout", "paired"),
-            fg_labs_flags=_as_str_list(name, "fg_labs_flags", data.get("fg_labs_flags", [])),
-            mem_flags=_as_str_list(name, "mem_flags", data.get("mem_flags", [])),
-            compare_options=dict(data.get("compare_options", {})),
+            fg_labs_flags=_as_str_list(
+                f"sample {name!r}", "fg_labs_flags", data.get("fg_labs_flags", [])
+            ),
+            mem_flags=_as_str_list(f"sample {name!r}", "mem_flags", data.get("mem_flags", [])),
+            compare_options=_validate_compare_options(name, data.get("compare_options")),
             truth=_as_bool(name, "truth", data.get("truth", False)),
         )
 
@@ -456,4 +591,5 @@ def load_config(config_dir: Path) -> WorkflowConfig:
         baseline_prefix=defaults["baseline_prefix"],
         golden_prefix=defaults["golden_prefix"],
         data_prefix=defaults["data_prefix"],
+        compare_defaults=compare_defaults,
     )
