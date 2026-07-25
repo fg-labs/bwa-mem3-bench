@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -233,6 +234,73 @@ def _as_bool(sample_name: str, key: str, value: Any) -> bool:
     return value
 
 
+def _as_positive_int(context: str, key: str, value: Any) -> int:
+    """Validate a YAML value is a real ``int`` >= 1 before use.
+
+    ``int(...)`` would silently accept anything int-like: it truncates a
+    fractional value (``threads: 16.9`` → ``16``), parses a quoted string, and
+    passes a bool straight through (``reps: true`` → ``1``). Reject anything that
+    is not already a positive int so a misconfiguration fails loudly at load time
+    (mirrors ``_as_bool`` / ``_as_str_list``).
+
+    :param context: what the value belongs to, for the error message.
+    :param key: config key being validated (e.g. ``"threads"``).
+    :param value: raw value read from YAML.
+    :return: the value as an ``int``.
+    :raises ValueError: if ``value`` is not an int, or is < 1.
+    """
+    # bool subclasses int, so it has to be excluded explicitly.
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError(f"{context} `{key}` must be an integer >= 1; got {value!r}")
+    return value
+
+
+_LADDER_TOKEN_FIELDS = 2  # `threads:reps`
+
+
+def parse_ladder_override(spec: str) -> list[ThreadScalingStep]:
+    """Parse an ad-hoc ladder given as ``threads:reps`` tokens, e.g. ``16:3,64:3``.
+
+    Used for `--config ladder=...` (see `workflow/rules/scaling.smk`), which
+    bypasses `defaults.yaml` entirely. The tokens are interpolated straight into
+    the rule's shell loop, so they get the same validation the checked-in ladder
+    does — an unvalidated `16:` or `sixteen:3` would otherwise reach the worker
+    and fail an hour into a spot job, or silently run the wrong rung.
+
+    Unlike the checked-in ladder this does NOT require a 1-thread rung: skipping
+    it is the point of the override (it alone is ~40% of the full ladder's wall
+    time). The result yields no efficiency, so Gate #3 no-ops on it.
+
+    :param spec: comma-separated ``threads:reps`` tokens; surrounding whitespace
+        and empty tokens are ignored.
+    :return: the parsed rungs, ordered by thread count.
+    :raises ValueError: if `spec` holds no rungs, a token is not exactly one
+        ``threads:reps`` pair, a value is not an integer >= 1, or a thread count
+        repeats.
+    """
+    steps: list[ThreadScalingStep] = []
+    for token in (tok.strip() for tok in spec.split(",")):
+        if not token:
+            continue
+        parts = [part.strip() for part in token.split(":")]
+        # isdigit() also rejects signs and decimal points, so the int() below
+        # cannot raise and cannot truncate.
+        if len(parts) != _LADDER_TOKEN_FIELDS or not all(part.isdigit() for part in parts):
+            raise ValueError(
+                f"ladder override token {token!r} must be `threads:reps`, both integers"
+            )
+        threads, reps = int(parts[0]), int(parts[1])
+        if threads < 1 or reps < 1:
+            raise ValueError(f"ladder override token {token!r} needs threads >= 1 and reps >= 1")
+        steps.append(ThreadScalingStep(threads=threads, reps=reps))
+    if not steps:
+        raise ValueError(f"ladder override {spec!r} contains no `threads:reps` rungs")
+    counts = [step.threads for step in steps]
+    if len(set(counts)) != len(counts):
+        raise ValueError(f"ladder override {spec!r} repeats a thread count: {counts}")
+    return sorted(steps, key=lambda step: step.threads)
+
+
 def _read_yaml(path: Path) -> dict[str, Any]:
     with path.open("r") as fh:
         result: dict[str, Any] = yaml.safe_load(fh)
@@ -253,8 +321,9 @@ def _thread_scaling_from(
     :param archs: parsed archs, to check the referenced arch exists.
     :return: the validated `ThreadScaling`.
     :raises ValueError: on a missing key, unknown sample/arch, malformed ladder,
-        a ladder without a 1-thread rung, duplicate thread counts, or a
-        non-positive threads/reps value.
+        a ladder without a 1-thread rung, duplicate thread counts, a
+        threads/reps value that is not an integer >= 1, or a
+        `max_efficiency_drop_pp` that is not a finite number >= 0.
     """
     if not isinstance(raw, dict):
         raise ValueError(f"`thread_scaling` must be a mapping; got {raw!r}")
@@ -278,12 +347,13 @@ def _thread_scaling_from(
             raise ValueError(
                 f"each `thread_scaling.ladder` entry needs `threads` and `reps`; got {entry!r}"
             )
-        threads, reps = int(entry["threads"]), int(entry["reps"])
-        if threads < 1 or reps < 1:
-            raise ValueError(
-                f"`thread_scaling.ladder` entry {entry!r} must have threads >= 1 and reps >= 1"
+        where = f"`thread_scaling.ladder` entry {entry!r}"
+        ladder.append(
+            ThreadScalingStep(
+                threads=_as_positive_int(where, "threads", entry["threads"]),
+                reps=_as_positive_int(where, "reps", entry["reps"]),
             )
-        ladder.append(ThreadScalingStep(threads=threads, reps=reps))
+        )
 
     counts = [step.threads for step in ladder]
     if len(set(counts)) != len(counts):
@@ -297,9 +367,25 @@ def _thread_scaling_from(
             f"every efficiency is computed against); got thread counts {sorted(counts)}"
         )
 
-    drop = float(raw["max_efficiency_drop_pp"])
-    if drop < 0:
-        raise ValueError(f"`thread_scaling.max_efficiency_drop_pp` must be >= 0; got {drop}")
+    raw_drop = raw["max_efficiency_drop_pp"]
+    # Same reasoning as `_as_positive_int`: `float(...)` would take a bool or a
+    # quoted string, and this value is a gate tolerance — a silently coerced one
+    # gates the release against the wrong number. `nan`/`inf` need the explicit
+    # `isfinite` check because both are numeric and neither is `< 0`: `nan` makes
+    # every comparison against it false (the gate never fires) and `inf` makes the
+    # tolerance unbounded (the gate can never fail). Either one silently disables
+    # Gate #3 rather than loosening it.
+    if (
+        not isinstance(raw_drop, (int, float))
+        or isinstance(raw_drop, bool)
+        or not math.isfinite(raw_drop)
+        or raw_drop < 0
+    ):
+        raise ValueError(
+            f"`thread_scaling.max_efficiency_drop_pp` must be a finite number >= 0; "
+            f"got {raw_drop!r}"
+        )
+    drop = float(raw_drop)
 
     return ThreadScaling(
         sample=sample,

@@ -50,6 +50,10 @@ CONFIG_ARGS="fg_labs_sha=${FG_LABS_SHA}"
 [[ -n "${REPS:-}" ]]       && CONFIG_ARGS="${CONFIG_ARGS} reps=${REPS}"
 [[ -n "${SAMPLES:-}" ]]    && CONFIG_ARGS="${CONFIG_ARGS} samples=${SAMPLES}"
 [[ -n "${GOLDEN_REF_SHA:-}" ]] && CONFIG_ARGS="${CONFIG_ARGS} golden_ref_sha=${GOLDEN_REF_SHA}"
+# Ad-hoc thread-scaling ladder, e.g. LADDER="16:3,32:3,64:3" to probe only
+# the high thread counts. Omitting the 1-thread rung means no efficiency is
+# computable, so Gate #3 no-ops for that run by design.
+[[ -n "${LADDER:-}" ]]     && CONFIG_ARGS="${CONFIG_ARGS} ladder=${LADDER}"
 [[ -n "${IMAGE_TAG:-}" ]]  && CONFIG_ARGS="${CONFIG_ARGS} image_tag=${IMAGE_TAG}"
 # Thread the bucket through snakemake config so worker jobs resolve it too.
 # Workers re-parse the Snakefile but their job definitions don't carry this

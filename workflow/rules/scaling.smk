@@ -30,8 +30,33 @@ nothing to do with the aligner.
 
 
 def _ladder_spec(cfg) -> str:
-    """The ladder as `threads:reps` tokens for the shell loop, e.g. `1:1 2:1 4:2`."""
-    return " ".join(f"{step.threads}:{step.reps}" for step in cfg.thread_scaling.ladder)
+    """The ladder as `threads:reps` tokens for the shell loop, e.g. `1:1 2:1 4:2`.
+
+    Overridable per-run with `--config ladder=16:3,32:3,64:3` for ad-hoc
+    diagnostics — e.g. probing only the high thread counts without paying for
+    the 1-thread rung, which alone is ~40% of the full ladder's wall time.
+
+    The checked-in config is still validated to contain a 1-thread rung, because
+    E(n) = T(1)/(n*T(n)) is undefined without it and Gate #3 would silently have
+    nothing to gate. An override that omits it produces a ladder whose rows are
+    still ingested and whose profile is still captured, but which yields no
+    efficiency — `_scaling_efficiency` skips a ladder with no T(1), so the gate
+    no-ops rather than reporting a wrong number.
+
+    The override still goes through `parse_ladder_override`, which holds it to the
+    same integer/positivity rules as the YAML ladder. These tokens are pasted into
+    the rule's shell loop, so an unvalidated one would reach the worker and blow up
+    an hour into a spot job — the failure mode the config validation exists to
+    prevent.
+    """
+    override = config.get("ladder", "")
+    steps = parse_ladder_override(override) if override else cfg.thread_scaling.ladder
+    return " ".join(f"{step.threads}:{step.reps}" for step in steps)
+
+
+# Resolved at parse time, not inside a params lambda, so a malformed override
+# aborts the coordinator immediately instead of at job-build time.
+LADDER_SPEC = _ladder_spec(CONFIG)
 
 
 rule align_thread_scaling:
@@ -72,7 +97,7 @@ rule align_thread_scaling:
         # 16-thread run. The profile default (7200 s) is too tight.
         runtime = 14400,
     params:
-        ladder = lambda wc: _ladder_spec(CONFIG),
+        ladder = LADDER_SPEC,
         extra = lambda wc: _fg_labs_flags(wc.sample),
         mem_flags = lambda wc: _mem_flags(wc.sample),
     shell:

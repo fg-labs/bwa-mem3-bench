@@ -39,6 +39,7 @@ def submit(  # noqa: PLR0913
     reps: int = 1,
     make_target: str = "",
     golden_ref_sha: str = "",
+    ladder: str = "",
     job_name: str | None = None,
     dry_run: bool = False,
 ) -> None:
@@ -71,6 +72,10 @@ def submit(  # noqa: PLR0913
         for the vs-golden (Gate #2) dimension. Empty (default) disables vs-golden
         comparison. When set, ``compare_vs_golden`` reads
         ``golden/fg-labs-<golden_ref_sha>/`` rather than the run's own SHA.
+    :param ladder: ad-hoc thread-scaling ladder as ``threads:reps`` pairs, e.g.
+        ``16:3,32:3,64:3``. Empty (default) uses ``thread_scaling.ladder`` from
+        config. Omitting the 1-thread rung makes efficiency uncomputable, so
+        Gate #3 no-ops for that run — intended for diagnostics, not for a bless.
     :param job_name: Batch job name; defaults to ``<target>-<sha>`` (or
         ``<target>-<sha>-<make_target>`` when make_target is set).
     :param dry_run: print the ``aws batch submit-job`` command without executing.
@@ -92,6 +97,8 @@ def submit(  # noqa: PLR0913
         env_overrides.append({"name": "ARCHS", "value": archs})
     if reps:
         env_overrides.append({"name": "REPS", "value": str(reps)})
+    if ladder:
+        env_overrides.append({"name": "LADDER", "value": ladder})
     if golden_ref_sha:
         # Resolve an aliased golden SHA (e.g. a squash-merged release tag) to the
         # canonical SHA its golden BAMs live under, so the coordinator's

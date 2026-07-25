@@ -19,7 +19,7 @@ from pathlib import Path
 # Make the Python package importable from the repo root.
 sys.path.insert(0, str(Path(workflow.basedir).parent))
 
-from bwa_mem3_bench.workflow_config import load_config
+from bwa_mem3_bench.workflow_config import load_config, parse_ladder_override
 
 
 CONFIG = load_config(Path(workflow.basedir).parent / "config")
