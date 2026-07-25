@@ -243,6 +243,30 @@ from `arch.baseline_arch` in `config/archs.yaml`:
   aligned BAM.** The aligned BAM's first-of-pair count is inflated by
   supplementary alignments. `twist-umi.aligned.bam` shows 31.1M but the
   source twist-umi_1.fastq.gz is actually 7.9M pairs.
+- **`vs_default` is a same-*binary* comparison, NOT a same-*behaviour* one —
+  do not reason about it by analogy to `vs_golden` / `vs_x86`.** All three
+  compare bwa-mem3 against bwa-mem3, but `--fast` prunes the candidate set on
+  purpose (`--smem-dedup`, the score-gated chain-extension cap) and
+  `--extend-csub` repairs MAPQ. So the tags *describing* that candidate set
+  diverge mechanically — on wgs-5M: `XS` 18.8%, `XA` 17.2%, `SA` 39.8%,
+  `HN` 7.1% of reads — while carrying no placement information. Tags
+  describing the *chosen* alignment (`AS`, `MD`, `NM`, `MC`) stay under 1%.
+  Bench #34 originally set `vs_default` to "compare every tag" by analogy to
+  the other two same-binary kinds; measuring it showed that costs **+21.8 pp**
+  of concordance drift versus +0.42 pp for the shipped policy — wrong by
+  ~200×, and it would have buried the MAPQ-stratified placement signal
+  `rule fast` exists to produce. Any comparison of two *presets* (rather than
+  two builds) needs its own measurement; `tag-census` does it offline against
+  BAMs already on disk, no bench run required.
+- **`aws cleanup-s3` reaps `aligned.bam` from older `runs/<sha>/` trees, and
+  the sample directories still list afterwards.** `aws s3 ls runs/<sha>/`
+  shows every sample prefix as though the run were intact; only
+  `benchmarks/` and `compare/` survive underneath. Before treating an old run
+  as a BAM source, sweep for the *file*:
+  `aws s3 ls --recursive s3://<bucket>/runs/ | grep 'aligned\.bam$'`.
+  Blessed-golden SHAs are preserved, so they are the reliable place to find
+  historical BAMs — e.g. the `*-fast` arms needed for a `vs_default`
+  measurement survived only under the v0.7.0 golden `04777b3`.
 - **Spot capacity varies per AZ.** `InsufficientInstanceCapacity` on
   `ec2 run-instances` → iterate subnets/AZs in your VPC rather than
   retrying in the same AZ.
