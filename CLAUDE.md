@@ -288,6 +288,30 @@ from `arch.baseline_arch` in `config/archs.yaml`:
   YAML.** There are ~10 meth samples × 3 comparison kinds; declaring the bisulfite
   tag set on each is ~30 places for the one fact to drift. `METH_EXTRA_TAGS` and
   friends live next to `COMPARE_KINDS` and are applied by the resolvers.
+- **`sim-*` (truth) samples never run `compare-bams`.** `SWEEP_SAMPLES` filters
+  on `not truth and not _is_fast_sample`, and `_accuracy_targets` requests only
+  `eval/*.variants.tsv` — no compare JSON. Exactly 16 (sample, kind) pairs reach
+  a compare rule: SWEEP_SAMPLES × {vs_baseline, vs_golden, +vs_x86 if non-meth},
+  the six `FAST_REAL_BASES` siblings for `vs_default`, and the hard-coded
+  targets in `rule fast_smoke` (`workflow/Snakefile`; named rather than cited by
+  line, which had already rotted once). Don't size tag-policy or
+  concordance work off `config/samples.yaml`'s ~30 samples — most never compare.
+- **`--fast` does not change the emitted tag vocabulary.** Measured across all
+  six `vs_default` census cells (paired, single-end, meth): the fast arm and its
+  default sibling emit an identical tag set. So a `-fast` sample's tag set can be
+  derived from its default arm's, which is how `smoke-1M-fast` / `smoke-meth-fast`
+  are covered despite never having been run.
+- **The full tag vocabulary is statically enumerable — use that, not just the
+  census.** `grep -ohE 'bam_aux_append\(b, "[A-Za-z][A-Za-z0-9]"' src/*.cpp` plus
+  the `kputsn_u("\tXX:` / `ksprintf(str, "\tXX:` forms across bwa-mem3's three
+  writers gives `AS HN MC MD MQ NM pa RG SA XA XG XM XR XS`. This catches tags no
+  sample happens to trigger: `pa` (ALT-contig scoring, needs a `.alt` file we
+  don't ship) and non-meth `RG` (needs `-R`) are emittable but unobserved in all
+  46 cells. Both are deliberately left OUT of `expect_tags` so their appearance
+  fails loudly. There is no production constant for the pair — nothing in
+  production reads one — so the decision is pinned by
+  `test_known_but_unemitted_tags_are_deliberately_not_allowlisted` in
+  `tests/test_workflow_config.py`.
 - **Spot capacity varies per AZ.** `InsufficientInstanceCapacity` on
   `ec2 run-instances` → iterate subnets/AZs in your VPC rather than
   retrying in the same AZ.

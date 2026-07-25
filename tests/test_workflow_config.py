@@ -8,6 +8,7 @@ import yaml
 
 from bwa_mem3_bench.workflow_config import (
     COMPARE_KINDS,
+    KNOWN_UNEMITTED_TAGS,
     METH_EXTRA_TAGS,
     METH_UNEMITTED_TAGS,
     Arch,
@@ -608,6 +609,43 @@ def test_expect_tags_rejects_unknown_comparison_kind() -> None:
     for resolver in (cfg.expect_tags, cfg.absent_ok_tags):
         with pytest.raises(ValueError, match="unknown comparison kind"):
             resolver("wgs-5M", "vs_nonsense")
+
+
+def test_the_allowlist_resolves_for_every_sample_and_kind() -> None:
+    """Truth (`sim-*`) samples are excluded from the concordance sweep today, so
+    they never reach compare-bams. They must still resolve to a usable policy:
+    the derived rules key off `layout` / `is_meth`, which those samples already
+    set, so adding one to the sweep later cannot silently produce an unguarded
+    comparison.
+    """
+    cfg = load_config(CONFIG_DIR)
+    for name, sample in cfg.samples.items():
+        for kind in COMPARE_KINDS:
+            assert cfg.expect_tags(name, kind), f"{name}/{kind} has no allowlist"
+            # Meth samples -- including every sim-meth-* -- pick the bisulfite
+            # tags up from `is_meth` with no per-sample YAML.
+            if sample.is_meth:
+                assert set(cfg.expect_tags(name, kind)) >= METH_EXTRA_TAGS, f"{name}/{kind}"
+
+
+def test_known_but_unemitted_tags_are_deliberately_not_allowlisted() -> None:
+    """`pa` (ALT-contig scoring) and non-meth `RG` are emittable by bwa-mem3's
+    source but produced by nothing this benchmark runs -- 0 of 46 census cells.
+
+    Leaving them out is the point: either appearing signals a configuration
+    change (a `.alt` file added, or `-R` passed) that alters what concordance
+    means, and the guard should force that decision rather than absorb it.
+    """
+    cfg = load_config(CONFIG_DIR)
+    assert "pa" in KNOWN_UNEMITTED_TAGS
+    for kind in COMPARE_KINDS:
+        allowed = set(cfg.expect_tags("wgs-5M", kind))
+        assert not (allowed & KNOWN_UNEMITTED_TAGS), (
+            f"{kind} allowlists a tag we deliberately want to fail on: "
+            f"{allowed & KNOWN_UNEMITTED_TAGS}"
+        )
+    # RG is the one exception, and only on the meth side, where bwameth emits it.
+    assert "RG" in cfg.expect_tags("meth-twist-emseq-5M", "vs_baseline")
 
 
 def test_shipped_allowlist_covers_every_tag_the_shipped_policy_ignores() -> None:

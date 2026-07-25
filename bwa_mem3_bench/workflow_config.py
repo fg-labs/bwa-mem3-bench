@@ -43,6 +43,22 @@ METH_UNEMITTED_TAGS = frozenset({"MQ", "HN"})
 # to catch.
 METH_EXTRA_TAGS = frozenset({"XM", "XG", "XR", "YD", "YC", "RG"})
 
+# Tags bwa-mem3's source can emit that this benchmark has never observed, and
+# that are deliberately NOT allowlisted -- their appearance should fail the run.
+#
+#   pa  emitted when `p.alt_sc > 0`, i.e. ALT-contig scoring. Our hg38 has ALT
+#       contigs but no `.alt` file, so alt_sc is never set (0 of 46 census
+#       cells). If a `.alt` file were added, ALT-aware mapping would change what
+#       concordance MEANS, so a loud failure is the correct outcome, not a
+#       silently absorbed new tag.
+#   RG  emitted when `-R` is passed. Nothing passes it on the bwa-mem3 side;
+#       bwameth sets it on its own output, which is why RG is in
+#       METH_EXTRA_TAGS but not in the non-meth allowlist.
+#
+# Listed here so the omission is a recorded decision rather than an oversight;
+# `test_known_but_unemitted_tags_are_deliberately_not_allowlisted` pins it.
+KNOWN_UNEMITTED_TAGS = frozenset({"pa", "RG"})
+
 
 @dataclass(frozen=True)
 class Sample:

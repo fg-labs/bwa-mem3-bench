@@ -159,6 +159,24 @@ observed — not only those that diverged — which is what the checks read.
 Pass `--no-tag-guard` for exploratory comparisons against an unfamiliar BAM pair,
 where the tag set is what you are trying to find out.
 
+**Coverage.** Sixteen (sample, kind) pairs ever reach `compare-bams`:
+`SWEEP_SAMPLES` (which excludes `truth` samples, so no `sim-*` dataset runs a
+comparison at all), the six `FAST_REAL_BASES` siblings for `vs_default`, and the
+hard-coded `fast_smoke` targets. The allowlist is the measured union over a
+46-cell `tag-census` sweep covering every one of them except `smoke-1M-fast` and
+`smoke-meth-fast`, which have never been run. Those two are covered by
+measurement rather than assumption: across all six `vs_default` cells — paired,
+single-end and meth — the fast arm and its default sibling emit an **identical**
+tag vocabulary, so each derives from its measured default arm.
+
+Statically, bwa-mem3's three writers can emit `AS HN MC MD MQ NM pa RG SA XA XG
+XM XR XS`. Two of those — `pa` and non-meth `RG` — are deliberately excluded from
+the allowlist so that their appearance fails the run. There is no production
+constant for them precisely because nothing in production reads one; the
+exclusion is a pinned decision, and
+`test_known_but_unemitted_tags_are_deliberately_not_allowlisted` in
+`tests/test_workflow_config.py` is what pins it.
+
 ### Measuring the policy (`tag-census`)
 
 `tag-census` answers the prior question — *which tags would it be safe to
