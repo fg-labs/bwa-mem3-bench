@@ -33,11 +33,31 @@ class ReleaseAllowance:
     date: str
     summary: str
     expected_drift_pct: float
-    # Additional SHAs that are code-identical to `to_sha` and share its golden,
-    # so no BAMs need re-copying. The canonical use: a release benched on its
-    # release-please branch head (`to_sha`) then squash-merged to a different tag
-    # SHA — the two trees are identical, so the tag is listed here and resolves
-    # to `to_sha`'s golden. Empty for the common single-SHA case.
+    # Additional SHAs that share `to_sha`'s golden, so no BAMs need re-copying.
+    # Listing a SHA here makes `allowance_for()` authorize it and
+    # `canonical_golden_sha()` resolve it to `to_sha`'s golden, so the bar is the
+    # property that actually licenses reusing those BAMs: the two SHAs produce
+    # the SAME OUTPUT. Two ways to establish that, both admissible:
+    #
+    #   1. Tree-identical. The canonical use: a release benched on its
+    #      release-please branch head (`to_sha`) then squash-merged to a
+    #      different tag SHA. Identical trees cannot produce different output,
+    #      so no measurement is needed — cite the shared tree hash.
+    #   2. Output-identical, MEASURED. The SHA carries a real code change, but
+    #      every benchmarked cell was verified to emit identical alignment
+    #      records. This needs the full cell matrix `to_sha` was benched at —
+    #      a partial sweep does not license the alias, because the alias
+    #      authorizes the SHA everywhere, not only where it was checked.
+    #      Cite the cell count and how identity was established.
+    #
+    # For (2), compare the RECORD STREAM (`samtools view` without the header, or
+    # `compare-bams`), never the file checksum: the workflow compresses with
+    # `samtools view -@4`, whose block boundaries vary run to run, so two
+    # byte-different BAMs at the SAME SHA routinely hold identical records. The
+    # header differs by construction too — `@PG` embeds the run path and the
+    # SHA-stamped version string.
+    #
+    # Empty for the common single-SHA case.
     aliases: tuple[str, ...] = ()
 
 
@@ -119,9 +139,13 @@ def canonical_golden_sha(entries: list[ReleaseAllowance], query: str) -> str:
     return that entry's ``to_sha`` (the key ``bless-golden`` stored the BAMs
     under). Otherwise return ``query`` unchanged — a SHA with no alias entry is
     its own golden key, so existing (unaliased) goldens resolve exactly as
-    before. This lets a release referenced by a code-identical alias (e.g. a
-    squash-merged tag) reuse the golden blessed under the benched SHA without
-    re-copying any BAMs.
+    before.
+
+    This lets an aliased release reuse the golden blessed under the benched SHA
+    without re-copying any BAMs, on either of the two footings ``aliases``
+    admits: tree-identical (e.g. a squash-merged tag) or measured
+    record-stream-identical across the full cell matrix. See
+    :class:`ReleaseAllowance` for what each requires.
     """
     match = allowance_for(entries, query)
     return match.to_sha if match is not None else query.strip()
