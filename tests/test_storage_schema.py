@@ -60,6 +60,43 @@ CREATE TABLE comparisons (trial_id INTEGER, kind TEXT, concordant INTEGER, total
 """
 
 
+# A v4 DB: everything through `accuracy`, but no `scaling` table — the state
+# EVERY production DB is in before this schema bump, since SCHEMA_VERSION goes
+# straight from 4 to 6.
+_V4_SCHEMA = (
+    _V3_SCHEMA.replace("PRAGMA user_version = 3;", "PRAGMA user_version = 4;")
+    + """
+CREATE TABLE accuracy (id INTEGER PRIMARY KEY AUTOINCREMENT, fg_labs_sha TEXT,
+    sample TEXT, arch TEXT, rep INTEGER, tool TEXT, placement_total INTEGER,
+    placement_correct_pct REAL, placement_mismapped_pct REAL,
+    placement_unmapped_pct REAL, placement_json TEXT, variant_bearing_reads INTEGER,
+    md_concordant_pct REAL, nm_concordant_pct REAL, by_class_json TEXT,
+    meth_n_cpg INTEGER, meth_pearson_r REAL, meth_rmse REAL,
+    UNIQUE(fg_labs_sha, sample, arch, rep, tool));
+"""
+)
+
+# A v5 DB: has a `scaling` table, but from before the phase-breakdown columns —
+# the one state where the v5→v6 ALTERs are needed.
+_V5_SCHEMA = (
+    _V4_SCHEMA.replace("PRAGMA user_version = 4;", "PRAGMA user_version = 5;")
+    + """
+CREATE TABLE scaling (id INTEGER PRIMARY KEY AUTOINCREMENT, fg_labs_sha TEXT,
+    sample TEXT, arch TEXT, threads INTEGER, rep INTEGER, wall_seconds REAL,
+    cpu_time REAL, max_rss_mb REAL, process_seconds REAL,
+    UNIQUE(fg_labs_sha, sample, arch, threads, rep));
+"""
+)
+
+# The columns the v5→v6 step adds to `scaling`.
+_V6_SCALING_COLUMNS = {
+    "main_mem_seconds",
+    "read_io_seconds",
+    "sam_io_seconds",
+    "kernel_seconds",
+}
+
+
 @pytest.fixture
 def db_path(tmp_path: Path) -> Path:
     return tmp_path / "benchmark.db"
@@ -211,6 +248,52 @@ def test_v3_db_migrates_to_v4_adding_accuracy_table(db_path: Path) -> None:
     (ver,) = conn.execute("PRAGMA user_version").fetchone()
     assert ver == EXPECTED_SCHEMA_VERSION
     assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+    conn.close()
+
+
+def test_v4_db_migrates_to_v6_without_altering_a_fresh_scaling_table(db_path: Path) -> None:
+    """A v4 DB gets `scaling` from executescript, so the v6 ALTERs must NOT run.
+
+    This is the state every production DB is in — SCHEMA_VERSION jumps 4 → 6 —
+    so a migration guard that also matched v4 would raise "duplicate column
+    name" on the very first `connect()` after upgrading. Every other migration
+    test starts from a fresh v0 DB, which is how that slipped through.
+    """
+    raw = sqlite3.connect(db_path)
+    raw.executescript(_V4_SCHEMA)
+    raw.execute("INSERT INTO runs(fg_labs_sha, status) VALUES ('old', 'complete')")
+    raw.commit()
+    raw.close()
+
+    conn = connect(db_path)
+    assert "scaling" in _tables(conn)
+    assert _columns(conn, "scaling") >= _V6_SCALING_COLUMNS
+    (ver,) = conn.execute("PRAGMA user_version").fetchone()
+    assert ver == EXPECTED_SCHEMA_VERSION
+    assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+    conn.close()
+
+
+def test_v5_db_migrates_to_v6_adding_the_phase_columns(db_path: Path) -> None:
+    """A v5 DB owns a phase-less `scaling` table, so the v6 ALTERs must run."""
+    raw = sqlite3.connect(db_path)
+    raw.executescript(_V5_SCHEMA)
+    raw.execute("INSERT INTO runs(fg_labs_sha, status) VALUES ('old', 'complete')")
+    raw.execute(
+        "INSERT INTO scaling(fg_labs_sha, sample, arch, threads, rep, wall_seconds) "
+        "VALUES ('old', 'wgs-5M', 'c8g64', 16, 1, 92.5)"
+    )
+    raw.commit()
+    raw.close()
+
+    conn = connect(db_path)
+    assert _columns(conn, "scaling") >= _V6_SCALING_COLUMNS
+    (ver,) = conn.execute("PRAGMA user_version").fetchone()
+    assert ver == EXPECTED_SCHEMA_VERSION
+    # The pre-existing rung survives, with NULL phases until it is re-ingested.
+    assert conn.execute(
+        "SELECT wall_seconds, kernel_seconds FROM scaling WHERE fg_labs_sha = 'old'"
+    ).fetchone() == (92.5, None)
     conn.close()
 
 

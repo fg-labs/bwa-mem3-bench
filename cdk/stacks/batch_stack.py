@@ -36,6 +36,20 @@ ARCHS: tuple[ArchSpec, ...] = (
     # identical hardware. Replaces earlier r7i.4xlarge choice — r7i was noisier
     # (σ/μ up to 55%) and the extra 128 GB was unused.
     ArchSpec("M7i", "m7i", "m7i.4xlarge", "linux/amd64"),
+    # c8g64: Graviton4 at 64 vCPU, used ONLY by the thread-scaling ladder
+    # (`--target thread_scaling`), never by the cross-arch sweep — it is absent
+    # from `full_archs` in config/archs.yaml.
+    #
+    # A 16xlarge rather than a per-thread-count right-size because strong-scaling
+    # efficiency is only meaningful on fixed hardware (different instance sizes
+    # get different shares of memory bandwidth and L3, which is what bounds
+    # bwa-mem's scaling), and because hg38 needs ~16.5 GB resident while c8g is
+    # 2 GiB/vCPU — so c8g.4xlarge is already the smallest c8g that can run the
+    # aligner at all and nothing below 16 threads could be right-sized anyway.
+    #
+    # Graviton4 has no SMT (ThreadsPerCore=1), so 64 vCPU is 64 physical cores
+    # and the scaling curve has no hyperthreading knee at 32.
+    ArchSpec("C8g64", "c8g64", "c8g.16xlarge", "linux/arm64"),
 )
 
 
@@ -109,6 +123,28 @@ class BatchStack(cdk.Stack):
                     ),
                 )
             ],
+            # IMDS must be reachable FROM INSIDE the task container, not just
+            # from the host: `emit-host-meta` (docker/emit-host-meta.sh, run by
+            # `align_fg_labs` in workflow/rules/align.smk) records instance-type /
+            # AZ / instance-id so a timing difference between two runs can be
+            # attributed to a host rather than guessed at.
+            #
+            # A container sits one network hop further from IMDS than the host,
+            # and the default HttpPutResponseHopLimit of 1 drops the IMDSv2
+            # token PUT before it arrives — so the container can never obtain a
+            # token no matter how the request is written. 2 is the documented
+            # minimum for containerized workloads.
+            #
+            # Without this the metadata silently degrades to "unknown"; it does
+            # not fail the job, which is exactly why the previous IMDSv1 bug
+            # went unnoticed for the entire history of the project.
+            http_put_response_hop_limit=2,
+            # The widened hop limit puts IMDS in reach of anything running in the
+            # container, so pair it with REQUIRED: a tokenless IMDSv1 GET could
+            # otherwise read the instance role's credentials from in there. Both
+            # consumers already speak IMDSv2 — emit-host-meta does the token PUT
+            # itself, and the ECS agent on AL2023 uses v2.
+            http_tokens=ec2.LaunchTemplateHttpTokens.REQUIRED,
         )
         cdk.Tags.of(launch_template).add("Project", project_name)
         if cost_center:

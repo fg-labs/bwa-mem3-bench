@@ -14,6 +14,39 @@ threads: 16
 reps_default: 1
 reps_baseline: 5
 
+# Thread-scaling ladder (`--target thread_scaling`, part of `bless_release`).
+#
+# Strong-scaling efficiency E(n) = T(1) / (n * T(n)) is only meaningful on FIXED
+# hardware, so the entire ladder runs as ONE Batch job on ONE host: every point
+# shares a machine, which removes host-to-host variance (the dominant noise
+# source here) and acquires one spot instance instead of seven.
+#
+# `arch` is c8g64 (c8g.16xlarge) because Graviton4 has no SMT — 64 vCPU is 64
+# physical cores, so the curve has no hyperthreading knee. A 64-vCPU x86 host is
+# 32 physical + SMT and would bend at 32 for reasons unrelated to the aligner.
+#
+# `reps` is deliberately uneven. A 1-thread run is ~16x the wall of a 16-thread
+# run and dominates the ladder's cost, while the high thread counts are what the
+# gate actually reads — so replication is spent where it buys precision.
+thread_scaling:
+  sample: wgs-5M
+  arch: c8g64
+  ladder:
+    - {threads: 1, reps: 1}
+    - {threads: 2, reps: 1}
+    - {threads: 4, reps: 2}
+    - {threads: 8, reps: 2}
+    - {threads: 16, reps: 3}
+    - {threads: 32, reps: 3}
+    - {threads: 64, reps: 3}
+  # Gate tolerance, in percentage points of efficiency, against the PREVIOUS
+  # RELEASE's measured ladder — not against invented absolute targets. Absolute
+  # thresholds would be guesses until we have a first measurement; a
+  # release-over-release comparison is both calibrated and consistent with how
+  # Gate #2 (vs-golden) already works. A point may lose at most this much
+  # efficiency before `bench regression` fails the bless.
+  max_efficiency_drop_pp: 3.0
+
 references:
   hg38:
     key: references/hg38/

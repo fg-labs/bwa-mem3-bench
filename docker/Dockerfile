@@ -339,3 +339,8 @@ COPY docker/build-arg-defaults.env /opt/docker/build-arg-defaults.env
 # definition passes the entrypoint script directly (its shebang makes it runnable).
 COPY docker/coordinator-entrypoint.sh /usr/local/bin/coordinator-entrypoint.sh
 RUN chmod +x /usr/local/bin/coordinator-entrypoint.sh
+
+# Host-identity capture, invoked from inside the align rules (NOT as a separate
+# snakemake rule — see the script header for why that records the wrong machine).
+COPY docker/emit-host-meta.sh /usr/local/bin/emit-host-meta
+RUN chmod +x /usr/local/bin/emit-host-meta

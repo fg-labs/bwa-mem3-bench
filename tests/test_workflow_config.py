@@ -8,10 +8,14 @@ import pytest
 from bwa_mem3_bench.workflow_config import (
     Arch,
     Sample,
+    ThreadScaling,
     WorkflowConfig,
     _as_bool,
+    _as_positive_int,
     _as_str_list,
+    _thread_scaling_from,
     load_config,
+    parse_ladder_override,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -348,3 +352,107 @@ def test_as_str_list_rejects_scalar_string() -> None:
 def test_as_str_list_rejects_non_string_elements() -> None:
     with pytest.raises(ValueError, match="fg_labs_flags"):
         _as_str_list("s", "fg_labs_flags", [1, 2])
+
+
+def test_as_positive_int_accepts_an_int() -> None:
+    assert _as_positive_int("ladder entry", "threads", 16) == EXPECTED_THREADS
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        16.9,  # would silently TRUNCATE to 16 under int()
+        "16",  # a quoted YAML scalar
+        True,  # bool subclasses int; int(True) == 1
+        0,  # a rung of zero threads is not a rung
+        -1,
+        None,
+    ],
+)
+def test_as_positive_int_rejects_anything_int_like(value: object) -> None:
+    """The point of the loader is to fail loudly, not to coerce."""
+    with pytest.raises(ValueError, match="must be an integer >= 1"):
+        _as_positive_int("ladder entry", "threads", value)
+
+
+def _thread_scaling_yaml(**overrides: object) -> dict[str, object]:
+    """A minimal valid `thread_scaling` block, with keys overridable per test."""
+    return {
+        "sample": "wgs-5M",
+        "arch": "c8g64",
+        "ladder": [{"threads": 1, "reps": 1}, {"threads": 16, "reps": 3}],
+        "max_efficiency_drop_pp": 3.0,
+        **overrides,
+    }
+
+
+def _thread_scaling(**overrides: object) -> ThreadScaling:
+    cfg = load_config(CONFIG_DIR)
+    return _thread_scaling_from(
+        _thread_scaling_yaml(**overrides), samples=cfg.samples, archs=cfg.archs
+    )
+
+
+def test_thread_scaling_accepts_a_well_formed_ladder() -> None:
+    scaling = _thread_scaling()
+    assert [(step.threads, step.reps) for step in scaling.ladder] == [(1, 1), (16, 3)]
+    assert scaling.max_threads == EXPECTED_THREADS
+
+
+@pytest.mark.parametrize(
+    "ladder",
+    [
+        [{"threads": 1, "reps": 1}, {"threads": 16.9, "reps": 3}],  # truncates to 16
+        [{"threads": 1, "reps": 1}, {"threads": 16, "reps": True}],  # bool -> 1 rep
+        [{"threads": 1, "reps": 1}, {"threads": "16", "reps": 3}],  # quoted scalar
+        [{"threads": 1, "reps": 0}],  # zero reps measures nothing
+    ],
+)
+def test_thread_scaling_rejects_non_integer_ladder_values(ladder: object) -> None:
+    """A mistyped rung must fail at load time, not an hour into a spot job."""
+    with pytest.raises(ValueError, match="must be an integer >= 1"):
+        _thread_scaling(ladder=ladder)
+
+
+@pytest.mark.parametrize("drop", [True, "3.0", -1.0, float("nan"), float("inf")])
+def test_thread_scaling_rejects_a_non_numeric_tolerance(drop: object) -> None:
+    """The tolerance gates releases; a coerced value gates against the wrong number.
+
+    `nan` and `inf` are numeric and not `< 0`, so a plain range check lets them
+    through: `nan` makes every comparison false (the gate never fires) and `inf`
+    makes it unbounded (the gate can never fail). Both silently disable Gate #3.
+    """
+    with pytest.raises(ValueError, match="max_efficiency_drop_pp"):
+        _thread_scaling(max_efficiency_drop_pp=drop)
+
+
+def test_parse_ladder_override_parses_and_sorts_rungs() -> None:
+    steps = parse_ladder_override("64:3, 16:3,32:3")
+    assert [(step.threads, step.reps) for step in steps] == [(16, 3), (32, 3), (64, 3)]
+
+
+def test_parse_ladder_override_allows_omitting_the_one_thread_rung() -> None:
+    """Skipping T(1) is the whole point of the override; the gate no-ops instead."""
+    assert [step.threads for step in parse_ladder_override("16:3,64:3")] == [16, 64]
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "16",  # missing `:reps`
+        "16:",  # empty reps
+        "sixteen:3",
+        "16.9:3",  # would truncate
+        "16:3:1",  # too many fields
+        "0:3",  # zero threads
+        "16:0",  # zero reps
+        "-16:3",
+        "",  # no rungs at all
+        ",",
+        "16:3,16:1",  # duplicate thread count
+    ],
+)
+def test_parse_ladder_override_rejects_a_malformed_spec(spec: str) -> None:
+    """These tokens are pasted into the rule's shell loop; reject them up front."""
+    with pytest.raises(ValueError, match="ladder override"):
+        parse_ladder_override(spec)

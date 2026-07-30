@@ -50,6 +50,10 @@ CONFIG_ARGS="fg_labs_sha=${FG_LABS_SHA}"
 [[ -n "${REPS:-}" ]]       && CONFIG_ARGS="${CONFIG_ARGS} reps=${REPS}"
 [[ -n "${SAMPLES:-}" ]]    && CONFIG_ARGS="${CONFIG_ARGS} samples=${SAMPLES}"
 [[ -n "${GOLDEN_REF_SHA:-}" ]] && CONFIG_ARGS="${CONFIG_ARGS} golden_ref_sha=${GOLDEN_REF_SHA}"
+# Ad-hoc thread-scaling ladder, e.g. LADDER="16:3,32:3,64:3" to probe only
+# the high thread counts. Omitting the 1-thread rung means no efficiency is
+# computable, so Gate #3 no-ops for that run by design.
+[[ -n "${LADDER:-}" ]]     && CONFIG_ARGS="${CONFIG_ARGS} ladder=${LADDER}"
 [[ -n "${IMAGE_TAG:-}" ]]  && CONFIG_ARGS="${CONFIG_ARGS} image_tag=${IMAGE_TAG}"
 # Thread the bucket through snakemake config so worker jobs resolve it too.
 # Workers re-parse the Snakefile but their job definitions don't carry this
@@ -66,8 +70,25 @@ python -m bwa_mem3_bench.cli render-profile \
     --template /opt/workflow/profiles/aws-batch/config.yaml.template \
     --output /opt/workflow/profiles/aws-batch/config.yaml
 
+# --cores is REQUIRED here, and must be large. Snakemake clamps every rule's
+# `threads` to the core count, and when --cores is omitted it resolves to the
+# LOCAL core count — which on this coordinator is a c6a.large, i.e. 2 vCPUs.
+# Our snakemake-executor-plugin-aws-batch fork derives each worker's Batch VCPU
+# requirement from `threads`, so without this every 16-thread alignment was
+# submitted as a 2-vCPU job and Batch happily packed several onto one host.
+#
+# Observed directly: with this flag absent, `align_fg_labs` (threads: 16) was
+# submitted as VCPU=2 on a real run, even though a local `--dry-run` on a
+# 12-core laptop reported `threads: 16` — dry-run does not apply the clamp, so
+# this cannot be caught without submitting a real job.
+#
+# The value only governs the coordinator's own resource accounting; actual
+# worker concurrency is capped by `jobs:` in the profile. It must exceed the
+# largest `threads:` any rule declares (currently 64, the thread-scaling
+# ladder), so pick a value well clear of that.
 exec snakemake \
     -s /opt/workflow/Snakefile \
     --profile /opt/workflow/profiles/aws-batch \
+    --cores 256 \
     --config ${CONFIG_ARGS} \
     -- "${TARGET}"

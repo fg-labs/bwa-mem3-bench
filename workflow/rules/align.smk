@@ -214,13 +214,39 @@ rule align_fg_labs:
         # in the same format; we redirect bwa's stderr only (samtools' stderr
         # still goes to the worker log).
         bwa_stderr = "runs/{sha}/{sample}/{arch}/rep-{rep}/benchmarks/bwa.stderr.log",
+        # Host identity is produced HERE, not by a separate rule. The old
+        # `emit_meta` rule was a localrule, so it ran on the coordinator and
+        # recorded the coordinator's instance (a c6a.large) for jobs that
+        # actually ran on m7i workers — and two different workers reported the
+        # same instance_id. Only writing it in this shell body guarantees the
+        # metadata describes the machine that ran the alignment.
+        meta = "runs/{sha}/{sample}/{arch}/rep-{rep}/benchmarks/meta.json",
     resources:
         batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
         mem_mb = lambda wc: _mem_mb_for(wc.sample),
         shared_memory_size_mb = lambda wc: _shm_size_mb_for(wc.sample),
         container_image = lambda wc: image_for_arch(wc.arch),
+    # Declared as a snakemake `threads:` directive, NOT a param, because our
+    # snakemake-executor-plugin-aws-batch fork derives the Batch job's VCPU
+    # resourceRequirement from it (batch_job_builder.py: `vcpu = max(1,
+    # job.threads ...)`). As a bare param the aligner still ran `-t 16` while
+    # Batch was told the job needed ONE vCPU, so Batch packed by memory alone.
+    # On the 32 GB *.4xlarge archs the 28 GB request incidentally kept that to
+    # one job per host, but m7i.4xlarge has 64 GB — so TWO non-meth alignments
+    # landed on one 16-vCPU host and each ran 16 threads against 8 effective
+    # CPUs. Measured on the 394f8f8 sweep: m7i mean_load fell 1494 -> 792 and
+    # parallel efficiency 93% -> 50% on wgs-5M/wes-5M, inflating wall by
+    # 63-96% while cpu_time FELL. meth was immune (its 48 GB request cannot
+    # double-pack), which is what identified the mechanism.
+    #
+    # NOTE: the directive alone is not enough — snakemake then clamps `threads`
+    # to the core count, and with `--cores` OMITTED that resolves to the
+    # coordinator's own 2 vCPUs, so this rule was submitted as VCPU=2 anyway.
+    # coordinator-entrypoint.sh therefore passes an explicit `--cores`, and the
+    # profile's `jobs:` (a second clamp) must likewise clear the largest
+    # `threads:` any rule declares. tests/test_thread_packing.py pins all three.
+    threads: CONFIG.threads
     params:
-        threads = CONFIG.threads,
         extra   = lambda wc: _fg_labs_flags(wc.sample),
         mem_flags = lambda wc: _mem_flags(wc.sample),
         is_meth = lambda wc: "1" if _is_meth(wc.sample) else "0",
@@ -247,6 +273,17 @@ rule align_fg_labs:
         r"""
         set -euo pipefail
         mkdir -p $(dirname {output.bam}) $(dirname {output.timing})
+        # Record the host BEFORE aligning, so the identity is captured even if
+        # the alignment is later killed (e.g. spot reclaim) and the artifact is
+        # inspected post-mortem.
+        #
+        # Unguarded on purpose: under `set -e` a non-zero exit here would abort
+        # the alignment before any work starts, so emit-host-meta guarantees a
+        # valid record and exit 0 for every environmental failure (no IMDS, no
+        # curl, no python3) and reserves non-zero for a malformed ARGUMENT list,
+        # which is a workflow bug that must not reach a worker quietly.
+        # tests/test_host_metadata.py pins both halves of that contract.
+        emit-host-meta "{wildcards.sha}" "{wildcards.sample}" "{wildcards.arch}" "{wildcards.rep}" > {output.meta}
         if [ "{params.is_meth}" = "1" ]; then
             bwa-mem2.fg-labs shm --meth {input.ref[0]}
             trap 'bwa-mem2.fg-labs shm -d || true' EXIT
@@ -265,7 +302,7 @@ rule align_fg_labs:
         # untouched; a crashed aligner leaves a truncated/empty `.raw` that the
         # record-count check below rejects.
         tricorder --out {output.timing} -- \
-            bash -c 'set -o pipefail; bwa-mem2.fg-labs mem -t {params.threads} {params.mem_flags} {params.extra} \
+            bash -c 'set -o pipefail; bwa-mem2.fg-labs mem -t {threads} {params.mem_flags} {params.extra} \
                 --bam=0 -o "{output.bam}.raw" \
                 {input.ref[0]} {input.fastqs} 2>"{output.bwa_stderr}"'
         # Defense in depth: reject a header-only BAM even if the aligner exited 0.
@@ -316,8 +353,12 @@ rule align_baseline:
         batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
         mem_mb = lambda wc: _mem_mb_for(wc.sample),
         container_image = lambda wc: image_for_arch(wc.arch),
+    # See align_fg_labs: `threads:` (not a param) so the executor plugin
+    # reserves the vCPUs the aligner actually uses. The baseline must match the
+    # fg-labs rule exactly or the two arms would be timed under different
+    # contention, breaking the speedup comparison.
+    threads: CONFIG.threads
     params:
-        threads = CONFIG.threads,
         binary  = lambda wc: _baseline_bwa_bin(wc.sample),
         mem_flags = lambda wc: _mem_flags(wc.sample),
         # Index sidecar prefix to warm. Meth samples use the doubled-c2t
@@ -350,14 +391,14 @@ rule align_baseline:
             # `set -o pipefail`: a SIGKILL'd aligner must fail the pipeline, not
             # let samtools exit 0 on a partial header stream (see align_fg_labs).
             tricorder --out {output.timing} -- \
-                bash -c 'set -o pipefail; bwameth.py --threads {params.threads} --reference {input.ref[0]} \
+                bash -c 'set -o pipefail; bwameth.py --threads {threads} --reference {input.ref[0]} \
                     {input.fastqs} 2>"{output.bwa_stderr}" \
                   | samtools view -@4 -u -o {output.bam}.raw -'
         else
             # `mem_flags` (e.g. -K for Hi-C) applied here too so the baseline
             # matches the fg-labs invocation and concordance stays symmetric.
             tricorder --out {output.timing} -- \
-                bash -c 'set -o pipefail; {params.binary} mem -t {params.threads} {params.mem_flags} \
+                bash -c 'set -o pipefail; {params.binary} mem -t {threads} {params.mem_flags} \
                     {input.ref[0]} {input.fastqs} 2>"{output.bwa_stderr}" \
                   | samtools view -@4 -u -o {output.bam}.raw -'
         fi

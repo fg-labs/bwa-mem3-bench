@@ -261,6 +261,89 @@ from `arch.baseline_arch` in `config/archs.yaml`:
   is fine. Likely cause: AWS spot host quality varies more in those
   pools, plus m7i specifically shows lower mean_load (840 vs 1119-1293
   elsewhere), suggesting it also has worse multi-tenant noise.
+  **Correction (2026-07-24):** that "worse multi-tenant noise" reading was
+  wrong. The low m7i mean_load was OUR OWN two jobs sharing a host —
+  align jobs requested 1 vCPU while running `-t 16`, so Batch packed by
+  memory alone and two 28 GB non-meth jobs fit on the 64 GB m7i.4xlarge.
+  Caught red-handed in the 394f8f8 sweep: of five wgs-5M/m7i reps, four
+  ran at mean_load ~780 (~8 CPUs) and one ran alone at 1521 with LESS
+  THAN HALF the wall (104.6 s vs 199-239 s). Meth was immune because its
+  48 GB request cannot double-pack. Fixed by the `threads:` directive plus
+  `--cores`; see the vCPU-clamping gotcha below.
+
+- **Non-overlapping rep ranges are NOT evidence of a real cross-SHA
+  effect.** Rep spread measures variance *within one run, on whatever
+  hosts that run happened to get*. A cross-SHA comparison is a cross-RUN,
+  cross-HOST comparison made days or weeks apart, and rep ranges say
+  nothing about that uncertainty. This misled a whole investigation: c6a
+  hic-1M showed 0.7.0 at 25.5-26.1 s and main at 27.2-30.3 s — tight,
+  non-overlapping, apparently a solid +7.5% regression. Bare-metal
+  reproduction showed main is 2.2-4.5% **faster** at every SIMD tier. The
+  Batch delta was substrate, not codegen. Same lesson as the #92 note
+  above; it recurs because the tight ranges look so convincing.
+
+- **Reproduce on bare metal with INTERLEAVED runs and discarded warmups.**
+  Two traps beyond the #92 protocol. (1) Absolute Batch numbers are not
+  comparable to bare metal at all — Batch added ~22% for v0.7.0 and ~36%
+  for main on identical binaries. Only within-host deltas mean anything.
+  (2) Running all of binary A's reps then all of binary B's lets page-cache
+  warming masquerade as a difference: the first series drifted 23.92 ->
+  21.13 s while the second sat flat at ~20.5, which would have "proved"
+  B faster on ordering alone. Prewarm, discard the first N runs, then
+  ALTERNATE A/B within each rep so residual drift hits both equally.
+
+- **Snakemake silently clamps `threads`, and `--dry-run` will not show
+  it.** Our executor fork derives a Batch job's VCPU from `threads`
+  (`vcpu = max(1, job.threads ...)`), so anything that shrinks `threads`
+  shrinks the vCPU reservation and lets Batch over-pack hosts. THREE
+  independent clamps: (a) `threads` declared as `params.threads` is
+  invisible to the executor entirely (VCPU=1); (b) `--cores`, which when
+  OMITTED defaults to the coordinator's own core count — a c6a.large, so
+  every 16-thread alignment was submitted as **VCPU=2**; (c) `--jobs`,
+  which capped the scaling ladder's `threads: 64` at 50. None of this is
+  visible to `--dry-run`, which prints the unclamped rule value: a 12-core
+  laptop reported `threads: 16` for the rule a real submission turned into
+  VCPU=2. **Only a submitted job reveals the true reservation** — check
+  `describe-jobs ... container.resourceRequirements` after any change that
+  touches threads, cores, or jobs. `tests/test_thread_packing.py` pins all
+  three invariants.
+
+- **`emit_meta` recorded nothing for the project's entire history.** It
+  issued a tokenless IMDSv1 GET; AL2023 enforces IMDSv2, and `curl -s`
+  ignores HTTP status and exits 0, so the `|| echo local` fallback never
+  fired and an empty string was written. Every `meta.json` before
+  2026-07-24 has `instance_type: ""` / `availability_zone: ""`, which is
+  exactly why the c6a investigation above could not be settled by
+  attribution. Fixed with an IMDSv2 token PUT, `curl -sf`, a captured
+  `instance-id`, and `HttpPutResponseHopLimit=2` on the launch template
+  (a container sits one hop further from IMDS than the host, so the token
+  PUT is dropped at the default limit of 1). Metadata still degrades to
+  `unknown` rather than failing the job — which is why this went unnoticed
+  so long, so verify a real worker's `meta.json` after touching it.
+
+- **bwa-mem3's FASTQ reader does not scale — but it is overlapped, so it does
+  NOT inflate `PROCESS()`.** `src/fast_reader.c` is a single-threaded
+  decompress+parse loop, and it measures dead flat: **7.27 / 7.12 / 7.25 s at
+  t=16 / 32 / 64** (c8g.16xlarge, wgs-5M, bare metal, index pinned in
+  /dev/shm, 2 reps, spread <0.1 %). Only 0.12 s of that is disk wait with a
+  warm page cache — it is CPU work, not IO. The tempting conclusion, that a
+  flat 7 s inside a 25 s `PROCESS()` at t=64 makes the efficiency number
+  meaningless, is **wrong**: bwa-mem3 runs a 3-step read/process/write
+  pipeline with 3 workers, so reading overlaps compute and is not additive.
+  The compute step scales 92.65 -> 46.51 -> 24.21 s, and only ~1.6 s of
+  read+write is left unhidden as fill/drain at t=64 — reading is ~6 % of
+  `PROCESS()`, not ~50 %. Core utilization inside the compute step is
+  98.8 / 98.1 / 95.6 %, and kernel time scales 48.30 -> 12.67 s (95.3 %),
+  independently corroborating that the efficiency dip at 64 threads is real
+  compute-side loss rather than an IO artifact. Two caveats that ARE real:
+  (a) `PROCESS()`-based efficiency understates pure kernel scaling by ~5 pp at
+  t=64 (90.5 % vs 95.3 % over 16->64) because of that flat fill/drain, so call
+  it pipeline efficiency, never kernel efficiency; (b) the flat read stage
+  becomes binding once the compute step falls below it, extrapolating to
+  **t ~ 256** — re-measure the phase breakdown before extending the ladder
+  past ~128 threads. Note also that the 256 M-base chunk cap engages at
+  t >= 26, so t=32 and t=64 use identical chunking (identical output bytes)
+  while t=16 differs — expected, per the cap's comment in `fastmap.cpp`.
 
 ## Known issues
 

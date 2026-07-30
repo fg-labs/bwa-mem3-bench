@@ -76,8 +76,12 @@ rule align_minibwa:
         # `.mbw`) is fine at 28 GB.
         mem_mb = lambda wc: 48000 if _is_meth_sample(wc.sample) else 28000,
         container_image = lambda wc: image_for_arch(wc.arch),
+    # See align_fg_labs: a `threads:` directive (not a param) so the executor
+    # plugin reserves the vCPUs minibwa actually uses. minibwa is the wall-time
+    # probe the bwa-mem3 numbers are quoted against, so it must be scheduled
+    # under the same one-alignment-per-host contention as the other two arms.
+    threads: CONFIG.threads
     params:
-        threads = CONFIG.threads,
         # Sample `mem_flags` translated to minibwa's CLI (see
         # Sample.minibwa_flags). Empty for most samples; for hic-1M this is
         # `-5 -P --rescue=0` — the minibwa equivalent of the bwa `-5 -S -P` the
@@ -121,7 +125,7 @@ rule align_minibwa:
         # baseline rules so the wall-time comparison isn't skewed by a
         # compression step the aligner's real downstream (sort/zipper) discards.
         tricorder --out {output.timing} -- \
-            bash -c 'set -o pipefail; minibwa map -t {params.threads} {params.flags} {params.meth_flag} \
+            bash -c 'set -o pipefail; minibwa map -t {threads} {params.flags} {params.meth_flag} \
                 {input.ref[0]} {input.fastqs} \
                 2> >(tee "{output.minibwa_stderr}" >&2) \
               | samtools view -@4 -u -o {output.bam}.raw -'

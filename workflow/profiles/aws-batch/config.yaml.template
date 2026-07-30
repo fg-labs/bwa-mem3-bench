@@ -39,7 +39,16 @@ storage-s3-region: ${AWS_REGION}
 default-resources:
   mem_mb: 28000
   runtime: 7200
-jobs: 50
+# Max concurrent Batch jobs AND, in remote-executor mode, the ceiling snakemake
+# clamps every rule's `threads` to. That second role is the binding one here:
+# `align_thread_scaling` requests `threads: 64` to reserve a whole c8g.16xlarge,
+# and with `jobs: 50` snakemake silently handed it `threads: 50` — a 50-vCPU
+# reservation that only keeps the host exclusive by arithmetic accident
+# (2 x 50 > 64). Lowering this below the ladder's max thread count would let two
+# ladder jobs share a host and corrupt every point on the curve, so it must stay
+# >= `thread_scaling.ladder`'s largest rung. tests/test_thread_packing.py pins
+# that invariant.
+jobs: 64
 max-jobs-per-second: 5
 latency-wait: 60
 use-conda: false

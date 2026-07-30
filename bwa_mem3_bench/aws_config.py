@@ -55,9 +55,13 @@ def load() -> AwsConfig:
     )
 
     project_name = "bwa-mem3-bench"
-    # Must stay in sync with cdk/stacks/batch_stack.py ARCHS tuple — kill-all
-    # and watch iterate this to enumerate project-owned Batch queues.
-    archs = ("c8g", "c7g", "c6a", "c7i", "c7a", "m7i")
+    # MUST stay in sync with ARCHS in cdk/stacks/batch_stack.py — `aws kill-all`
+    # only terminates jobs in the queues listed here, so a queue missing from
+    # this tuple is silently skipped and its workers keep running (and billing).
+    # c8g64 is the thread-scaling ladder's queue; it is deliberately absent from
+    # `full_archs` in config/archs.yaml (not part of the cross-arch sweep) but
+    # its jobs still need to be killable.
+    archs = ("c8g", "c7g", "c6a", "c7i", "c7a", "m7i", "c8g64")
     worker_queues = tuple(
         batch.get(f"Queue{arch[0].upper()}{arch[1:].upper()}") or f"{project_name}-{arch}"
         for arch in archs

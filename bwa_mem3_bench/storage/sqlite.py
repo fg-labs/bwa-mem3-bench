@@ -17,9 +17,17 @@ EXPECTED_SCHEMA_VERSION = SCHEMA_VERSION
 #   v2 → v3: added comparisons.supp_json (compare-bams supplementary metrics).
 #   v3 → v4: added the `accuracy` table (holodeck truth-based eval) — a new
 #            table, so no ALTER is needed; executescript creates it in place.
+#   v4 → v5: added the `scaling` table (thread-scaling ladder) — likewise a new
+#            table, created in place by executescript, no ALTER needed.
+#   v5 → v6: added scaling.{main_mem,read_io,sam_io,kernel}_seconds — the phase
+#            breakdown from the aligner's runtime profile. Column additions, so
+#            these DO need ALTER for a DB already carrying v5 scaling rows.
+# Only versions whose step needs an ALTER get a constant; v4 does not (its step
+# added a whole table).
 _SCHEMA_V1 = 1
 _SCHEMA_V2 = 2
 _SCHEMA_V3 = 3
+_SCHEMA_V5 = 5
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -58,6 +66,19 @@ def connect(db_path: Path) -> sqlite3.Connection:
         conn.execute("ALTER TABLE trials ADD COLUMN index_read_seconds REAL")
     if existing_version <= _SCHEMA_V2:
         conn.execute("ALTER TABLE comparisons ADD COLUMN supp_json TEXT")
+    # v5 -> v6. EXACTLY v5, not "v5 or older": a DB predating v5 has no `scaling`
+    # table of its own, so the executescript above CREATEd it fresh at the
+    # current schema — already carrying these four columns. ALTERing them onto
+    # that table raises "duplicate column name". Only a DB that already holds a
+    # v5-era `scaling` table is missing them.
+    if existing_version == _SCHEMA_V5:
+        for column in (
+            "main_mem_seconds",
+            "read_io_seconds",
+            "sam_io_seconds",
+            "kernel_seconds",
+        ):
+            conn.execute(f"ALTER TABLE scaling ADD COLUMN {column} REAL")
     if existing_version < EXPECTED_SCHEMA_VERSION:
         conn.execute(f"PRAGMA user_version = {EXPECTED_SCHEMA_VERSION}")
         conn.commit()
@@ -263,6 +284,66 @@ def upsert_comparison(  # noqa: PLR0913
             supp_json = excluded.supp_json
         """,
         (trial_id, kind, concordant, total, concordance_pct, by_class_json, supp_json),
+    )
+    if commit:
+        conn.commit()
+
+
+def upsert_scaling(  # noqa: PLR0913
+    conn: sqlite3.Connection,
+    *,
+    fg_labs_sha: str,
+    sample: str,
+    arch: str,
+    threads: int,
+    rep: int,
+    wall_seconds: float | None,
+    cpu_time: float | None,
+    max_rss_mb: float | None,
+    process_seconds: float | None,
+    main_mem_seconds: float | None = None,
+    read_io_seconds: float | None = None,
+    sam_io_seconds: float | None = None,
+    kernel_seconds: float | None = None,
+    commit: bool = True,
+) -> None:
+    """Insert or update one rung of a thread-scaling ladder.
+
+    Keyed on (sha, sample, arch, threads, rep) so re-ingesting a run is
+    idempotent, matching how `upsert_trial` behaves for the standard sweep.
+    """
+    conn.execute(
+        """
+        INSERT INTO scaling
+            (fg_labs_sha, sample, arch, threads, rep,
+             wall_seconds, cpu_time, max_rss_mb, process_seconds,
+             main_mem_seconds, read_io_seconds, sam_io_seconds, kernel_seconds)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(fg_labs_sha, sample, arch, threads, rep) DO UPDATE SET
+            wall_seconds = excluded.wall_seconds,
+            cpu_time = excluded.cpu_time,
+            max_rss_mb = excluded.max_rss_mb,
+            process_seconds = excluded.process_seconds,
+            main_mem_seconds = excluded.main_mem_seconds,
+            read_io_seconds = excluded.read_io_seconds,
+            sam_io_seconds = excluded.sam_io_seconds,
+            kernel_seconds = excluded.kernel_seconds
+        """,
+        (
+            fg_labs_sha,
+            sample,
+            arch,
+            threads,
+            rep,
+            wall_seconds,
+            cpu_time,
+            max_rss_mb,
+            process_seconds,
+            main_mem_seconds,
+            read_io_seconds,
+            sam_io_seconds,
+            kernel_seconds,
+        ),
     )
     if commit:
         conn.commit()

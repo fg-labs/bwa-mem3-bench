@@ -19,7 +19,7 @@ from pathlib import Path
 # Make the Python package importable from the repo root.
 sys.path.insert(0, str(Path(workflow.basedir).parent))
 
-from bwa_mem3_bench.workflow_config import load_config
+from bwa_mem3_bench.workflow_config import load_config, parse_ladder_override
 
 
 CONFIG = load_config(Path(workflow.basedir).parent / "config")
@@ -118,13 +118,21 @@ wildcard_constraints:
 
 include: "rules/align.smk"
 include: "rules/compare.smk"
-include: "rules/benchmark.smk"
 include: "rules/align_minibwa.smk"
 include: "rules/eval.smk"
+include: "rules/scaling.smk"
 
 
 # Aggregator targets have no shell body, so they always run on the coordinator.
-# `emit_meta` is a tiny JSON write — no point burning a c8g.4xlarge spin-up for it.
+#
+# NOTE: host metadata is deliberately NOT a localrule (and no longer a rule at
+# all). The old `emit_meta` lived here for cost reasons — "a tiny JSON write, no
+# point burning a worker spin-up" — but running on the coordinator meant it
+# recorded the COORDINATOR's instance identity, so an m7i job reported
+# `instance_type: c6a.large` and two different m7i workers shared one
+# instance_id. It is now written by the align rules themselves via
+# `emit-host-meta`, which is the only place guaranteed to be the machine that
+# ran the alignment.
 localrules:
     all,
     baseline_all,
@@ -138,7 +146,7 @@ localrules:
     fast,
     fast_meth,
     fast_smoke,
-    emit_meta,
+    thread_scaling,
 
 
 def _is_meth_sample(sample_name: str) -> bool:
@@ -398,6 +406,17 @@ rule all:
         ],
 
 
+def _thread_scaling_target() -> str:
+    """The thread-scaling ladder's single output (see rules/scaling.smk).
+
+    Sample and arch come from `thread_scaling` in config/defaults.yaml rather
+    than the run's --config samples/archs: the ladder is a fixed, gated
+    measurement on one pinned low-noise host, not part of the cross-arch sweep.
+    """
+    ts = CONFIG.thread_scaling
+    return f"scaling/{FG_LABS_SHA}/{ts.sample}/{ts.arch}/scaling.tsv"
+
+
 rule bless_release:
     """Full candidate-release validation matrix — run to bless a fg-labs release.
 
@@ -427,6 +446,23 @@ rule bless_release:
         _fast_accuracy_targets(),
         _fast_minibwa_targets(),
         _accuracy_targets(FULL_SIM_SAMPLES, REPS),
+        _thread_scaling_target(),
+
+
+rule thread_scaling:
+    """Thread-scaling ladder on the pinned low-noise host (see rules/scaling.smk).
+
+    Runs `thread_scaling.sample` at every thread count in `thread_scaling.ladder`
+    inside ONE Batch job on ONE instance, so strong-scaling efficiency is measured
+    on fixed hardware. Included in `bless_release` — thread efficiency is gated
+    release-over-release and is not allowed to regress.
+
+    Usage:
+        snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
+            --config fg_labs_sha=<sha> -- thread_scaling
+    """
+    input:
+        _thread_scaling_target(),
 
 
 rule baseline_all:
