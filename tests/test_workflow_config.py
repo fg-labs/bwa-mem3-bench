@@ -4,6 +4,7 @@ import dataclasses
 from pathlib import Path
 
 import pytest
+import yaml
 
 from bwa_mem3_bench.workflow_config import (
     Arch,
@@ -24,6 +25,42 @@ CONFIG_DIR = REPO_ROOT / "config"
 EXPECTED_THREADS = 16
 EXPECTED_REPS_DEFAULT = 1
 EXPECTED_REPS_BASELINE = 5
+
+
+def _write_minimal_config(
+    config_dir: Path,
+    *,
+    compare_options: object,
+    compare_defaults: object | None = None,
+) -> None:
+    """Stage a loadable config whose single sample carries `compare_options`.
+
+    Copies the real `archs.yaml` / `defaults.yaml` so only the sample block
+    under test differs from production. `compare_defaults`, when given, is
+    written as the top-level block so its validation branches are reachable.
+
+    `defaults.yaml`'s `thread_scaling.sample` is repointed at the synthetic
+    sample: it names a production sample (`wgs-5M`) that this config does not
+    define, and `load_config` validates that reference, so copying the block
+    verbatim would make every config this helper writes unloadable for a reason
+    unrelated to what the caller is testing.
+    """
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "archs.yaml").write_text((CONFIG_DIR / "archs.yaml").read_text())
+    defaults = yaml.safe_load((CONFIG_DIR / "defaults.yaml").read_text())
+    if "thread_scaling" in defaults:
+        defaults["thread_scaling"]["sample"] = "probe"
+    (config_dir / "defaults.yaml").write_text(yaml.safe_dump(defaults))
+    sample = {
+        "baseline_tool": "bwa-mem2-upstream",
+        "reference": "hg38",
+        "source": "data/test/",
+        "compare_options": compare_options,
+    }
+    doc: dict[str, object] = {"samples": {"probe": sample}}
+    if compare_defaults is not None:
+        doc["compare_defaults"] = compare_defaults
+    (config_dir / "samples.yaml").write_text(yaml.safe_dump(doc))
 
 
 def test_load_config_returns_expected_samples() -> None:
@@ -330,8 +367,157 @@ def test_meth_fast_sibling_keeps_compare_ignore_tags() -> None:
     """The meth `--fast` sibling carries the same bisulfite ignore-tags so its
     vs-default / vs-baseline compares stay apples-to-apples with the default."""
     cfg = load_config(CONFIG_DIR)
-    fast = cfg.samples["meth-twist-emseq-5M-fast"]
-    assert fast.compare_options.get("ignore_tags") == ["YD", "XM", "XG"]
+    base = cfg.ignore_tags("meth-twist-emseq-5M", "vs_baseline")
+    fast = cfg.ignore_tags("meth-twist-emseq-5M-fast", "vs_baseline")
+    assert fast == base
+
+
+def test_meth_samples_share_one_anchored_ignore_list() -> None:
+    """All four meth arms resolve to the same vs_baseline list, and the YAML
+    anchor holding it is not mistaken for a sample.
+
+    The list is shared via a `meth_vs_baseline` anchor declared beside
+    `compare_defaults`. Two things must hold: every meth arm resolves to the
+    same tags (so the smoke/fast arms cannot drift from the real ones), and the
+    top-level anchor key is inert rather than being loaded as a sample.
+    """
+    cfg = load_config(CONFIG_DIR)
+    meth_samples = [
+        "meth-twist-emseq-5M",
+        "meth-twist-emseq-5M-fast",
+        "smoke-meth",
+        "smoke-meth-fast",
+    ]
+    resolved = {s: cfg.ignore_tags(s, "vs_baseline") for s in meth_samples}
+    assert len(set(map(tuple, resolved.values()))) == 1, resolved
+    assert "meth_vs_baseline" not in cfg.samples
+
+
+def test_ignore_tags_extend_rather_than_replace_the_kind_default() -> None:
+    """A sample override must ADD to its kind's default, not shadow it.
+
+    The meth samples need the cross-tool default (`MQ`/`HN`) *and* their own
+    bisulfite additions; replace-semantics would silently drop the former and
+    score 0% concordance.
+    """
+    cfg = load_config(CONFIG_DIR)
+    tags = cfg.ignore_tags("meth-twist-emseq-5M", "vs_baseline")
+    assert {"MQ", "HN"}.issubset(tags), "kind default survived the override"
+    # NM/MD/XA/SA are, or embed, an edit distance against the converted
+    # reference; XM/XG/XR and YD/YC/RG are the two aligners' disjoint tag sets.
+    assert {"NM", "MD", "XA", "SA", "XM", "XG", "XR", "YD", "YC", "RG"}.issubset(tags)
+
+
+def test_same_behaviour_comparisons_skip_nothing() -> None:
+    """bwa-mem3 vs bwa-mem3 at the same search settings compares every tag.
+
+    Covers meth samples too: the bisulfite exclusions exist only because bwameth
+    computes those tags against a converted reference. Against another bwa-mem3
+    they are directly comparable, and excluding them would blind the comparisons
+    best placed to catch a tag-only regression.
+    """
+    cfg = load_config(CONFIG_DIR)
+    for sample in ("wgs-5M", "meth-twist-emseq-5M", "sbx-1M"):
+        for kind in ("vs_golden", "vs_x86"):
+            assert cfg.ignore_tags(sample, kind) == [], f"{sample}/{kind}"
+
+
+def test_vs_default_skips_the_candidate_set_tags() -> None:
+    """`--fast` vs default is same-binary but NOT same-behaviour.
+
+    The preset prunes the candidate set by design, so the tags describing that
+    set (XS/XA/SA/HN, plus MQ via MAPQ repair) diverge mechanically and carry no
+    placement information — measured at up to +21.8pp of drift, which would
+    swamp the MAPQ-stratified placement signal this comparison exists to
+    produce. Tags describing the CHOSEN alignment stay strict.
+    """
+    cfg = load_config(CONFIG_DIR)
+    skipped = cfg.ignore_tags("wgs-5M", "vs_default")
+    assert set(skipped) == {"XS", "HN", "XA", "SA", "MQ"}
+    for kept in ("AS", "MD", "NM", "MC"):
+        assert kept not in skipped, f"{kept} describes the chosen alignment; keep it strict"
+
+
+def test_ignore_tags_rejects_unknown_comparison_kind() -> None:
+    cfg = load_config(CONFIG_DIR)
+    with pytest.raises(ValueError, match="unknown comparison kind"):
+        cfg.ignore_tags("wgs-5M", "vs_nonsense")
+
+
+def test_retired_flat_ignore_tags_is_rejected(tmp_path: Path) -> None:
+    """A config from before the policy was per-kind must fail, not be ignored.
+
+    Silently ignoring `compare_options` is precisely the bug this replaced
+    (bench #34): the config read as though tags were filtered while nothing
+    ever consulted it.
+    """
+    _write_minimal_config(tmp_path, compare_options={"ignore_tags": ["YD"]})
+    with pytest.raises(ValueError, match="retired flat"):
+        load_config(tmp_path)
+
+
+def test_unknown_compare_options_kind_is_rejected(tmp_path: Path) -> None:
+    _write_minimal_config(tmp_path, compare_options={"vs_bogus": {"ignore_tags": ["YD"]}})
+    with pytest.raises(ValueError, match="unknown comparison kind"):
+        load_config(tmp_path)
+
+
+@pytest.mark.parametrize("options", [["vs_baseline"], "vs_baseline", 3])
+def test_non_mapping_compare_options_is_rejected_clearly(tmp_path: Path, options: object) -> None:
+    """A mistyped `compare_options` must fail like every other malformed config:
+    a `ValueError` naming the sample and the key.
+
+    Without an explicit guard these reach `dict(...)`, which raises a `ValueError`
+    about a "dictionary update sequence" -- naming neither the sample nor the
+    key -- or, for a non-iterable, a `TypeError`, which is not even the type this
+    loader documents itself as raising.
+    """
+    _write_minimal_config(tmp_path, compare_options=options)
+    with pytest.raises(ValueError, match="compare_options"):
+        load_config(tmp_path)
+
+
+def test_absent_compare_options_is_not_an_error(tmp_path: Path) -> None:
+    """A bare `compare_options:` header parses to `None`, which is exactly what
+    `data.get(...)` yields for a sample that omits the key entirely -- the common
+    case. The two are indistinguishable here, so `None` must mean "no overrides"
+    rather than an error, matching `_validate_compare_defaults`.
+    """
+    _write_minimal_config(tmp_path, compare_options=None)
+    cfg = load_config(tmp_path)
+    assert cfg.samples["probe"].compare_options == {}
+
+
+def test_unknown_compare_defaults_kind_is_rejected(tmp_path: Path) -> None:
+    """A typo'd kind in the top-level block would silently apply to nothing."""
+    _write_minimal_config(
+        tmp_path, compare_options={}, compare_defaults={"vs_bogus": {"ignore_tags": ["YD"]}}
+    )
+    with pytest.raises(ValueError, match="unknown comparison kind"):
+        load_config(tmp_path)
+
+
+def test_compare_defaults_kind_body_must_be_a_mapping(tmp_path: Path) -> None:
+    """`vs_baseline: [MQ]` is the natural mistake; it must not parse as a policy."""
+    _write_minimal_config(tmp_path, compare_options={}, compare_defaults={"vs_baseline": ["MQ"]})
+    with pytest.raises(ValueError, match="must be a mapping"):
+        load_config(tmp_path)
+
+
+def test_compare_defaults_ignore_tags_must_be_a_list_of_strings(tmp_path: Path) -> None:
+    """A bare scalar would otherwise iterate per character into bogus tags."""
+    _write_minimal_config(
+        tmp_path, compare_options={}, compare_defaults={"vs_baseline": {"ignore_tags": "MQ"}}
+    )
+    with pytest.raises(ValueError, match="ignore_tags"):
+        load_config(tmp_path)
+
+
+def test_compare_defaults_must_be_a_mapping(tmp_path: Path) -> None:
+    """The block itself, not just each kind's body, has to be a mapping."""
+    _write_minimal_config(tmp_path, compare_options={}, compare_defaults=["vs_baseline"])
+    with pytest.raises(ValueError, match="`compare_defaults` must be a mapping"):
+        load_config(tmp_path)
 
 
 def test_as_str_list_accepts_list_of_strings() -> None:

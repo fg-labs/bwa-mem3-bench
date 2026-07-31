@@ -92,12 +92,46 @@ is a shim on arm64, so both "query" and "baseline" actually use `bwa-mem2.fg-lab
 touching AWS; it does **not** exercise the real upstream-vs-fg-labs comparison
 (that's what the AWS `smoke` target is for).
 
-## Measuring aux-tag divergence (`tag-census`)
+## Aux-tag comparison
 
-`compare-bams` scores placement (position / CIGAR / MAPQ / placement flags) and
-ignores aux tags. `tag-census` answers the prior question — *which tags would it
-be safe to compare, and what would comparing them cost?* — so a tag policy can be
-set from data instead of guessed:
+`compare-bams` compares placement (position / CIGAR / MAPQ / placement flags)
+**and every aux tag**, treating each non-ignored tag difference as a first-class
+discordance: a read counts as concordant only when no placement or non-ignored
+tag difference remains. An ignored tag may differ freely without costing
+concordance — the difference is still tallied under `by_tag`, so it stays
+diagnosable. The exceptions are listed
+per comparison kind in `config/samples.yaml` under `compare_defaults`, because
+the tag policy is a property of the comparison rather than the sample:
+
+| kind | compared against | skipped |
+|---|---|---|
+| `vs_baseline` | upstream bwa-mem2 (or bwameth, meth samples) | `MQ`, `HN` — plus, on meth, `NM` `MD` `XA` `SA` `XM` `XG` `XR` `YD` `YC` `RG` |
+| `vs_golden` / `vs_x86` | bwa-mem3, same search settings | nothing |
+| `vs_default` | bwa-mem3 `--fast` vs default | `XS` `HN` `XA` `SA` `MQ` |
+
+Two rules generate those lists. **Cross-tool**: exclude any tag one side never
+writes, or that *is* (or embeds) a reference-relative edit distance — bwameth
+computes `NM`/`MD` against a C→T/G→A converted genome, and `XA`/`SA` carry both
+that edit distance and doubled-reference contig names like `fchr1`.
+**`--fast` vs default**: same binary, but not the same *behaviour* — the preset
+prunes the candidate set on purpose, so the tags describing that set diverge
+mechanically (`XS` 18.8%, `XA` 17.2%, `SA` 39.8%, `HN` 7.1% of reads on wgs-5M)
+while carrying no placement information. Tags describing the *chosen* alignment
+(`AS`, `MD`, `NM`, `MC`) stay strict everywhere, all under 1% divergent.
+
+`vs_golden` and `vs_x86` skip nothing deliberately: they compare identical search
+behaviour, so they are where a tag-only regression is detectable at essentially
+zero cost — full strictness costs 0.0000 pp on `vs_x86` and at most 0.094 pp on
+`vs_golden`.
+
+A skipped tag is still counted in the report's `by_tag` block with
+`ignored: true`, so a wrong entry is diagnosable rather than silent.
+
+### Measuring the policy (`tag-census`)
+
+`tag-census` answers the prior question — *which tags would it be safe to
+compare, and what would comparing them cost?* — so the lists above can be set
+from data instead of guessed:
 
 ```bash
 cargo build --release --bin tag-census
@@ -138,11 +172,6 @@ Two divergence modes it distinguishes, which matter for choosing a policy:
 - **Batch `spot_fleet_role` is scheduled for deprecation.** The current CDK
   stack uses `SPOT_CAPACITY_OPTIMIZED` + `spot_fleet_role`; AWS is moving Batch
   to EC2 Fleet. Low urgency; revisit when the CDK lib surfaces the new mode.
-
-- **`compare-bams --ignore-tag` is a no-op today.** The flag is plumbed through
-  to `CompareOptions.ignore_tags` and the config supports per-sample tags, but
-  `classify()` does not inspect aux tags at all. This will be addressed in a
-  future release; until then, tag differences do not affect concordance.
 
 - **`Pair::QueryOnly` / `Pair::BaselineOnly` report as `MappedOnly*`.** When a
   read name is absent from one BAM entirely (rather than present-but-unmapped),

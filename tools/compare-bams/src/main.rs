@@ -25,7 +25,11 @@ struct Args {
     #[arg(long)]
     out: PathBuf,
 
-    /// Tags to ignore during comparison (repeat per tag). Example: --ignore-tag YD.
+    /// Aux tag to exclude from comparison entirely — neither its presence nor
+    /// its value is compared (repeat per tag). Every tag NOT listed is compared
+    /// strictly and a difference counts against concordance. Example:
+    /// `--ignore-tag MQ --ignore-tag HN` against upstream bwa-mem2, which emits
+    /// neither. Excluded tags are still tallied under `by_tag` in the report.
     #[arg(long = "ignore-tag", value_name = "TAG")]
     ignore_tags: Vec<String>,
 
@@ -38,7 +42,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     let opts = CompareOptions {
-        ignore_tags: args.ignore_tags,
+        ignore_tags: args.ignore_tags.into_iter().collect(),
         mapq_tolerance: args.mapq_tolerance,
     };
 

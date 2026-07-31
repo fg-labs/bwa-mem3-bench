@@ -1,4 +1,7 @@
 use compare_bams::{classify, CompareOptions, Discordance};
+
+// `classify` reports EVERY differing field, so these assert on the whole
+// difference list: a single-element slice proves nothing else diverged.
 use noodles_sam::alignment::record::Flags;
 use noodles_sam::alignment::record_buf::RecordBuf;
 
@@ -23,7 +26,7 @@ fn identical_records_are_concordant() {
     let a = record("r1", 0x63, Some(0), Some(100), 60);
     let b = record("r1", 0x63, Some(0), Some(100), 60);
     let opts = CompareOptions::default();
-    assert!(matches!(classify(&a, &b, &opts), Discordance::Concordant));
+    assert!(classify(&a, &b, &opts).is_concordant());
 }
 
 #[test]
@@ -32,8 +35,8 @@ fn different_positions_are_pos_diff() {
     let b = record("r1", 0x63, Some(0), Some(150), 60);
     let opts = CompareOptions::default();
     assert!(matches!(
-        classify(&a, &b, &opts),
-        Discordance::PosDiff { .. }
+        classify(&a, &b, &opts).diffs.as_slice(),
+        [Discordance::PosDiff { .. }]
     ));
 }
 
@@ -43,8 +46,8 @@ fn only_query_mapped_is_mapped_only_query() {
     let b = record("r1", 0x4, None, None, 0);
     let opts = CompareOptions::default();
     assert!(matches!(
-        classify(&a, &b, &opts),
-        Discordance::MappedOnlyQuery
+        classify(&a, &b, &opts).diffs.as_slice(),
+        [Discordance::MappedOnlyQuery]
     ));
 }
 
@@ -56,7 +59,7 @@ fn mapq_within_tolerance_is_concordant() {
         mapq_tolerance: 2,
         ..Default::default()
     };
-    assert!(matches!(classify(&a, &b, &opts), Discordance::Concordant));
+    assert!(classify(&a, &b, &opts).is_concordant());
 }
 
 #[test]
@@ -65,8 +68,8 @@ fn mapq_outside_tolerance_is_mapq_diff() {
     let b = record("r1", 0x63, Some(0), Some(100), 40);
     let opts = CompareOptions::default();
     assert!(matches!(
-        classify(&a, &b, &opts),
-        Discordance::MapqDiff { .. }
+        classify(&a, &b, &opts).diffs.as_slice(),
+        [Discordance::MapqDiff { .. }]
     ));
 }
 
@@ -76,8 +79,8 @@ fn only_baseline_mapped_is_mapped_only_baseline() {
     let b = record("r1", 0x63, Some(0), Some(100), 60);
     let opts = CompareOptions::default();
     assert!(matches!(
-        classify(&a, &b, &opts),
-        Discordance::MappedOnlyBaseline
+        classify(&a, &b, &opts).diffs.as_slice(),
+        [Discordance::MappedOnlyBaseline]
     ));
 }
 
@@ -86,16 +89,16 @@ fn different_chromosomes_is_pos_diff() {
     let a = record("r1", 0x63, Some(0), Some(100), 60);
     let b = record("r1", 0x63, Some(1), Some(100), 60);
     let opts = CompareOptions::default();
-    match classify(&a, &b, &opts) {
-        Discordance::PosDiff {
+    match classify(&a, &b, &opts).diffs.as_slice() {
+        [Discordance::PosDiff {
             query_ref,
             baseline_ref,
             ..
-        } => {
-            assert_eq!(query_ref, Some(0));
-            assert_eq!(baseline_ref, Some(1));
+        }] => {
+            assert_eq!(*query_ref, Some(0));
+            assert_eq!(*baseline_ref, Some(1));
         }
-        other => panic!("expected PosDiff, got {other:?}"),
+        other => panic!("expected a single PosDiff, got {other:?}"),
     }
 }
 
@@ -107,7 +110,7 @@ fn different_flag_bits_is_flag_diff() {
     let b = record("r1", 0x53, Some(0), Some(100), 60);
     let opts = CompareOptions::default();
     assert!(matches!(
-        classify(&a, &b, &opts),
-        Discordance::FlagDiff { .. }
+        classify(&a, &b, &opts).diffs.as_slice(),
+        [Discordance::FlagDiff { .. }]
     ));
 }

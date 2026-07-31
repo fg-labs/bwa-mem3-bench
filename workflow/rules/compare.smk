@@ -32,8 +32,22 @@ ARM_X86_REFERENCE_ARCH = "c6a"
 COMPARE_MEM_MB = 4000
 
 
-def _ignore_tag_args(sample_name: str) -> str:
-    tags = CONFIG.samples[sample_name].compare_options.get("ignore_tags", [])
+def _ignore_tag_args(sample_name: str, kind: str) -> str:
+    """`--ignore-tag` flags for one (sample, comparison kind).
+
+    The tag policy is a property of the COMPARISON, not of the sample:
+
+    - `vs_baseline` compares bwa-mem3 against a different aligner and needs the
+      largest exclusion list.
+    - `vs_golden` / `vs_x86` are same-binary AND same-behaviour, so every tag is
+      comparable and any difference is a real finding — passing a `vs_baseline`
+      exclusion there would blind the comparisons best placed to catch a
+      tag-only regression (fg-labs/bwa-mem3#290).
+    - `vs_default` is the exception: same binary, but `--fast` prunes the
+      candidate set by design, so the tags describing that set are excluded
+      while the tags describing the chosen alignment stay strict.
+    """
+    tags = CONFIG.ignore_tags(sample_name, kind)
     return " ".join(f"--ignore-tag {tag}" for tag in tags)
 
 
@@ -65,7 +79,7 @@ rule compare_vs_baseline:
         container_image = lambda wc: image_for_arch(wc.arch),
         mem_mb = COMPARE_MEM_MB,
     params:
-        ignore_tag_args = lambda wc: _ignore_tag_args(wc.sample),
+        ignore_tag_args = lambda wc: _ignore_tag_args(wc.sample, "vs_baseline"),
     shell:
         r"""
         mkdir -p $(dirname {output.json})
@@ -89,7 +103,7 @@ rule compare_vs_x86:
         container_image = lambda wc: image_for_arch(wc.arch),
         mem_mb = COMPARE_MEM_MB,
     params:
-        ignore_tag_args = lambda wc: _ignore_tag_args(wc.sample),
+        ignore_tag_args = lambda wc: _ignore_tag_args(wc.sample, "vs_x86"),
     shell:
         r"""
         mkdir -p $(dirname {output.json})
@@ -126,7 +140,7 @@ rule compare_vs_default:
         container_image = lambda wc: image_for_arch(wc.arch),
         mem_mb = COMPARE_MEM_MB,
     params:
-        ignore_tag_args = lambda wc: _ignore_tag_args(wc.sample),
+        ignore_tag_args = lambda wc: _ignore_tag_args(wc.sample, "vs_default"),
     shell:
         r"""
         mkdir -p $(dirname {output.json})
@@ -152,7 +166,7 @@ rule compare_vs_golden:
         container_image = lambda wc: image_for_arch(wc.arch),
         mem_mb = COMPARE_MEM_MB,
     params:
-        ignore_tag_args = lambda wc: _ignore_tag_args(wc.sample),
+        ignore_tag_args = lambda wc: _ignore_tag_args(wc.sample, "vs_golden"),
     shell:
         r"""
         mkdir -p $(dirname {output.json})

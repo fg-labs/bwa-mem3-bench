@@ -13,7 +13,7 @@ pub mod config;
 pub mod report;
 pub mod template_reader;
 
-pub use classify::{classify, Discordance};
+pub use classify::{classify, Classification, Discordance};
 pub use compare::compare;
 pub use config::CompareOptions;
 pub use report::ConcordanceReport;
