@@ -10,11 +10,13 @@
 pub mod classify;
 pub mod compare;
 pub mod config;
+pub mod guard;
 pub mod report;
 pub mod template_reader;
 
 pub use classify::{classify, Classification, Discordance};
 pub use compare::compare;
 pub use config::CompareOptions;
+pub use guard::TagGuardViolation;
 pub use report::ConcordanceReport;
 pub use template_reader::{template_iter, Template};

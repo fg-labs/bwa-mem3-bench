@@ -107,8 +107,26 @@ fn normalize(value: &Value) -> NormalizedValue<'_> {
     }
 }
 
+/// The two-character tag name, borrowed from the tag itself.
+///
+/// Returns `None` for a tag whose bytes are not valid UTF-8. SAM restricts aux
+/// tag names to `[A-Za-z][A-Za-z0-9]`, so that cannot happen for a conforming
+/// file; callers on the per-record hot path skip such a tag rather than pay for
+/// a lossy conversion they would never use.
+#[must_use]
+pub(crate) fn tag_str(tag: &Tag) -> Option<&str> {
+    std::str::from_utf8(Tag::as_ref(tag)).ok()
+}
+
+/// The two-character tag name as an owned `String`, lossy on invalid UTF-8.
+///
+/// Prefer [`tag_str`] where a borrow will do — this allocates per call, and its
+/// callers run once per *differing* tag rather than once per tag.
 fn tag_name(tag: Tag) -> String {
-    String::from_utf8_lossy(tag.as_ref()).into_owned()
+    tag_str(&tag).map_or_else(
+        || String::from_utf8_lossy(Tag::as_ref(&tag)).into_owned(),
+        ToOwned::to_owned,
+    )
 }
 
 /// Every tag difference between two records, ignoring `opts.ignore_tags`.
@@ -297,6 +315,7 @@ mod tests {
         CompareOptions {
             ignore_tags: ignore.iter().map(|s| (*s).to_string()).collect(),
             mapq_tolerance: 0,
+            ..CompareOptions::default()
         }
     }
 

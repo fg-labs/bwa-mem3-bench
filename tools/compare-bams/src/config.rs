@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 /// Options controlling how [`crate::classify::classify`] compares two records.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompareOptions {
     /// Aux tags excluded from comparison entirely — neither their presence nor
     /// their value is compared. Every other tag present on either record is
@@ -33,6 +33,57 @@ pub struct CompareOptions {
     /// from the score, never from the diagnosis.
     pub ignore_tags: BTreeSet<String>,
 
+    /// Aux tags that MAY appear. Any tag observed on either side that is in
+    /// neither this set nor `ignore_tags` is a
+    /// [`crate::guard::TagGuardViolation::UnexpectedTag`].
+    ///
+    /// The semantics are deliberately *may* appear, not *must*: a tag listed
+    /// here that never shows up is a harmless no-op. That keeps one list usable
+    /// across samples whose tag sets legitimately differ — single-end reads
+    /// carry no mate tags, bisulfite alignment carries six extra ones — without
+    /// needing a per-sample subtraction operation.
+    ///
+    /// An empty set skips the unexpected-tag check: there is no way to
+    /// distinguish "no allowlist" from "the allowlist is empty", and failing
+    /// every tag would be useless. Reaching that state is not possible through
+    /// the CLI — `--expect-tag` is `required_unless_present = "no_tag_guard"`,
+    /// so a caller must either declare the allowlist or ask for the guard off.
+    /// `_validate_compare_defaults` enforces the same thing a layer up, which
+    /// turns a misconfigured `samples.yaml` into an early error rather than a
+    /// worker that dies on a usage message.
+    pub expect_tags: BTreeSet<String>,
+
+    /// `ignore_tags` entries exempt from the dead-entry check, because they are
+    /// known to be absent from this particular comparison.
+    ///
+    /// This exempts an entry from the *audit* only; it does not change what is
+    /// ignored. That distinction matters. `MQ` and `HN` are absent from both
+    /// sides of every methylation comparison (fg-labs/bwa-mem3#296), but they
+    /// remain correctly ignored there — bwameth would never emit them even once
+    /// `bwa-mem3` does. Dropping them from `ignore_tags` instead would make them
+    /// strict, and the day #296 is fixed the meth comparison would score ~0%.
+    pub absent_ok_tags: BTreeSet<String>,
+
     /// Permitted absolute MAPQ difference before flagging as discordant.
     pub mapq_tolerance: u8,
+
+    /// Whether to run the tag-set guard at all (`--no-tag-guard` clears it).
+    ///
+    /// Defaults to **true**, which is why this type implements [`Default`] by
+    /// hand rather than deriving it. bench #34 was config that had to be opted
+    /// into and never was; a guard against that failure must not itself need
+    /// opting into.
+    pub tag_guard: bool,
+}
+
+impl Default for CompareOptions {
+    fn default() -> Self {
+        Self {
+            ignore_tags: BTreeSet::new(),
+            expect_tags: BTreeSet::new(),
+            absent_ok_tags: BTreeSet::new(),
+            mapq_tolerance: 0,
+            tag_guard: true,
+        }
+    }
 }

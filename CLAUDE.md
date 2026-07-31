@@ -267,6 +267,52 @@ from `arch.baseline_arch` in `config/archs.yaml`:
   Blessed-golden SHAs are preserved, so they are the reliable place to find
   historical BAMs — e.g. the `*-fast` arms needed for a `vs_default`
   measurement survived only under the v0.7.0 golden `04777b3`.
+- **`bwa-mem3 --meth` emits no `MQ` and no `HN`** — neither does bwameth, so both
+  are absent from *both* sides of every meth comparison. Methylation output goes
+  through a third SAM/BAM writer (`src/meth_bam.cpp`) separate from the text-SAM
+  and generic-BAM paths, and that writer simply lacks the two `bam_aux_append`
+  calls; `mp->mapq` and `p.HN` are both in scope where they would go. Filed as
+  fg-labs/bwa-mem3#296. Consequence for this repo: `vs_baseline`'s
+  `ignore_tags: [MQ, HN]` is two DEAD entries on every meth sample, and
+  `vs_default`'s list is two dead on meth plus one on single-end `sbx-1M`. They
+  are excused from the guard's dead-entry audit via `METH_UNEMITTED_TAGS` /
+  `MATE_ONLY_TAGS` in `workflow_config.py` — delete the former when #296 lands.
+- **Excuse a known-absent ignore entry from the AUDIT, never by removing it from
+  `ignore_tags`.** The two look interchangeable and are not. Dropping meth's
+  `MQ`/`HN` from the ignore list would make them strict, so the day #296 is fixed
+  bwa-mem3 would start emitting them, bwameth still would not, and meth
+  `vs_baseline` would go to ~100% `query_only` on two tags — a cratered score
+  caused by an upstream *fix*. `--absent-ok-tag` exempts the check only, so the
+  exemption quietly becomes redundant instead of becoming a landmine.
+- **Derive per-sample tag facts from `layout` / `is_meth`, don't restate them in
+  YAML.** There are ~10 meth samples × 3 comparison kinds; declaring the bisulfite
+  tag set on each is ~30 places for the one fact to drift. `METH_EXTRA_TAGS` and
+  friends live next to `COMPARE_KINDS` and are applied by the resolvers.
+- **`sim-*` (truth) samples never run `compare-bams`.** `SWEEP_SAMPLES` filters
+  on `not truth and not _is_fast_sample`, and `_accuracy_targets` requests only
+  `eval/*.variants.tsv` — no compare JSON. Exactly 16 samples, i.e. 33
+  (sample, kind) pairs, reach a compare rule: don't conflate the two counts.
+  They are SWEEP_SAMPLES × {vs_baseline, vs_golden, +vs_x86 if non-meth},
+  the six `FAST_REAL_BASES` siblings for `vs_default`, and the hard-coded
+  targets in `rule fast_smoke` (`workflow/Snakefile`; named rather than cited by
+  line, which had already rotted once). Don't size tag-policy or
+  concordance work off `config/samples.yaml`'s ~30 samples — most never compare.
+- **`--fast` does not change the emitted tag vocabulary.** Measured across all
+  six `vs_default` census cells (paired, single-end, meth): the fast arm and its
+  default sibling emit an identical tag set. So a `-fast` sample's tag set can be
+  derived from its default arm's, which is how `smoke-1M-fast` / `smoke-meth-fast`
+  are covered despite never having been run.
+- **The full tag vocabulary is statically enumerable — use that, not just the
+  census.** `grep -ohE 'bam_aux_append\(b, "[A-Za-z][A-Za-z0-9]"' src/*.cpp` plus
+  the `kputsn_u("\tXX:` / `ksprintf(str, "\tXX:` forms across bwa-mem3's three
+  writers gives `AS HN MC MD MQ NM pa RG SA XA XG XM XR XS`. This catches tags no
+  sample happens to trigger: `pa` (ALT-contig scoring, needs a `.alt` file we
+  don't ship) and non-meth `RG` (needs `-R`) are emittable but unobserved in all
+  46 cells. Both are deliberately left OUT of `expect_tags` so their appearance
+  fails loudly. There is no production constant for the pair — nothing in
+  production reads one — so the decision is pinned by
+  `test_known_but_unemitted_tags_are_deliberately_not_allowlisted` in
+  `tests/test_workflow_config.py`.
 - **Spot capacity varies per AZ.** `InsufficientInstanceCapacity` on
   `ec2 run-instances` → iterate subnets/AZs in your VPC rather than
   retrying in the same AZ.

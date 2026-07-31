@@ -3,22 +3,71 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+# A SAM aux tag name: exactly two characters, `[A-Za-z][A-Za-z0-9]` (SAMv1 §1.5).
+_AUX_TAG_RE = re.compile(r"[A-Za-z][A-Za-z0-9]")
+
 # The `compare-bams` invocations the workflow makes, one per rule in
 # `workflow/rules/compare.smk`. Three flavours, not two:
 #   - `vs_baseline` — a DIFFERENT aligner (upstream bwa-mem2, or bwameth for
-#     meth samples), so it needs the largest exclusion list.
+#     meth samples), so it skips the tags the two never share.
 #   - `vs_golden` / `vs_x86` — same binary AND same search settings, so every
 #     tag is comparable and nothing is skipped.
-#   - `vs_default` — same binary but preset-pruned (`--fast` vs default), so the
-#     tags describing the candidate set diverge mechanically and are excluded
-#     while the tags describing the chosen alignment stay strict.
+#   - `vs_default` — the exception to the "same binary, skip nothing" rule:
+#     `--fast` prunes the candidate set on purpose, so the tags describing that
+#     set are skipped while the tags describing the chosen alignment stay strict.
 COMPARE_KINDS = frozenset({"vs_baseline", "vs_golden", "vs_x86", "vs_default"})
+
+# The per-kind tag lists a `compare_options` / `compare_defaults` body may carry.
+# Enumerated once so adding a third list is one edit, not three.
+_TAG_LIST_KEYS = ("ignore_tags", "expect_tags")
+
+# Mate tags. A single-end read has no mate, so these cannot exist on one -- a
+# logical impossibility, not an aligner choice. Measured: `sbx-1M` carries
+# neither on either side of any comparison.
+MATE_ONLY_TAGS = frozenset({"MQ", "MC"})
+
+# Tags neither side emits under `--meth`. `bwa-mem3`'s methylation output goes
+# through a separate writer (`src/meth_bam.cpp`) that omits MQ and HN, and
+# bwameth emits neither either. Measured: 0 of 10,369,692 primaries on
+# `meth-twist-emseq-5M`, likewise on `smoke-meth`.
+#
+# Unlike MATE_ONLY_TAGS this is a defect, not a law: tracked as
+# fg-labs/bwa-mem3#296. DELETE THIS CONSTANT when that lands. Note it only
+# exempts the two tags from the dead-entry audit -- they stay on `ignore_tags`,
+# because bwameth will still never emit them once bwa-mem3 does.
+METH_UNEMITTED_TAGS = frozenset({"MQ", "HN"})
+
+# Tags that appear only on methylation comparisons: XM/XG/XR from `bwa-mem3
+# --meth`, and YD/YC/RG from bwameth. Derived rather than declared per sample
+# because it is one fact about bisulfite alignment, and restating it across ~10
+# meth samples x 3 comparison kinds invites exactly the drift this guard exists
+# to catch.
+METH_EXTRA_TAGS = frozenset({"XM", "XG", "XR", "YD", "YC", "RG"})
+
+# Tags not comparable between `bwa-mem3 --meth` and bwameth, excluded from the
+# score on the `vs_baseline` kind only (the other three are meth-vs-meth, where
+# every tag is comparable).
+#
+# NM/MD are edit distances against a C->T/G->A converted reference; XA
+# (`rname,pos,CIGAR,NM`) and SA (`rname,pos,strand,CIGAR,mapQ,NM`) embed that
+# edit distance AND doubled-reference contig names (`fchr1`). XM/XG/XR and
+# YD/YC/RG are the two tools' disjoint bisulfite tag sets. Measured: each
+# diverges on >99.5% of reads, and excluding them leaves +0.14pp of added drift.
+#
+# Derived rather than declared for the same reason as METH_EXTRA_TAGS, and the
+# two must stay derived TOGETHER. When only the allowlist half was derived, the
+# ignore half sat copy-pasted on 3 of 12 meth samples and absent from the other
+# 9 -- so promoting a `sim-meth-*` sample into SWEEP_SAMPLES would have sent
+# NM/MD/XA/SA strict against bwameth (a ~100% crater) while the guard stayed
+# silent, because METH_EXTRA_TAGS had already allowlisted every tag involved.
+METH_IGNORE_TAGS = frozenset({"NM", "MD", "XA", "SA", "XM", "XG", "XR", "YD", "YC", "RG"})
 
 
 @dataclass(frozen=True)
@@ -38,10 +87,13 @@ class Sample:
     # the mate-SW reference windows and OOMs the cgroup.
     mem_flags: list[str] = field(default_factory=list)
     # Per-comparison-kind compare-bams overrides, keyed by kind (see
-    # `COMPARE_KINDS`), e.g. `{"vs_baseline": {"ignore_tags": [...]}}`. Each
-    # kind's `ignore_tags` EXTENDS the matching `compare_defaults` entry rather
-    # than replacing it. Resolve via `WorkflowConfig.ignore_tags()` — never read
-    # this directly, or the defaults get silently dropped.
+    # `COMPARE_KINDS`). Each kind's body accepts two tag lists:
+    #     {"vs_baseline": {"ignore_tags": [...], "expect_tags": [...]}}
+    # `ignore_tags` excludes a tag from the score; `expect_tags` declares a tag
+    # MAY appear, so the guard does not flag it as unexpected. BOTH EXTEND the
+    # matching `compare_defaults` entry rather than replacing it. Resolve via
+    # `WorkflowConfig.ignore_tags()` / `.expect_tags()` — never read this
+    # directly, or the defaults get silently dropped.
     compare_options: dict[str, Any] = field(default_factory=dict)
     # Truth-based accuracy sample (holodeck-simulated). When True, the sample's
     # S3 `source` prefix also holds the truth artifacts (`golden.bam`,
@@ -210,21 +262,23 @@ class WorkflowConfig:
     baseline_prefix: str
     golden_prefix: str
     data_prefix: str
-    # Per-comparison-kind default `ignore_tags`, keyed by kind. Per-sample
-    # `compare_options` extend these.
-    compare_defaults: dict[str, list[str]] = field(default_factory=dict)
+    # Per-comparison-kind defaults, keyed by kind, each a mapping with
+    # `ignore_tags` and `expect_tags` lists. Per-sample `compare_options` extend
+    # these.
+    compare_defaults: dict[str, dict[str, list[str]]] = field(default_factory=dict)
 
-    def ignore_tags(self, sample_name: str, kind: str) -> list[str]:
-        """Aux tags `compare-bams` must skip for one (sample, comparison kind).
+    def _resolve_tags(self, sample_name: str, kind: str, key: str) -> set[str]:
+        """Union of a kind's default tag list and the sample's addition to it.
 
-        The kind default and the sample's override are UNIONed, not replaced:
-        a meth sample needs both the cross-tool default (`MQ`/`HN`) and its own
-        bisulfite additions, and a config that replaced instead of extending
-        would silently drop the former.
+        Extending rather than replacing is the invariant both `ignore_tags` and
+        `expect_tags` rely on: a meth sample needs both the cross-tool default
+        and its own additions, and a config that replaced would silently drop
+        the former.
 
         :param sample_name: sample being compared.
         :param kind: comparison kind, one of `COMPARE_KINDS`.
-        :return: sorted, de-duplicated tag names.
+        :param key: which list to resolve -- `ignore_tags` or `expect_tags`.
+        :return: the unioned tag names.
         :raises KeyError: if `sample_name` is not a configured sample.
         :raises ValueError: if `kind` is not a known comparison kind.
         """
@@ -232,10 +286,75 @@ class WorkflowConfig:
             raise ValueError(
                 f"unknown comparison kind {kind!r}; expected one of {sorted(COMPARE_KINDS)}"
             )
-        tags = set(self.compare_defaults.get(kind, []))
+        tags = set(self.compare_defaults.get(kind, {}).get(key, []))
         override = self.samples[sample_name].compare_options.get(kind, {})
-        tags.update(override.get("ignore_tags", []))
+        tags.update(override.get(key, []))
+        return tags
+
+    def ignore_tags(self, sample_name: str, kind: str) -> list[str]:
+        """Aux tags `compare-bams` must skip for one (sample, comparison kind).
+
+        Methylation samples get `METH_IGNORE_TAGS` added automatically on
+        `vs_baseline` -- the cross-tool kind, and the only one where the two
+        sides are different aligners. See that constant for why it is derived
+        rather than declared, and why it must stay derived in lockstep with
+        `METH_EXTRA_TAGS` in `expect_tags`.
+
+        :param sample_name: sample being compared.
+        :param kind: comparison kind, one of `COMPARE_KINDS`.
+        :return: sorted, de-duplicated tag names.
+        """
+        tags = self._resolve_tags(sample_name, kind, "ignore_tags")
+        if kind == "vs_baseline" and self.samples[sample_name].is_meth:
+            tags |= METH_IGNORE_TAGS
         return sorted(tags)
+
+    def expect_tags(self, sample_name: str, kind: str) -> list[str]:
+        """Aux tags that MAY appear for one (sample, comparison kind).
+
+        Any tag `compare-bams` observes that is on neither this list nor
+        `ignore_tags` fails the run by name. The semantics are *may* appear, not
+        *must*: a listed tag that never shows up is a harmless no-op, which is
+        what lets one per-kind list serve samples whose tag sets legitimately
+        differ without needing a per-sample subtraction.
+
+        Methylation samples get `METH_EXTRA_TAGS` added automatically -- see that
+        constant for why it is derived rather than declared.
+
+        :param sample_name: sample being compared.
+        :param kind: comparison kind, one of `COMPARE_KINDS`.
+        :return: sorted, de-duplicated tag names.
+        """
+        tags = self._resolve_tags(sample_name, kind, "expect_tags")
+        if self.samples[sample_name].is_meth:
+            tags |= METH_EXTRA_TAGS
+        return sorted(tags)
+
+    def absent_ok_tags(self, sample_name: str, kind: str) -> list[str]:
+        """`ignore_tags` entries known to be absent for one (sample, kind).
+
+        These are exempt from `compare-bams`' dead-entry check, which otherwise
+        fails a run whose `ignore_tags` names a tag matching no record. Two
+        populations qualify: mate tags on single-end samples (impossible by
+        definition) and MQ/HN on methylation samples (absent by defect --
+        fg-labs/bwa-mem3#296).
+
+        The result is intersected with `ignore_tags()` -- the DERIVED list, not
+        the raw config -- because only ignore entries are ever audited; naming a
+        tag that is not ignored would be inert config, which is the very thing
+        this guard exists to reject (`TagGuardViolation::RedundantAbsentOk`).
+
+        :param sample_name: sample being compared.
+        :param kind: comparison kind, one of `COMPARE_KINDS`.
+        :return: sorted, de-duplicated tag names.
+        """
+        sample = self.samples[sample_name]
+        absent: set[str] = set()
+        if sample.layout == "single":
+            absent |= MATE_ONLY_TAGS
+        if sample.is_meth:
+            absent |= METH_UNEMITTED_TAGS
+        return sorted(absent.intersection(self.ignore_tags(sample_name, kind)))
 
 
 def _as_str_list(owner: str, key: str, value: Any) -> list[str]:
@@ -258,6 +377,42 @@ def _as_str_list(owner: str, key: str, value: Any) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
         raise ValueError(f"{owner} `{key}` must be a list of strings; got {value!r}")
     return list(value)
+
+
+def _as_tag_list(owner: str, key: str, value: Any) -> list[str]:
+    """Validate a tag list is a `list[str]` of well-formed SAM aux tag names.
+
+    A SAM aux tag is exactly two characters, `[A-Za-z][A-Za-z0-9]`. Anything else
+    can never match a tag `compare-bams` reads off a record, so a typo like
+    `NMX` would sit in the config doing nothing.
+
+    That matters asymmetrically. A typo in `ignore_tags` IS caught at run time --
+    the tag matches no record, so the dead-entry check fires. A typo in
+    `expect_tags` is not: the list means "may appear", so an entry that can never
+    appear is indistinguishable from one that legitimately does not. Validating
+    the shape here is what keeps the guard's own config subject to the rule the
+    guard exists to enforce -- config that silently does nothing is the bug.
+
+    :param owner: what the list belongs to, rendered verbatim into the error
+        message (e.g. `"sample 'wgs-5M'"` or ``"`compare_defaults`"``). The
+        top-level block uses this helper too, so it is not always a sample.
+    :param key: config key being validated (e.g. `compare_defaults.vs_x86`).
+    :param value: raw value read from YAML.
+    :return: the value as a `list[str]`.
+    :raises ValueError: if `value` is not a list of strings, or any entry is not
+        a well-formed two-character aux tag name.
+    """
+    tags = _as_str_list(owner, key, value)
+    malformed = [t for t in tags if not _AUX_TAG_RE.fullmatch(t)]
+    if malformed:
+        raise ValueError(
+            f"{owner} `{key}` has malformed aux tag name(s) "
+            f"{malformed}. A SAM aux tag is exactly two characters matching "
+            f"[A-Za-z][A-Za-z0-9] (e.g. NM, MD, XS). An entry of any other shape "
+            f"can never match a tag on a record, so it would sit in the config "
+            f"doing nothing."
+        )
+    return tags
 
 
 def _as_bool(sample_name: str, key: str, value: Any) -> bool:
@@ -346,6 +501,27 @@ def parse_ladder_override(spec: str) -> list[ThreadScalingStep]:
     return sorted(steps, key=lambda step: step.threads)
 
 
+def _reject_unknown_keys(owner: str, where: str, body: dict[str, Any]) -> None:
+    """Reject keys nothing reads inside a comparison-kind body.
+
+    Only `_TAG_LIST_KEYS` are consulted, so a near-miss like `expect_tag`
+    (singular) would load clean and configure nothing -- inert config, which is
+    the exact failure mode the tag guard exists to reject. Catch it at load.
+
+    :param owner: what the body belongs to, for the error message.
+    :param where: the config path being validated (e.g. `compare_options.vs_x86`).
+    :param body: the kind body read from YAML.
+    :raises ValueError: if `body` carries any key outside `_TAG_LIST_KEYS`.
+    """
+    unknown = sorted(set(body) - set(_TAG_LIST_KEYS))
+    if unknown:
+        raise ValueError(
+            f"{owner} `{where}` has unknown key(s) {unknown}; expected one of "
+            f"{sorted(_TAG_LIST_KEYS)}. A key nothing reads would sit in the "
+            f"config doing nothing."
+        )
+
+
 def _validate_compare_options(sample_name: str, options: Any) -> dict[str, Any]:
     """Validate a sample's `compare_options` is keyed by comparison kind.
 
@@ -394,27 +570,38 @@ def _validate_compare_options(sample_name: str, options: Any) -> dict[str, Any]:
                 f"sample {sample_name!r} `compare_options.{key}` must be a mapping "
                 f"(e.g. `{{ignore_tags: [NM]}}`); got {body!r}"
             )
-        _as_str_list(
-            f"sample {sample_name!r}",
-            f"compare_options.{key}.ignore_tags",
-            body.get("ignore_tags", []),
-        )
+        _reject_unknown_keys(f"sample {sample_name!r}", f"compare_options.{key}", body)
+        for list_key in _TAG_LIST_KEYS:
+            _as_tag_list(
+                f"sample {sample_name!r}",
+                f"compare_options.{key}.{list_key}",
+                body.get(list_key, []),
+            )
     return options
 
 
-def _validate_compare_defaults(raw: Any) -> dict[str, list[str]]:
+def _validate_compare_defaults(raw: Any) -> dict[str, dict[str, list[str]]]:
     """Validate the top-level `compare_defaults` block and flatten it to lists.
 
+    Every known kind must declare a NON-EMPTY `expect_tags`. That requirement is
+    what makes `compare-bams`' unexpected-tag check enforceable: the binary skips
+    that check when handed no allowlist, because an unconfigured allowlist is
+    indistinguishable from an empty one and failing every tag would be useless.
+    Requiring it here means a new comparison kind cannot be added with the guard
+    silently inert -- which is bench #34's failure mode exactly.
+
     :param raw: the raw `compare_defaults` mapping from `samples.yaml`.
-    :return: kind -> ignore-tag list, with every known kind present.
-    :raises ValueError: on an unknown kind, a non-mapping body, or a kind whose
-        `ignore_tags` is not a list of strings.
+    :return: kind -> {`ignore_tags`, `expect_tags`}, with every known kind present.
+    :raises ValueError: on an unknown kind, a non-mapping body, a list that is
+        not a list of strings, or a kind with no `expect_tags`.
     """
     if raw is None:
         raw = {}
     if not isinstance(raw, dict):
         raise ValueError(f"`compare_defaults` must be a mapping; got {raw!r}")
-    out: dict[str, list[str]] = {kind: [] for kind in COMPARE_KINDS}
+    out: dict[str, dict[str, list[str]]] = {
+        kind: {k: [] for k in _TAG_LIST_KEYS} for kind in COMPARE_KINDS
+    }
     for kind, body in raw.items():
         if kind not in COMPARE_KINDS:
             raise ValueError(
@@ -426,8 +613,25 @@ def _validate_compare_defaults(raw: Any) -> dict[str, list[str]]:
                 f"`compare_defaults.{kind}` must be a mapping "
                 f"(e.g. `{{ignore_tags: [MQ, HN]}}`); got {body!r}"
             )
-        out[kind] = _as_str_list(
-            "`compare_defaults`", f"{kind}.ignore_tags", body.get("ignore_tags", [])
+        _reject_unknown_keys("`compare_defaults`", kind, body)
+        out[kind] = {
+            list_key: _as_tag_list(
+                "`compare_defaults`", f"{kind}.{list_key}", body.get(list_key, [])
+            )
+            for list_key in _TAG_LIST_KEYS
+        }
+
+    missing = sorted(kind for kind, body in out.items() if not body["expect_tags"])
+    if missing:
+        raise ValueError(
+            f"`compare_defaults` must declare a non-empty `expect_tags` for every "
+            f"comparison kind; missing for {missing}. Without it compare-bams "
+            f"cannot enforce its unexpected-tag check, so a tag nobody anticipated "
+            f"would show up only as an unexplained drop in concordance. List the "
+            f"tags the two sides may emit, e.g.\n"
+            f"    compare_defaults:\n"
+            f"      {missing[0]}:\n"
+            f"        expect_tags: [AS, HN, MC, MD, MQ, NM, SA, XA, XS]"
         )
     return out
 

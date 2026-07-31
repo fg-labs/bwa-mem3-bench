@@ -37,6 +37,17 @@ where
         compare_template(&template?, opts, &mut report);
     }
     report.finalize();
+
+    // Flag every ignored tag in `by_tag`, including ones that never diverged or
+    // never appeared, so the JSON states the whole policy rather than only the
+    // part of it that happened to fire.
+    for tag in &opts.ignore_tags {
+        report.mark_ignored(tag);
+    }
+
+    if opts.tag_guard {
+        report.tag_guard_violations = crate::guard::check(&report, opts);
+    }
     Ok(report)
 }
 
@@ -107,13 +118,27 @@ fn compare_template(t: &Template, opts: &CompareOptions, report: &mut Concordanc
     ends.sort_unstable();
     ends.dedup();
     for end in ends {
-        let classification = match (q_primary.get(&end), b_primary.get(&end)) {
+        let (q, b) = (q_primary.get(&end), b_primary.get(&end));
+        let classification = match (q, b) {
             (Some(q), Some(b)) => classify(q, b, opts),
             (Some(_), None) => Classification::only_diff(Discordance::MappedOnlyQuery),
             (None, Some(_)) => Classification::only_diff(Discordance::MappedOnlyBaseline),
             (None, None) => continue,
         };
         report.record(&classification);
+    }
+
+    // Presence is censused across EVERY record on both sides, not just the
+    // classified primaries. `by_tag` is documented as a census of every tag
+    // *observed*, and [`crate::guard`] reads it: a tag carried only by a
+    // secondary or supplementary would otherwise never be seen, so the guard
+    // would wave through an unexpected tag and would call a live `ignore_tags`
+    // entry dead. Scoring stays primary-only -- this loop only tallies presence.
+    for record in &t.query {
+        report.record_presence(Some(record), None);
+    }
+    for record in &t.baseline {
+        report.record_presence(None, Some(record));
     }
 
     // Supplementary disagreement axis.
@@ -128,7 +153,10 @@ fn compare_template(t: &Template, opts: &CompareOptions, report: &mut Concordanc
 mod tests {
     use super::*;
     use noodles_core::Position;
+    use noodles_sam::alignment::record::data::field::Tag;
     use noodles_sam::alignment::record::{Flags, MappingQuality};
+    use noodles_sam::alignment::record_buf::data::field::Value;
+    use noodles_sam::alignment::record_buf::Data;
 
     const R1: u16 = 0x40; // FIRST_SEGMENT
     const R2: u16 = 0x80; // LAST_SEGMENT
@@ -154,6 +182,30 @@ mod tests {
         compare_template(&t, &CompareOptions::default(), &mut report);
         report.finalize();
         report
+    }
+
+    /// `by_tag` is documented as a census of every tag *observed*, and the guard
+    /// reads it to tell an unexpected tag from a dead `ignore_tags` entry. A tag
+    /// carried only by a supplementary must therefore reach it: censusing only
+    /// the classified primaries would let an unanticipated tag through the guard
+    /// entirely, and would call a live ignore entry dead.
+    #[test]
+    fn a_tag_only_on_a_supplementary_is_still_censused() {
+        let mut supp = rec("t", R1 | SUPP, 0, 500, 60);
+        let data: Data = [(Tag::new(b'X', b'Y'), Value::Int32(1))]
+            .into_iter()
+            .collect();
+        *supp.data_mut() = data;
+        let report = report_for(
+            vec![rec("t", R1, 0, 100, 60), supp],
+            vec![rec("t", R1, 0, 100, 60)],
+        );
+        let counter = report
+            .by_tag
+            .get("XY")
+            .expect("a supplementary-only tag must still be observed");
+        assert_eq!(counter.query_present, 1);
+        assert_eq!(counter.baseline_present, 0);
     }
 
     #[test]

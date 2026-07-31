@@ -2,9 +2,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use noodles_sam::alignment::record_buf::RecordBuf;
 use serde::{Deserialize, Serialize};
 
-use crate::classify::{Classification, Discordance};
+use crate::classify::{tag_str, Classification, Discordance};
+use crate::guard::TagGuardViolation;
 
 /// Per-class count and percentage bucket in a [`ConcordanceReport`].
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -29,11 +31,37 @@ pub struct TagCounter {
     pub query_only: u64,
     /// Only the baseline record carried the tag.
     pub baseline_only: u64,
-    /// True when this tag is on the `ignore_tags` list, so its divergence is
-    /// reported here but excluded from `concordance_pct`. Present so a reader
-    /// can tell "diverges and we accepted it" from "diverges and it counted".
+    /// Records on the query side carrying this tag at all, whether or not it
+    /// diverged. Together with `baseline_present` this makes `by_tag` a census
+    /// of every tag *observed* rather than only of those that differed, which
+    /// is what lets [`crate::guard`] tell an unexpected tag from a dead
+    /// `ignore_tags` entry — and lets the error message quantify both.
+    #[serde(default)]
+    pub query_present: u64,
+    /// Records on the baseline side carrying this tag at all.
+    #[serde(default)]
+    pub baseline_present: u64,
+    /// True when this tag is on the `ignore_tags` list, so any divergence it has
+    /// is reported here but excluded from `concordance_pct`. Set for every
+    /// ignored tag, including ones that never diverged or never appeared at all,
+    /// so the block states the whole policy rather than the part that fired.
+    /// Present so a reader can tell "diverges and we accepted it" from "diverges
+    /// and it counted".
     #[serde(default)]
     pub ignored: bool,
+}
+
+impl TagCounter {
+    /// Whether this tag appeared on at least one record of either side.
+    ///
+    /// The meaning of the two presence counters, and the predicate both of
+    /// [`crate::guard`]'s checks turn on — an entry can exist with all-zero
+    /// counts (see [`ConcordanceReport::mark_ignored`]), so "has an entry" and
+    /// "was observed" are different questions.
+    #[must_use]
+    pub fn observed(&self) -> bool {
+        self.query_present > 0 || self.baseline_present > 0
+    }
 }
 
 /// Aggregated result of comparing two BAMs, suitable for JSON serialization.
@@ -58,10 +86,12 @@ pub struct ConcordanceReport {
     pub concordance_pct: f64,
     pub by_class: BTreeMap<String, ClassCounter>,
 
-    /// Per-tag divergence, keyed by tag name. Populated for EVERY tag that
-    /// diverged, including those on `ignore_tags` — those carry `ignored: true`
-    /// and are excluded from `concordance_pct` but never hidden, so a
-    /// misclassified tag is diagnosable from this block alone.
+    /// Per-tag census, keyed by tag name. Holds an entry for EVERY tag observed
+    /// on either side — not only those that diverged (see [`Self::record_presence`])
+    /// — plus every `ignore_tags` entry (see [`Self::mark_ignored`]), which may
+    /// have all-zero counts when it matched no record. Ignored tags carry
+    /// `ignored: true` and are excluded from `concordance_pct` but never hidden,
+    /// so a misclassified tag is diagnosable from this block alone.
     #[serde(default)]
     pub by_tag: BTreeMap<String, TagCounter>,
 
@@ -77,6 +107,21 @@ pub struct ConcordanceReport {
     /// side (union over both BAMs).
     pub supp_unmatched: u64,
     pub supp_unmatched_pct: f64,
+
+    /// Ways the observed tag set deviated from what the config declared. Empty
+    /// on a healthy run, and omitted from the JSON when empty so the schema is
+    /// unchanged for every passing comparison.
+    ///
+    /// The verdict lives in the report as well as on stderr, because the run
+    /// that trips the guard exits non-zero *after* writing this file. Note the
+    /// limit of that: under the workflow this JSON is the compare rule's
+    /// `output:`, and snakemake deletes the outputs of a failed job, so the
+    /// file survives only for a direct/manual invocation. In the Batch pipeline
+    /// the verdict reaches an operator through the worker's `CloudWatch` stderr,
+    /// which is why [`crate::guard::TagGuardViolation::message`] is written to
+    /// stand alone rather than to annotate this block.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tag_guard_violations: Vec<TagGuardViolation>,
 }
 
 impl ConcordanceReport {
@@ -109,6 +154,63 @@ impl ConcordanceReport {
         for key in classes {
             self.by_class.entry(key.to_string()).or_default().count += 1;
         }
+    }
+
+    /// Record which tags each side of one compared read carried.
+    ///
+    /// Kept separate from [`Self::record`] rather than folded into it: `record`
+    /// takes only a [`Classification`], which is what makes the report's own
+    /// tests pure, and presence is the one thing that cannot be derived from a
+    /// classification — [`crate::classify::classify`] reports tags that
+    /// *differ*, so a tag present and identical on both sides never appears
+    /// there. Either side may be `None` when only one side has a record to offer.
+    ///
+    /// Called for EVERY record on both sides — secondaries and supplementaries
+    /// included — not only the classified primaries, so `by_tag` really is the
+    /// census of observed tags that [`crate::guard`] relies on. A tag emitted
+    /// only on a supplementary would otherwise be invisible to the guard, which
+    /// would then wave through an unexpected tag and call a live `ignore_tags`
+    /// entry dead. Scoring is unaffected: `record` still sees primaries only, so
+    /// these counts deliberately do NOT share `total_reads`' denominator.
+    pub fn record_presence(&mut self, query: Option<&RecordBuf>, baseline: Option<&RecordBuf>) {
+        for (record, is_query) in [(query, true), (baseline, false)] {
+            let Some(record) = record else { continue };
+            for (tag, _) in record.data().iter() {
+                // Borrow the two tag bytes as &str rather than allocating a
+                // String per tag per record: this runs on every tag of every
+                // read, where the diff path runs only on the ones that differ.
+                // BTreeMap<String, _> looks up by &str, so the only allocation
+                // is on first sight of a tag.
+                //
+                // Measured on panel-twist-5M (7.9M primaries, ~9 tags/side, so
+                // ~140M lookups) against the same binary with this call stubbed
+                // out, interleaved A/B over a warm page cache: 72.3s without vs
+                // 75.8s with, i.e. under 5% — and the two distributions overlap
+                // (75.8s worst without, 68.6s best with), so the effect is not
+                // separable from run-to-run noise at n=4. Not worth a
+                // hand-rolled tag-interning structure.
+                let Some(name) = tag_str(&tag) else { continue };
+                let entry = match self.by_tag.get_mut(name) {
+                    Some(entry) => entry,
+                    None => self.by_tag.entry(name.to_string()).or_default(),
+                };
+                if is_query {
+                    entry.query_present += 1;
+                } else {
+                    entry.baseline_present += 1;
+                }
+            }
+        }
+    }
+
+    /// Mark `tag` as excluded from the score, creating its `by_tag` entry if
+    /// this comparison never observed it.
+    ///
+    /// Needed because `ignored` is otherwise only set when a tag *diverges*, so
+    /// a correctly-ignored tag that happens to agree everywhere — or one absent
+    /// entirely — would read as un-ignored in the JSON.
+    pub fn mark_ignored(&mut self, tag: &str) {
+        self.by_tag.entry(tag.to_string()).or_default().ignored = true;
     }
 
     /// Add one tag difference to `by_tag`; a no-op for non-tag differences.
@@ -200,6 +302,23 @@ mod tests {
         Discordance::TagValueDiff {
             tag: tag.to_string(),
         }
+    }
+
+    /// A record carrying `tags`, for exercising the presence path.
+    fn with_tags(tags: &[(&str, i32)]) -> RecordBuf {
+        use noodles_sam::alignment::record::data::field::Tag;
+        use noodles_sam::alignment::record_buf::data::field::Value;
+        use noodles_sam::alignment::record_buf::Data;
+        let data: Data = tags
+            .iter()
+            .map(|(name, v)| {
+                let b = name.as_bytes();
+                (Tag::new(b[0], b[1]), Value::Int32(*v))
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .collect();
+        RecordBuf::builder().set_data(data).build()
     }
 
     /// A read whose only scored differences are `diffs`, with no ignored tags.
@@ -304,6 +423,45 @@ mod tests {
         assert_eq!(r.by_class["tag_diff"].count, 1);
         assert!(!r.by_tag["XS"].ignored);
         assert!(r.by_tag["NM"].ignored);
+    }
+
+    /// Presence is what the guard reads, and it is exactly the thing a
+    /// classification cannot supply: a tag present and identical on both sides
+    /// produces no `Discordance`, so without this it would be invisible.
+    #[test]
+    fn presence_is_counted_for_tags_that_never_diverge() {
+        let mut r = ConcordanceReport::default();
+        let rec = with_tags(&[("NM", 3), ("MQ", 60)]);
+        r.record(&scored(vec![]));
+        r.record_presence(Some(&rec), Some(&rec));
+        r.finalize();
+        assert_eq!(r.concordant, 1, "identical tags leave the read concordant");
+        assert_eq!(r.by_tag["NM"].query_present, 1);
+        assert_eq!(r.by_tag["NM"].baseline_present, 1);
+        assert_eq!(r.by_tag["NM"].value_diff, 0, "nothing diverged");
+    }
+
+    /// A primary present on one side only still contributes that side's tags:
+    /// the comparison observed them, whatever the other side did.
+    #[test]
+    fn one_sided_records_contribute_one_sided_presence() {
+        let mut r = ConcordanceReport::default();
+        let rec = with_tags(&[("MQ", 60)]);
+        r.record_presence(Some(&rec), None);
+        assert_eq!(r.by_tag["MQ"].query_present, 1);
+        assert_eq!(r.by_tag["MQ"].baseline_present, 0);
+    }
+
+    /// `ignored` is otherwise only set when a tag diverges, so a correctly
+    /// ignored tag that happens to agree would read as un-ignored in the JSON.
+    #[test]
+    fn mark_ignored_flags_a_tag_that_never_diverged() {
+        let mut r = ConcordanceReport::default();
+        let rec = with_tags(&[("MQ", 60)]);
+        r.record_presence(Some(&rec), Some(&rec));
+        r.mark_ignored("MQ");
+        assert!(r.by_tag["MQ"].ignored);
+        assert_eq!(r.by_tag["MQ"].query_present, 1);
     }
 
     #[test]

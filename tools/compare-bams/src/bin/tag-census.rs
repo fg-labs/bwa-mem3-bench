@@ -104,13 +104,40 @@ fn diff_tags(
     b: &RecordBuf,
     census: &mut Census,
 ) -> Vec<String> {
+    // Borrow the two tag bytes as &str rather than allocating a String per tag
+    // per record: this runs on every tag of every record on both sides, where
+    // the diff loop below runs only on the ones that actually differ.
+    // `BTreeMap<String, _>` looks up by &str, so the only allocation is on first
+    // sight of a tag. Mirrors `ConcordanceReport::record_presence`.
     for (t, _) in q.data().iter() {
-        let name = String::from_utf8_lossy(Tag::as_ref(&t)).into_owned();
-        census.tag_presence.entry(name).or_default().query += 1;
+        let Ok(name) = std::str::from_utf8(Tag::as_ref(&t)) else {
+            continue;
+        };
+        match census.tag_presence.get_mut(name) {
+            Some(entry) => entry.query += 1,
+            None => {
+                census
+                    .tag_presence
+                    .entry(name.to_string())
+                    .or_default()
+                    .query += 1;
+            }
+        }
     }
     for (t, _) in b.data().iter() {
-        let name = String::from_utf8_lossy(Tag::as_ref(&t)).into_owned();
-        census.tag_presence.entry(name).or_default().baseline += 1;
+        let Ok(name) = std::str::from_utf8(Tag::as_ref(&t)) else {
+            continue;
+        };
+        match census.tag_presence.get_mut(name) {
+            Some(entry) => entry.baseline += 1,
+            None => {
+                census
+                    .tag_presence
+                    .entry(name.to_string())
+                    .or_default()
+                    .baseline += 1;
+            }
+        }
     }
 
     let mut differing = Vec::new();
@@ -235,9 +262,17 @@ fn main() -> Result<()> {
     // default to the workflow's current settings (no ignored tags, zero MAPQ
     // tolerance), so an unflagged run still matches today's invocation — but a
     // policy added to the workflow no longer silently desyncs the two.
+    //
+    // The tag guard is explicitly OFF: it fails a run on any tag outside the
+    // allowlist, but discovering exactly those tags is this tool's entire
+    // purpose — a census that aborts on an unanticipated tag could never report
+    // one. `core_concordance_pct` is unaffected either way, since the guard
+    // gates the run rather than the classification.
     let opts = CompareOptions {
         ignore_tags: args.ignore_tags.into_iter().collect(),
         mapq_tolerance: args.mapq_tolerance,
+        tag_guard: false,
+        ..CompareOptions::default()
     };
 
     let query =
