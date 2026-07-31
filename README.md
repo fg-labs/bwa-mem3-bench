@@ -17,7 +17,9 @@ pixi run check
 ## Layout
 
 - `bwa_mem3_bench/` — Python CLI + library (reports, storage, orchestration)
-- `tools/compare-bams/` — Rust crate that compares two BAMs in lockstep
+- `tools/compare-bams/` — Rust crate that compares two BAMs in lockstep.
+  Also ships `tag-census`, an offline instrument that reports which aux tags
+  differ per read (see below)
 - `workflow/` — Snakemake pipeline
 - `cdk/` — AWS infrastructure (S3, ECR, IAM, Batch)
 - `docker/` — Multi-arch Dockerfile baking bwa-mem2 + samtools + bwameth
@@ -89,6 +91,40 @@ is a shim on arm64, so both "query" and "baseline" actually use `bwa-mem2.fg-lab
 (self-concordance = 100% by construction). This validates rule wiring before
 touching AWS; it does **not** exercise the real upstream-vs-fg-labs comparison
 (that's what the AWS `smoke` target is for).
+
+## Measuring aux-tag divergence (`tag-census`)
+
+`compare-bams` scores placement (position / CIGAR / MAPQ / placement flags) and
+ignores aux tags. `tag-census` answers the prior question — *which tags would it
+be safe to compare, and what would comparing them cost?* — so a tag policy can be
+set from data instead of guessed:
+
+```bash
+cargo build --release --bin tag-census
+./target/release/tag-census --query <fg-labs.bam> --baseline <other.bam> \
+    --out census.json --label "vs_baseline wgs-5M c6a"
+```
+
+It reuses `compare-bams`' template-grouped walk and classifier, so its
+`core_concordance_pct` matches `compare-bams`' `concordance_pct` exactly on the
+same pair given the same policy — pass the `--ignore-tag` / `--mapq-tolerance`
+flags the corresponding `compare-bams` invocation passes (both default to the
+workflow's current settings: no ignored tags, zero tolerance). The report is
+policy-free: per-tag presence / value-difference counts, plus a histogram over the
+*set* of tags differing on each read, split by whether that read was already
+discordant on core fields. Because the histogram is over sets, the concordance
+implied by any candidate strict-tag set is computable after the fact — it is the
+count of core-concordant reads whose differing-tag set misses that candidate —
+so evaluating a policy is arithmetic on the JSON, not a re-run.
+
+Two divergence modes it distinguishes, which matter for choosing a policy:
+
+- **Presence** — a tag one side never writes (`MQ`/`HN` vs upstream bwa-mem2).
+  Systematic and all-or-nothing; comparing one strictly zeroes concordance.
+- **Value** — both sides write it, values disagree. It can be sporadic (real signal)
+  or near-universal: `NM`/`MD` differ on 99.7% of reads against bwameth, because
+  bisulfite mode computes them against a differently-converted reference. A
+  presence-only survey cannot see that — both sides emit them at equal counts.
 
 ## Known limitations
 
