@@ -15,6 +15,15 @@
 #   date               when blessed
 #   summary            what changed and why it's intentional
 #   expected_drift_pct approximate concordance drift vs the previous golden
+#   aliases            SHAs sharing this entry's golden (see `ReleaseAllowance.aliases`)
+#
+# Terminology: an identity claim in a `summary` below ("byte-identical",
+# "record-stream-identical", "identical output") always means the ALIGNMENT
+# RECORD STREAM is identical -- never the BAM file's bytes. Two runs of the same
+# SHA routinely differ as files: the workflow compresses with `samtools view -@4`,
+# whose block boundaries vary run to run, and the `@PG` header embeds the run path
+# and the SHA-stamped version string. Establish these claims with `compare-bams`
+# or `samtools view` (header excluded), never `md5` on the BAM.
 # v0.2.0 is the first blessed golden and is blessed with `--force` (no prior
 # golden to move from, so no allowance is needed or possible).
 allowances:
@@ -151,3 +160,92 @@ allowances:
     # reference. Aliased so a vs-golden run pinned to the tag resolves here.
     aliases:
       - a887e36cb8fbdc54bd5a3543cdfd1850bf7e2f52   # v0.6.0 release tag (= 48cf0a4 + #217, banner-only)
+
+  - to_sha: 04777b3c3f3c2f18d5838b6f4116015c7f5f2ad9
+    pr: fg-labs/bwa-mem3#220
+    date: 2026-07-22
+    summary: >-
+      v0.7.0: a deliberate methylation-alignment change; non-methylation DNA is
+      record-stream-identical to the v0.6.0 golden (48cf0a4). All 180 non-meth vs-golden
+      cells (wgs-5M, wes-5M, panel-twist-5M, hic-1M, sbx-1M, smoke-1M x six archs
+      x 5 reps) are 100.00000% concordant — primary placement, MAPQ, CIGAR, and
+      supplementary counts unchanged, and identical across all six archs. The
+      fix(ext) ungapped fast-path bound (#231) and the mem overflow/realloc
+      guards (#235/#237) produced no observable output change on benchmarked data.
+      Methylation — the D3 chemistry rework (TAPS mode #228, NEUTRAL
+      --meth-scoring default #243, cross-chemistry seed dropping by read number
+      #225, both-hypothesis mate rescue #219/#221/#224, match-scaled scoring
+      defaults #227) intentionally moves EM-seq output vs the v0.6.0 golden:
+      meth-twist-emseq-5M 94.37% / smoke-meth 94.30% primary concordance vs the
+      v0.6.0 golden (~5.6% drift; the two meth samples are the only cells that
+      diverge). This is a quality improvement, not a regression, confirmed by
+      truth-based holodeck eval: drift vs the bwameth baseline HALVED (5.71% ->
+      2.88%), placement rose (sim-meth-place 94.53 -> 94.65%, MD concordance
+      94.31 -> 94.50%) to essentially tie bwameth (94.66%), and per-CpG
+      methylation Pearson r held at 0.9456 (place) / 0.9803 (vars). The meth
+      vs-upstream over-budget rows (Gate #1) are the same fg-labs-vs-bwameth
+      contract carried since v0.4.0, improved here, not new drift. Performance:
+      broad win on the default path vs v0.6.0 (wgs-5M -9 to -22%, wes-5M up to
+      -24% on the low-noise archs; ~1.2-2.0x compute vs upstream v2.2.1) from the
+      banded-SW/kswv kernel tuning (#222/#223/#252-255) and parallel FM-index
+      load (#248). Known deliberate trade: fix(fast) #218 (--extend-mate-concordant
+      + chain cap 5->20) roughly doubles --fast extension (BSW) work; on
+      panel-twist-5M-fast this surfaces as +7-15% wall on the low-noise archs
+      (c6a/c7a/c7g/c8g; the c7i -2.6% / m7i +43.5% cells are Sapphire-Rapids spot
+      noise), the price of --fast placement rising to within 0.02pp of the default
+      path (sim-wgs-place-fast 95.11 -> 95.15%). --fast is not part of this golden.
+      Intentional, accepted.
+    expected_drift_pct: 5.7
+    # Golden lives under 04777b3c — the release-please #220 head benched at
+    # reps=5 (target bless_release) across all six archs. When #220 squash-merges
+    # to the shipped v0.7.0 tag, add the tag SHA as an alias below (the tag is a
+    # code-identical squash of this benched commit), so a vs-golden run pinned to
+    # the tag resolves to 04777b3c's golden with no BAM re-copy — same pattern as
+    # v0.5.0 (9dd30dd0 / b2fea46) and v0.6.0 (48cf0a4 / a887e36). Verified
+    # tree-identical: 04777b3c and 228a61b share tree e772e3fa (src/ unchanged;
+    # #220 squash-merge is version/changelog only).
+    aliases:
+      - 228a61b7556a81b4eba1eac99fe241b5edf232cd   # v0.7.0 release tag (squash-merge of #220, tree-identical to 04777b3c)
+
+  - to_sha: 394f8f8110f7d15be7ef2ca38c335590aa1e0284
+    pr: fg-labs/bwa-mem3#278
+    date: 2026-07-25
+    summary: >-
+      main (394f8f8) vs the v0.7.0 golden (04777b3c): a small, bounded, and
+      strictly architecture-invariant alignment change. Measured with
+      compare-bams over all 38 (sample, arch) cells — every arch within a sample
+      returns the IDENTICAL concordance and the identical per-class discordance
+      breakdown, which is what establishes this as a code change rather than a
+      SIMD-tier effect. Primary concordance vs the v0.7.0 golden: wes-5M
+      99.99938%, sbx-1M 99.99860%, smoke-meth 99.98554%, wgs-5M 99.98789%,
+      meth-twist-emseq-5M 99.99390%, hic-1M 99.99665%, smoke-1M 99.93208%,
+      panel-twist-5M 99.91478% (the worst cell, 6,744 of 7,913,324 reads).
+      Discordance is dominated by pos_diff and mapq_diff with a CIGAR tail, and
+      one mapped_only_baseline read on wgs-5M; placement is preserved on
+      >99.91% of reads on every sample. Intentional, accepted.
+    expected_drift_pct: 0.09
+    # Blesses 394f8f8, the SHA the full 38-cell matrix was benched at. e722ed0
+    # (394f8f8 + fg-labs/bwa-mem3#273) is output-IDENTICAL to it across ALL 38
+    # cells, so this entry covers either commit; #273 is a z-drop/seed-clamp
+    # correctness fix that turned out to be output-neutral on every benchmarked
+    # cell. This is an alias of the measured kind (see `ReleaseAllowance.aliases`)
+    # — e722ed0 is NOT tree-identical to 394f8f8, so the coverage has to be
+    # complete, and it is:
+    #   - 36 non-meth cells (6 samples x 6 archs), verified in the #273 sweep.
+    #   - 2 meth cells (meth-twist-emseq-5M/m7i, smoke-meth/m7i), which that
+    #     sweep did NOT cover — meth is m7i-only and was not re-run at e722ed0.
+    #     Benched separately at e722ed0 and compared against 394f8f8's BAMs:
+    #     compare-bams reports 100.0000000% concordance with an empty by_class
+    #     on both (10,369,692 and 20,740 reads), and the record streams are
+    #     md5-identical (1fc86c19... and d94667f4...). The two runs' vs-baseline
+    #     concordances against the same bwameth baseline also agree to all 16
+    #     digits (97.11914297936718 / 97.11668273866924).
+    # Compared at record level, not by file checksum — see the `aliases` note
+    # about `samtools view -@4` block boundaries.
+    #
+    # NOT covered: fg-labs/bwa-mem3#290 (the XS/kswv 8-bit query-padding fix)
+    # lands after this point and DOES change output — it is precisely the fix
+    # for the AVX-512/NEON-vs-AVX2 XS:i divergence found while validating this
+    # matrix. Blessing a post-#290 SHA needs its own entry and its own bench run.
+    aliases:
+      - e722ed06dd71d0186c401ce2f0e163d32b0a7ad7   # 394f8f8 + #273 (output-identical, 0/38 cells changed)
