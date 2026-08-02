@@ -267,23 +267,35 @@ from `arch.baseline_arch` in `config/archs.yaml`:
   Blessed-golden SHAs are preserved, so they are the reliable place to find
   historical BAMs — e.g. the `*-fast` arms needed for a `vs_default`
   measurement survived only under the v0.7.0 golden `04777b3`.
-- **`bwa-mem3 --meth` emits no `MQ` and no `HN`** — neither does bwameth, so both
-  are absent from *both* sides of every meth comparison. Methylation output goes
-  through a third SAM/BAM writer (`src/meth_bam.cpp`) separate from the text-SAM
-  and generic-BAM paths, and that writer simply lacks the two `bam_aux_append`
-  calls; `mp->mapq` and `p.HN` are both in scope where they would go. Filed as
-  fg-labs/bwa-mem3#296. Consequence for this repo: `vs_baseline`'s
-  `ignore_tags: [MQ, HN]` is two DEAD entries on every meth sample, and
-  `vs_default`'s list is two dead on meth plus one on single-end `sbx-1M`. They
-  are excused from the guard's dead-entry audit via `METH_UNEMITTED_TAGS` /
-  `MATE_ONLY_TAGS` in `workflow_config.py` — delete the former when #296 lands.
+- **`bwa-mem3 --meth` emitted no `MQ` and no `HN` before fg-labs/bwa-mem3#304.**
+  Methylation output goes through a third SAM/BAM writer (`src/meth_bam.cpp`)
+  separate from the text-SAM and generic-BAM paths, and that writer simply lacked
+  the two `bam_aux_append` calls (fg-labs/bwa-mem3#296, fixed by #304). bwameth
+  emits neither and never will. Two consequences for this repo, and they pull in
+  **opposite directions** — do not collapse them:
+  - On a **pre-#304 build**, `vs_baseline`'s `ignore_tags: [MQ, HN]` is two DEAD
+    entries on every meth sample, and `vs_default`'s list is two dead on meth plus
+    one on single-end `sbx-1M`. Excused from the guard's dead-entry audit via
+    `METH_UNEMITTED_TAGS` / `MATE_ONLY_TAGS`. Keep that exemption while any
+    pre-#304 SHA is still benched (old-golden re-runs, bisects); it is merely
+    redundant on newer builds, never wrong.
+  - On a **post-#304 build**, meth `vs_golden` breaks instead: it is strict on
+    every tag, so a query that HAS both tags against a golden blessed before #304
+    is 100% `query_only` on two tags, on every meth cell — a hard **Gate #2**
+    failure (`>= 99.999%`) caused by an upstream *fix*. Handled by
+    `METH_GOLDEN_TRANSITION_TAGS`; **delete that constant when the golden is
+    re-blessed** from a build containing #304, or two real tags stay unguarded on
+    the one comparison meant to be strict.
 - **Excuse a known-absent ignore entry from the AUDIT, never by removing it from
   `ignore_tags`.** The two look interchangeable and are not. Dropping meth's
-  `MQ`/`HN` from the ignore list would make them strict, so the day #296 is fixed
-  bwa-mem3 would start emitting them, bwameth still would not, and meth
+  `MQ`/`HN` from the ignore list would make them strict, so once #296 was fixed
+  (by #304) bwa-mem3 would start emitting them, bwameth still would not, and meth
   `vs_baseline` would go to ~100% `query_only` on two tags — a cratered score
   caused by an upstream *fix*. `--absent-ok-tag` exempts the check only, so the
-  exemption quietly becomes redundant instead of becoming a landmine.
+  exemption quietly becomes redundant instead of becoming a landmine. This is not
+  hypothetical: #304 landed and `vs_baseline` was unaffected precisely because the
+  entries stayed on `ignore_tags`. `vs_golden`, which ignores nothing, is what
+  needed a new exemption.
 - **Derive per-sample tag facts from `layout` / `is_meth`, don't restate them in
   YAML.** There are ~10 meth samples × 3 comparison kinds; declaring the bisulfite
   tag set on each is ~30 places for the one fact to drift. `METH_EXTRA_TAGS` and

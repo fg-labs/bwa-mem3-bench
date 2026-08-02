@@ -33,16 +33,43 @@ _TAG_LIST_KEYS = ("ignore_tags", "expect_tags")
 # neither on either side of any comparison.
 MATE_ONLY_TAGS = frozenset({"MQ", "MC"})
 
-# Tags neither side emits under `--meth`. `bwa-mem3`'s methylation output goes
-# through a separate writer (`src/meth_bam.cpp`) that omits MQ and HN, and
-# bwameth emits neither either. Measured: 0 of 10,369,692 primaries on
+# Tags neither side emits under `--meth`, ON A BUILD PREDATING
+# fg-labs/bwa-mem3#304. `bwa-mem3`'s methylation output goes through a separate
+# writer (`src/meth_bam.cpp`) which, until that PR, omitted MQ and HN; bwameth
+# emits neither either. Measured: 0 of 10,369,692 primaries on
 # `meth-twist-emseq-5M`, likewise on `smoke-meth`.
 #
-# Unlike MATE_ONLY_TAGS this is a defect, not a law: tracked as
-# fg-labs/bwa-mem3#296. DELETE THIS CONSTANT when that lands. Note it only
+# Unlike MATE_ONLY_TAGS this was a defect, not a law -- fg-labs/bwa-mem3#296,
+# fixed by #304. The exemption still has to stand while any pre-#304 SHA is
+# benched (an old golden re-run, a bisect), because on those builds the two
+# `vs_baseline` ignore entries genuinely match no record. On a post-#304 build it
+# is simply redundant, not wrong: bwa-mem3 emits both, bwameth still does not, so
+# the entries are live and the audit would have passed anyway.
+#
+# DELETE THIS CONSTANT once no pre-#304 build is in rotation. Note it only
 # exempts the two tags from the dead-entry audit -- they stay on `ignore_tags`,
-# because bwameth will still never emit them once bwa-mem3 does.
+# because bwameth will never emit them.
 METH_UNEMITTED_TAGS = frozenset({"MQ", "HN"})
+
+# MQ/HN on meth `vs_golden`, for the span where the golden predates
+# fg-labs/bwa-mem3#304 and the build under test does not.
+#
+# `vs_golden` is strict on every tag by design -- two fg-labs builds should be
+# ~identical, and Gate #2 (`report/regression.py`) wants >= 99.999% concordance.
+# #304 makes `--meth` emit MQ:i and HN:i for the first time, so the first run on a
+# build carrying it compares a query that HAS both tags against a golden blessed
+# from a build that does not: 100% `query_only` on two tags, on every meth cell.
+# That is a hard Gate #2 failure produced by an upstream FIX, which is exactly the
+# shape this guard exists to keep out of the score.
+#
+# Scoped to meth + `vs_golden` deliberately. Non-meth goldens have always carried
+# both tags. `vs_baseline` already ignores them (bwameth emits neither), and
+# `vs_x86` is not requested for meth samples.
+#
+# This is a transition, not a law: DELETE THIS CONSTANT once the golden is
+# re-blessed from a build containing #304. Leaving it would silently stop guarding
+# two real tags on the one comparison that is meant to be strict.
+METH_GOLDEN_TRANSITION_TAGS = frozenset({"MQ", "HN"})
 
 # Tags that appear only on methylation comparisons: XM/XG/XR from `bwa-mem3
 # --meth`, and YD/YC/RG from bwameth. Derived rather than declared per sample
@@ -300,13 +327,19 @@ class WorkflowConfig:
         rather than declared, and why it must stay derived in lockstep with
         `METH_EXTRA_TAGS` in `expect_tags`.
 
+        They also get `METH_GOLDEN_TRANSITION_TAGS` on `vs_golden`, for as long as
+        the blessed golden predates fg-labs/bwa-mem3#304. See that constant.
+
         :param sample_name: sample being compared.
         :param kind: comparison kind, one of `COMPARE_KINDS`.
         :return: sorted, de-duplicated tag names.
         """
         tags = self._resolve_tags(sample_name, kind, "ignore_tags")
-        if kind == "vs_baseline" and self.samples[sample_name].is_meth:
-            tags |= METH_IGNORE_TAGS
+        if self.samples[sample_name].is_meth:
+            if kind == "vs_baseline":
+                tags |= METH_IGNORE_TAGS
+            elif kind == "vs_golden":
+                tags |= METH_GOLDEN_TRANSITION_TAGS
         return sorted(tags)
 
     def expect_tags(self, sample_name: str, kind: str) -> list[str]:
@@ -336,8 +369,8 @@ class WorkflowConfig:
         These are exempt from `compare-bams`' dead-entry check, which otherwise
         fails a run whose `ignore_tags` names a tag matching no record. Two
         populations qualify: mate tags on single-end samples (impossible by
-        definition) and MQ/HN on methylation samples (absent by defect --
-        fg-labs/bwa-mem3#296).
+        definition) and MQ/HN on methylation samples (absent by defect on any
+        build predating fg-labs/bwa-mem3#304, which closed #296).
 
         The result is intersected with `ignore_tags()` -- the DERIVED list, not
         the raw config -- because only ignore entries are ever audited; naming a

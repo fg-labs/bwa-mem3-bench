@@ -57,11 +57,23 @@ pub struct CompareOptions {
     /// known to be absent from this particular comparison.
     ///
     /// This exempts an entry from the *audit* only; it does not change what is
-    /// ignored. That distinction matters. `MQ` and `HN` are absent from both
-    /// sides of every methylation comparison (fg-labs/bwa-mem3#296), but they
-    /// remain correctly ignored there — bwameth would never emit them even once
-    /// `bwa-mem3` does. Dropping them from `ignore_tags` instead would make them
-    /// strict, and the day #296 is fixed the meth comparison would score ~0%.
+    /// ignored. That distinction matters. `MQ` and `HN` were absent from both
+    /// sides of every methylation comparison until fg-labs/bwa-mem3#304 closed
+    /// #296, but on the cross-tool kind (`vs_baseline`) they remain correctly
+    /// ignored — bwameth never emits them even though `bwa-mem3` now does.
+    /// Dropping them from `ignore_tags` instead would have made them strict, and
+    /// #304 would have scored meth `vs_baseline` ~0% — an upstream *fix*
+    /// cratering the score.
+    ///
+    /// Lifecycle: the exemption is worth passing only while a build predating
+    /// #304 is still in rotation, where the entries genuinely match no record.
+    /// Afterwards it is redundant rather than wrong — an entry whose tag *does*
+    /// appear is simply not a dead entry, so nothing here fires. Do not confuse
+    /// this exemption with the caller's *other* `MQ`/`HN` exclusions — meth
+    /// `vs_golden` (a temporary `ignore_tags` entry spanning the same transition)
+    /// and `vs_default` (a permanent one — the `--fast` preset moves both tags for
+    /// reasons unrelated to this transition). Those change what is ignored; this
+    /// one does not, and all three retire on different triggers.
     pub absent_ok_tags: BTreeSet<String>,
 
     /// Permitted absolute MAPQ difference before flagging as discordant.

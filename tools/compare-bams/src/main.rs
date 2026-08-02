@@ -73,8 +73,8 @@ struct Args {
     /// `--ignore-tag` entry known to be absent from this comparison, exempting
     /// it from the dead-entry check (repeat per tag). The tag stays ignored; only
     /// the audit skips it. Used for tags absent by nature (mate tags on
-    /// single-end reads) or by defect (`MQ`/`HN` under `--meth`,
-    /// fg-labs/bwa-mem3#296).
+    /// single-end reads) or by defect (`MQ`/`HN` under `--meth` on builds
+    /// predating fg-labs/bwa-mem3#304, which closed #296).
     #[arg(long = "absent-ok-tag", value_name = "TAG", value_parser = parse_aux_tag)]
     absent_ok_tags: Vec<String>,
 
