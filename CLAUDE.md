@@ -426,6 +426,30 @@ from `arch.baseline_arch` in `config/archs.yaml`:
   past ~128 threads. Note also that the 256 M-base chunk cap engages at
   t >= 26, so t=32 and t=64 use identical chunking (identical output bytes)
   while t=16 differs — expected, per the cap's comment in `fastmap.cpp`.
+  **That last sentence has a shelf life:** fg-labs/bwa-mem3#298 makes the cap
+  opt-in, because capping re-partitions the input and so silently diverges from
+  bwa/bwa-mem2 for every `-t >= 26`. Once it lands, t=32 and t=64 get *different*
+  chunking again and their outputs stop matching each other.
+
+- **The "overhead outside `process()`" does NOT grow with thread count — that
+  was a cold-cache artifact, and its mechanism is now known.** An earlier
+  measurement recorded it growing 1.70 s at t=16 to 3.80 s at t=64 and concluded
+  the thread-scaling gate was structurally blind to the largest source of wall
+  inefficiency. Re-measured on c8g.16xlarge with the index page cache explicitly
+  warmed (2 reps, spread <=0.02 s), the term is **flat at ~1.35 s** across a 4x
+  thread sweep: 1.33 / 1.38 / 1.35 s at t=16 / 32 / 64. It decomposes as ~1.00 s
+  of `sleep(1)` in bwa-mem3's `main()` (TSC calibration; fixed by
+  fg-labs/bwa-mem3#295), ~0.25 s of warm index load, and ~0.10 s of everything
+  else. Post-`main` teardown measures **0.000 s** — the "address-space teardown"
+  hypothesis was wrong. Corrected loss budget for 16->64: **79 % of the scaling
+  loss is INSIDE `PROCESS()`** and only ~21 % is the flat serial term, inverting
+  the earlier table. So Gate #3 is *not* blind to the bulk of the loss.
+  Mechanism of the original error: a cold index read costs 11.09 s versus 0.25 s
+  warm, so even a fraction of one leaking into a rung fabricates growth that
+  looks thread-dependent. **Warm the index page cache explicitly before any
+  bare-metal timing of this term**, and prefer the binary's own
+  `Time taken for main_mem function` / `Index read time` lines over inferring it
+  from wall minus `PROCESS()`.
 
 ## Known issues
 

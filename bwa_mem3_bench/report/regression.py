@@ -149,16 +149,49 @@ def _scaling_efficiency(db_path: Path, sha: str) -> pd.DataFrame:
     """Per-thread-count strong-scaling efficiency for one run.
 
     ``E(n) = T(1) / (n * T(n))`` using the aligner's own PROCESS() time, falling
-    back to wall when PROCESS() could not be parsed. PROCESS() is preferred
-    because it excludes the per-run overhead outside ``process()``, which grows
-    with thread count (measured 1.70 s at t=16 to 3.80 s at t=64) and would
-    otherwise dominate the shortest, highest-thread rungs. That overhead's
-    mechanism has not been isolated; only its size is known.
+    back to wall when PROCESS() could not be parsed.
+
+    An earlier revision of this docstring said the overhead outside ``process()``
+    "grows with thread count (measured 1.70 s at t=16 to 3.80 s at t=64)" and
+    that its mechanism was unknown. Both halves were wrong, and the growth was a
+    measurement artifact. Re-measured on c8g.16xlarge with the index page cache
+    explicitly warmed, 2 reps, spread <=0.02 s:
+
+        threads   wall     main_mem   PROCESS   outside PROCESS
+           16     87.76 s   86.70 s   86.43 s        1.33 s
+           32     46.39 s   45.29 s   45.01 s        1.38 s
+           64     26.87 s   25.79 s   25.52 s        1.35 s
+
+    The term is FLAT, not growing, and it decomposes as ~1.00 s of ``sleep(1)``
+    in ``main()`` (the TSC-frequency calibration, fixed upstream in
+    fg-labs/bwa-mem3#295), ~0.25 s of warm index load, and ~0.10 s of everything
+    else. The original 1.70 -> 3.80 s reading is best explained by cold or
+    partially-warm index I/O leaking into the runs: a cold index read costs
+    11.09 s against 0.25 s warm, so even a fraction of one landing in a rung
+    produces exactly that kind of spurious, noisy growth.
+
+    PROCESS() is still the right basis, but for a different reason than stated
+    before: not because it hides a term that would otherwise dominate the
+    high-thread rungs, but because a constant serial term is Amdahl overhead
+    that sits outside the measured ``PROCESS()`` interval and so says nothing
+    about the aligner's parallel scaling. It is aligner *startup* cost, not
+    harness cost -- as the decomposition above shows, it is bwa-mem3's own
+    ``main()`` doing TSC calibration and index load. It is therefore real cost
+    the user pays, and it stays in the end-to-end wall-time budget; it is
+    excluded from the SCALING metric only, which is what this function computes.
+    For the record, that constant accounts for only ~21 % of the observed
+    16->64 scaling loss; the other ~79 % is inside PROCESS(), which is to say
+    the gate does see the great majority of it. (Measured against ideal 4x
+    scaling from t=16: 4.93 s of excess, of which the flat term is 1.02 s and
+    PROCESS() is 3.91 s.)
 
     What PROCESS() *does* include is the serial FASTQ reader and BAM writer —
     which is why the efficiency it yields is a whole-pipeline number, not a
     kernel-parallelism number. Measured on c8g.16xlarge / wgs-5M (bare metal,
-    index pinned in /dev/shm, 2 reps, spread <0.1 %):
+    index pinned in /dev/shm, 2 reps, spread <0.1 %). This is a SEPARATE session
+    from the table above (different index staging), so its absolute numbers do
+    not line up with it — PROCESS() at t=16 reads 93.52 s here against 86.43 s
+    there. Compare deltas within a table, never levels across the two:
 
         threads   read stage   compute step   write stage   PROCESS
            16        7.27 s        92.65 s        2.59 s      93.52 s
