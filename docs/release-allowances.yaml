@@ -22,8 +22,18 @@
 # RECORD STREAM is identical -- never the BAM file's bytes. Two runs of the same
 # SHA routinely differ as files: the workflow compresses with `samtools view -@4`,
 # whose block boundaries vary run to run, and the `@PG` header embeds the run path
-# and the SHA-stamped version string. Establish these claims with `compare-bams`
-# or `samtools view` (header excluded), never `md5` on the BAM.
+# and the SHA-stamped version string. Never use `md5` on the BAM.
+#
+# Establish a record-stream-identity claim with `fgumi compare bams`, which is
+# the only instrument here that can support one: it compares all eleven core SAM
+# fields (QNAME, FLAG unmasked, RNAME, POS, MAPQ, CIGAR, RNEXT, PNEXT, TLEN, SEQ,
+# QUAL) plus every aux tag, and enforces @HD(SO/GO)/@SQ/@RG compatibility, while
+# ignoring exactly the things the paragraph above disclaims (on-disk tag order
+# and integer width, @PG/@CO). `compare-bams` CANNOT support such a claim and
+# must not be cited for one: it compares placement (ref/pos/CIGAR/MAPQ), FLAG
+# masked to 0x10|0x20|0x40|0x80, and aux tags -- it never reads QNAME, SEQ, QUAL,
+# TLEN, RNEXT/PNEXT, the other twelve FLAG bits, or the header. Its graded
+# percentage is the right tool for BUDGETED drift (Gate #1/#2), not for identity.
 # v0.2.0 is the first blessed golden and is blessed with `--force` (no prior
 # golden to move from, so no allowance is needed or possible).
 allowances:
@@ -277,14 +287,47 @@ allowances:
       EVIDENCE THIS IS AN IMPROVEMENT, NOT DRIFT. (1) Against upstream bwa-mem2
       v2.2.1, every non-meth cell is 100.0000% with zero observed drift (Gate #1
       ok). (2) New this release, `--compat=bwa-mem2` (#277) is benched as a
-      byte-identity arm with an EMPTY ignore list — 928,546,126 records across
-      152 (sample x arch x rep) cells, all 100.0000%, zero divergent tags,
-      by_class clean, on all six archs. That directly retires the caveat the
-      394f8f8 entry left open: #290 was called out there as "NOT covered ...
-      needs its own entry and its own bench run", and panel-twist-5M — the exact
-      sample the phantom XS:i was found on — is now clean across 39,566,620
-      records x 6 archs x 5 reps. (3) Thread-scaling efficiency improved at every
-      rung vs the 394f8f8 ladder, +3.65pp at t=64 (98.4% vs 94.7% on PROCESS()),
+      dedicated record-stream-identity arm, GATED by `fgumi compare bams`
+      (v0.5.0, 3df1022c): all eleven core SAM fields — QNAME, FLAG in full (not
+      masked), RNAME, POS, MAPQ, CIGAR, RNEXT, PNEXT, TLEN, SEQ, QUAL — plus
+      every aux tag compared order- and integer-width-independently, with
+      @HD(SO/GO), @SQ (every field, M5 included) and @RG enforced as a hard
+      precondition. @PG/@CO are excluded by construction (ID:bwa-mem3 vs
+      ID:bwa-mem2 plus per-run command lines). The check is boolean, so a single
+      differing field or tag value fails the rule and so fails the run:
+      1,574,313,060 records across 210 (sample x arch x rep) cells — 7 datasets
+      x 6 archs x 5 reps — every one IDENTICAL, zero content diffs. Per cell:
+      sim-wgs-place 10,724,652, sim-wgs-vars 10,163,754, wes-5M 10,056,288,
+      wgs-5M 10,030,558, panel-twist-5M 8,100,270, hic-1M 2,381,418, sbx-1M
+      1,020,162. The narrower graded `compare-bams` arm runs alongside and is
+      what `collect` ingests; measured across all 212 of its compat cells (the
+      210 above plus 2 smoke-1M-compat), every cell is 100.0000% with by_class
+      empty, ZERO tags marked ignored — the empty ignore list, confirmed in the
+      data rather than only in config — and zero value_diff / query_only /
+      baseline_only on any of the seven tags these samples emit (AS MC MD NM SA
+      XA XS). It still cannot carry the claim on its own: it compares placement,
+      four FLAG bits and aux tags only, never
+      QNAME/SEQ/QUAL/TLEN/RNEXT/PNEXT/the other twelve FLAG bits/the header,
+      which is why the fgumi check and not this percentage is the gate.
+      That directly retires the caveat the 394f8f8 entry left open: #290 was
+      called out there as "NOT covered ... needs its own entry and its own bench
+      run", and panel-twist-5M — the exact sample the phantom XS:i was found on
+      — is now clean across all 30 of its cells (8,100,270 records each,
+      243,008,100 total), on both tiers #290 touched (NEON via c7g/c8g,
+      AVX-512BW via c7a/c7i/m7i). (2b) THREAD INVARIANCE. bwa, bwa-mem2 and
+      bwa-mem3 all default the batch to chunk_size * nThreads, and mem_pestat()
+      derives paired-end insert-size percentiles from whatever reads land in a
+      batch, feeding pairing, mate rescue and MAPQ — so DEFAULT output is a
+      function of -t, and measured on bare metal upstream bwa-mem2 disagrees
+      with ITSELF on 290 of 10,030,558 records between -t 16 and -t 32.
+      `batch_bases: 160000000` now pins -K on BOTH aligners; it IS the
+      historical default at t=16 (chunk_size 10,000,000 x 16) and is verified
+      output-neutral (0 diffs vs the un-pinned invocation). `rule
+      compat_thread_invariance` turns that from a comment into a gate: wgs-5M
+      aligned under --compat at t=16 and t=32 in one job on one host, then
+      fgumi-compared — 0 diffs of 10,030,558 records. (3) Thread-scaling
+      efficiency improved at every rung vs the 394f8f8 ladder, +3.65pp at t=64
+      (98.4% vs 94.7% on PROCESS()),
       against a 3.0pp allowed drop. (4) Performance vs v0.7.0: 45 improvement /
       12 flat / 22 noisy / 0 regression cells; wgs-5M -18.5% (c8g) and -15.9%
       (c7g). The meth Gate #1 over-budget rows are the same fg-labs-vs-bwameth
