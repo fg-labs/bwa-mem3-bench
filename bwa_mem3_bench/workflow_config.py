@@ -51,26 +51,6 @@ MATE_ONLY_TAGS = frozenset({"MQ", "MC"})
 # because bwameth will never emit them.
 METH_UNEMITTED_TAGS = frozenset({"MQ", "HN"})
 
-# MQ/HN on meth `vs_golden`, for the span where the golden predates
-# fg-labs/bwa-mem3#304 and the build under test does not.
-#
-# `vs_golden` is strict on every tag by design -- two fg-labs builds should be
-# ~identical, and Gate #2 (`report/regression.py`) wants >= 99.999% concordance.
-# #304 makes `--meth` emit MQ:i and HN:i for the first time, so the first run on a
-# build carrying it compares a query that HAS both tags against a golden blessed
-# from a build that does not: 100% `query_only` on two tags, on every meth cell.
-# That is a hard Gate #2 failure produced by an upstream FIX, which is exactly the
-# shape this guard exists to keep out of the score.
-#
-# Scoped to meth + `vs_golden` deliberately. Non-meth goldens have always carried
-# both tags. `vs_baseline` already ignores them (bwameth emits neither), and
-# `vs_x86` is not requested for meth samples.
-#
-# This is a transition, not a law: DELETE THIS CONSTANT once the golden is
-# re-blessed from a build containing #304. Leaving it would silently stop guarding
-# two real tags on the one comparison that is meant to be strict.
-METH_GOLDEN_TRANSITION_TAGS = frozenset({"MQ", "HN"})
-
 # Name suffix marking a `--compat=bwa-mem2` sibling. The baseline alias in
 # `workflow/rules/compare.smk` strips it to find the base sample whose upstream
 # BAM the sibling is scored against, so the suffix is load-bearing, not cosmetic.
@@ -381,8 +361,8 @@ class WorkflowConfig:
         rather than declared, and why it must stay derived in lockstep with
         `METH_EXTRA_TAGS` in `expect_tags`.
 
-        They also get `METH_GOLDEN_TRANSITION_TAGS` on `vs_golden`, for as long as
-        the blessed golden predates fg-labs/bwa-mem3#304. See that constant.
+        `vs_golden` carries no exemptions at all, for meth or anything else: two
+        fg-labs builds should be ~identical, so Gate #2 is strict on every tag.
 
         `--compat` samples invert the usual direction on `vs_baseline`: they
         SUBTRACT the default exclusions rather than adding to them, so the kind
@@ -404,11 +384,8 @@ class WorkflowConfig:
         if self.samples[sample_name].is_compat and kind == "vs_baseline":
             return []
         tags = self._resolve_tags(sample_name, kind, "ignore_tags")
-        if self.samples[sample_name].is_meth:
-            if kind == "vs_baseline":
-                tags |= METH_IGNORE_TAGS
-            elif kind == "vs_golden":
-                tags |= METH_GOLDEN_TRANSITION_TAGS
+        if self.samples[sample_name].is_meth and kind == "vs_baseline":
+            tags |= METH_IGNORE_TAGS
         return sorted(tags)
 
     def expect_tags(self, sample_name: str, kind: str) -> list[str]:
