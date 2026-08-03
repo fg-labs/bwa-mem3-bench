@@ -187,6 +187,35 @@ ARG HOLODECK_REF
 RUN cargo +stable install --locked --git "${HOLODECK_REPO}" --rev "${HOLODECK_REF}" \
     --root /out holodeck
 
+# Install fgumi for `fgumi compare bams`, the full-content identity check the
+# `--compat=bwa-mem2` arms are scored with. Public repo, so cargo-install from a
+# pinned git ref, same as holodeck.
+#
+# Why a second comparison tool rather than extending our own compare-bams:
+# compare-bams answers a GRADED question (concordance_pct + per-class/per-tag
+# breakdown, feeding the SQLite gates) and deliberately compares only placement
+# plus aux tags — it never looks at QNAME, SEQ, QUAL, TLEN, RNEXT/PNEXT, the
+# non-placement FLAG bits, or the header. `fgumi compare bams` answers the
+# BOOLEAN question (equal / not equal) over all eleven core SAM fields plus
+# order-independent tags, and enforces @HD/@SQ/@RG compatibility as a hard
+# precondition with @PG/@CO excluded. For a byte-identity assertion the boolean
+# is the right semantic and the wider field set is the whole point.
+#
+# It is NOT a replacement for compare-bams: it cannot compare default-mode
+# bwa-mem3 against bwa-mem2 at all (their @SQ dictionaries differ, since
+# default mode emits M5/AS/UR/SP from the .hdr sidecar and upstream does not, so
+# the header precondition hard-errors), and it reports no percentage — which is
+# what Gates #1/#2 read.
+#
+# `--features compare` is required: the subcommand is feature-gated off by
+# default. Built with +stable (>=1.94) so the +toolchain override takes
+# precedence over fgumi's own rust-toolchain.toml 1.93 pin, same rationale as
+# holodeck above.
+ARG FGUMI_REPO
+ARG FGUMI_REF
+RUN cargo +stable install --locked --git "${FGUMI_REPO}" --rev "${FGUMI_REF}" \
+    --features compare --root /out fgumi
+
 # Build fg-labs bwa-mem3 — intentionally the LAST builder step (see the NOTE
 # above the compare-bams build for the layer-cache rationale). Fetch all branches
 # so ${FG_LABS_SHA} can point to any branch (e.g. fg-main) or a release-please

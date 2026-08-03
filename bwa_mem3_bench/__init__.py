@@ -66,3 +66,24 @@ def holodeck_repo() -> str:
     ref stay resolved from a single source rather than a hardcoded URL.
     """
     return _build_arg_default("HOLODECK_REPO")
+
+
+def fgumi_ref() -> str:
+    """Return the pinned fulcrumgenomics/fgumi git ref from ``build-arg-defaults.env``.
+
+    Single source of truth for the fgumi commit the Docker image builds
+    ``fgumi compare bams`` from -- the full-content identity check the
+    ``--compat=bwa-mem2`` arms are scored with. Pinned to a tag rather than
+    tracking a branch for the same reproducibility reason every other tool here
+    is pinned: the comparison's verdict is part of a release's evidence.
+    """
+    return _build_arg_default("FGUMI_REF")
+
+
+def fgumi_repo() -> str:
+    """Return the fulcrumgenomics/fgumi repository URL from ``build-arg-defaults.env``.
+
+    Pinned alongside :func:`fgumi_ref` so the Dockerfile's fgumi repo and ref
+    stay resolved from a single source rather than a hardcoded URL.
+    """
+    return _build_arg_default("FGUMI_REPO")

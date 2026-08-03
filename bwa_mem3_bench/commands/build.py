@@ -5,6 +5,8 @@ from __future__ import annotations
 import subprocess
 
 from bwa_mem3_bench import REPO_ROOT
+from bwa_mem3_bench import fgumi_ref as _pinned_fgumi_ref
+from bwa_mem3_bench import fgumi_repo as _pinned_fgumi_repo
 from bwa_mem3_bench import holodeck_ref as _pinned_holodeck_ref
 from bwa_mem3_bench import holodeck_repo as _pinned_holodeck_repo
 from bwa_mem3_bench import minibwa_sha as _pinned_minibwa_sha
@@ -111,6 +113,13 @@ def build(  # noqa: PLR0913
     # build-arg-defaults.env can't leave build() sending a stale repository.
     resolved_holodeck_repo = _pinned_holodeck_repo()
 
+    # fgumi supplies `fgumi compare bams` for the --compat identity check. Same
+    # pin-from-one-source treatment as holodeck; no CLI override, because the
+    # comparison tool's version is part of a release's evidence and should move
+    # deliberately via build-arg-defaults.env rather than per invocation.
+    resolved_fgumi_ref = _pinned_fgumi_ref()
+    resolved_fgumi_repo = _pinned_fgumi_repo()
+
     # minibwa is vendored as a git submodule (private repo, can't clone in
     # the Dockerfile). Confirm it has been populated before invoking buildx.
     # Skipped on --dry-run so the print path works on a fresh clone.
@@ -171,6 +180,10 @@ def build(  # noqa: PLR0913
         f"HOLODECK_REPO={resolved_holodeck_repo}",
         "--build-arg",
         f"HOLODECK_REF={resolved_holodeck_ref}",
+        "--build-arg",
+        f"FGUMI_REPO={resolved_fgumi_repo}",
+        "--build-arg",
+        f"FGUMI_REF={resolved_fgumi_ref}",
         "--tag",
         f"{image_name}:{sha_tag}",
     ]
