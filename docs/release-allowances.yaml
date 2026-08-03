@@ -249,3 +249,59 @@ allowances:
     # matrix. Blessing a post-#290 SHA needs its own entry and its own bench run.
     aliases:
       - e722ed06dd71d0186c401ce2f0e163d32b0a7ad7   # 394f8f8 + #273 (output-identical, 0/38 cells changed)
+
+  - to_sha: 4acb09562b5109e2f26d85b0158fde35d03a4fb8
+    pr: fg-labs/bwa-mem3#260
+    date: 2026-08-03
+    summary: >-
+      v0.8.0: two independent families of deliberate change, one methylation and
+      one DNA, both quality-improving. METHYLATION — fix(meth) #332 derives NM/MD
+      from the scoring matrix so C->T/G->A conversions are no longer counted as
+      mismatches. Against the v0.7.0 golden (which predates it) NM and MD each
+      differ on 20,397 of 20,680 reads (98.6%) and XA on 1,424 of 1,433 (99%,
+      mechanical — XA embeds a per-hit NM), taking meth vs-golden to 1.4932%
+      (meth-twist-emseq-5M) / 1.5140% (smoke-meth). That figure is almost
+      entirely TAG VALUE, not placement: by_class on smoke-meth is pos_diff 2,
+      cigar_diff 3, flag_diff 2 of 20,742 reads, i.e. 7 reads moved. Also in this
+      family: #304 (MQ:i/HN:i from the --meth BAM writer, closing #296), #341
+      (--bam chooses the output container under --meth), #333 (--meth-tags) and
+      #334. DNA — #335 (--rescue-kmer k-mer-anchored mate rescue), #349
+      (single-position anchor index + --rescue-skip), #328 (kswv query-end via
+      block checkpoints), #326 (mem_chain_flt comparison skip), #342 (cohort
+      accumulator reserved from task_size), #330 (opt-in SAM-A9 rid check) and
+      #290 (zero query padding in the NEON and AVX-512BW 8-bit mate-rescue
+      kernels) move a small, bounded fraction of records vs the v0.7.0 golden:
+      panel-twist-5M 99.8211%, smoke-1M 99.8405%, wgs-5M 99.9648%, sbx-1M
+      99.9902%, hic-1M 99.9908%, wes-5M 99.9988% — identical on all six archs
+      per sample, so the movement is algorithmic, not SIMD-tier-specific.
+      EVIDENCE THIS IS AN IMPROVEMENT, NOT DRIFT. (1) Against upstream bwa-mem2
+      v2.2.1, every non-meth cell is 100.0000% with zero observed drift (Gate #1
+      ok). (2) New this release, `--compat=bwa-mem2` (#277) is benched as a
+      byte-identity arm with an EMPTY ignore list — 928,546,126 records across
+      152 (sample x arch x rep) cells, all 100.0000%, zero divergent tags,
+      by_class clean, on all six archs. That directly retires the caveat the
+      394f8f8 entry left open: #290 was called out there as "NOT covered ...
+      needs its own entry and its own bench run", and panel-twist-5M — the exact
+      sample the phantom XS:i was found on — is now clean across 39,566,620
+      records x 6 archs x 5 reps. (3) Thread-scaling efficiency improved at every
+      rung vs the 394f8f8 ladder, +3.65pp at t=64 (98.4% vs 94.7% on PROCESS()),
+      against a 3.0pp allowed drop. (4) Performance vs v0.7.0: 45 improvement /
+      12 flat / 22 noisy / 0 regression cells; wgs-5M -18.5% (c8g) and -15.9%
+      (c7g). The meth Gate #1 over-budget rows are the same fg-labs-vs-bwameth
+      contract carried since v0.4.0 (2.88% at the v0.7.0 golden, 3.02% here
+      against a 1.5% budget that predates the D3 rework), not new drift.
+      Intentional, accepted.
+    expected_drift_pct: 98.5
+    # Golden lives under 4acb0956 — the release-please #260 head, benched at
+    # reps=5 (target bless_release) across all six archs. Its diff vs main
+    # (a8825f5) touches no src/, ext/ or Makefile: version.txt, CHANGELOG,
+    # CI/coderabbit config and test/regression scripts only, so the aligner is
+    # the same binary as main at that point. When #260 squash-merges to the
+    # shipped v0.8.0 tag, add the tag SHA as an alias below — same pattern as
+    # v0.5.0 (9dd30dd0 / b2fea46), v0.6.0 (48cf0a4 / a887e36) and v0.7.0
+    # (04777b3c / 228a61b).
+    #
+    # expected_drift_pct records the WORST cell (meth, 98.5%), which is a tag-value
+    # change on a near-identical record stream rather than a placement change; the
+    # DNA family's worst cell is 0.18%. A single scalar cannot express both, so it
+    # is set to the larger and the split is stated in the summary above.
