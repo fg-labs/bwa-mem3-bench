@@ -279,13 +279,15 @@ from `arch.baseline_arch` in `config/archs.yaml`:
     `METH_UNEMITTED_TAGS` / `MATE_ONLY_TAGS`. Keep that exemption while any
     pre-#304 SHA is still benched (old-golden re-runs, bisects); it is merely
     redundant on newer builds, never wrong.
-  - On a **post-#304 build**, meth `vs_golden` breaks instead: it is strict on
+  - On a **post-#304 build**, meth `vs_golden` broke instead: it is strict on
     every tag, so a query that HAS both tags against a golden blessed before #304
-    is 100% `query_only` on two tags, on every meth cell — a hard **Gate #2**
-    failure (`>= 99.999%`) caused by an upstream *fix*. Handled by
-    `METH_GOLDEN_TRANSITION_TAGS`; **delete that constant when the golden is
-    re-blessed** from a build containing #304, or two real tags stay unguarded on
-    the one comparison meant to be strict.
+    was 100% `query_only` on two tags, on every meth cell — a hard **Gate #2**
+    failure (`>= 99.999%`) caused by an upstream *fix*. This was handled by a
+    transitional `METH_GOLDEN_TRANSITION_TAGS` constant. **Resolved and gone:**
+    the v0.8.0 golden (`4acb0956`) is post-#304, so both sides carry the tags and
+    the constant was deleted with the re-bless. meth `vs_golden` is now strict on
+    every tag, like every other `vs_golden`. If you ever bless a PRE-#304 SHA
+    again, the failure returns and needs the exemption back.
 - **Excuse a known-absent ignore entry from the AUDIT, never by removing it from
   `ignore_tags`.** The two look interchangeable and are not. Dropping meth's
   `MQ`/`HN` from the ignore list would make them strict, so once #296 was fixed

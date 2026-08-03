@@ -10,7 +10,6 @@ from bwa_mem3_bench.workflow_config import (
     COMPARE_KINDS,
     COMPAT_SAMPLE_SUFFIX,
     METH_EXTRA_TAGS,
-    METH_GOLDEN_TRANSITION_TAGS,
     METH_IGNORE_TAGS,
     METH_UNEMITTED_TAGS,
     Arch,
@@ -424,19 +423,15 @@ def test_same_behaviour_comparisons_skip_nothing() -> None:
     they are directly comparable, and excluding them would blind the comparisons
     best placed to catch a tag-only regression.
 
-    The ONE exception is `METH_GOLDEN_TRANSITION_TAGS` on meth `vs_golden`, which
-    is not a claim about comparability but about a golden blessed before
-    fg-labs/bwa-mem3#304 taught the meth writer to emit MQ/HN. Subtracted here
-    rather than special-cased, so that when the constant is emptied on re-bless
-    this assertion tightens back to `== []` on its own.
+    No exceptions. Meth `vs_golden` briefly carried one -- MQ/HN, for the span
+    where the blessed golden predated fg-labs/bwa-mem3#304 and so lacked tags the
+    build under test emitted. The v0.8.0 golden (4acb0956) is post-#304, both
+    sides carry them, and the exemption is gone.
     """
     cfg = load_config(CONFIG_DIR)
     for sample in ("wgs-5M", "meth-twist-emseq-5M", "sbx-1M"):
         for kind in ("vs_golden", "vs_x86"):
-            skipped = set(cfg.ignore_tags(sample, kind))
-            if cfg.samples[sample].is_meth and kind == "vs_golden":
-                skipped -= METH_GOLDEN_TRANSITION_TAGS
-            assert skipped == set(), f"{sample}/{kind}"
+            assert set(cfg.ignore_tags(sample, kind)) == set(), f"{sample}/{kind}"
 
 
 def test_vs_default_skips_the_candidate_set_tags() -> None:
@@ -616,40 +611,38 @@ def test_every_meth_sample_excludes_the_bisulfite_tags_from_vs_baseline() -> Non
     assert set(cfg.ignore_tags("wgs-5M", "vs_baseline")) == {"MQ", "HN"}
 
 
-def test_meth_vs_golden_ignores_mq_and_hn_across_the_writer_fix() -> None:
-    """fg-labs/bwa-mem3#304 makes `--meth` emit MQ:i and HN:i for the first time.
+def test_meth_vs_golden_is_strict_on_every_tag() -> None:
+    """`vs_golden` carries no tag exemptions, for meth or anything else.
 
-    `vs_golden` is otherwise strict on every tag, so the first run on a build
-    carrying that fix would compare a query that HAS both tags against a golden
-    blessed from a build that does not -- 100% `query_only` on two tags, on every
-    meth cell, against a Gate #2 that wants >= 99.999%. A hard gate failure caused
-    by an upstream FIX.
+    Two fg-labs builds should be ~identical, so this is the one comparison meant
+    to be strict on every tag, and Gate #2 wants >= 99.999% concordance.
 
-    Scoped to meth + `vs_golden`: non-meth goldens have always carried both tags,
-    and the other meth kinds are unaffected (`vs_baseline` already ignores them
-    because bwameth emits neither; `vs_x86` is not requested for meth).
+    meth briefly was an exception. fg-labs/bwa-mem3#304 made `--meth` emit MQ:i
+    and HN:i for the first time, so while the blessed golden predated it a query
+    that HAS both tags was compared against a golden that lacks them -- 100%
+    `query_only` on two tags, on every meth cell, i.e. a hard gate failure caused
+    by an upstream FIX. The v0.8.0 golden (4acb0956) is post-#304, both sides now
+    carry the tags, and the exemption was removed with that re-bless.
 
-    Asserted as EQUALITY, not containment. `vs_golden` is the one comparison meant
-    to be strict on every tag, so these two are the only exemptions it may carry;
-    a superset check would let a later per-sample `ignore_tags` entry weaken it
-    silently. Adding a third exemption should cost a deliberate test edit.
+    Asserted as EQUALITY, not containment: a superset check would let a later
+    per-sample `ignore_tags` entry weaken this silently. Adding any exemption
+    here should cost a deliberate test edit.
     """
     cfg = load_config(CONFIG_DIR)
     meth = [n for n, s in cfg.samples.items() if s.is_meth]
     assert meth, "expected meth samples in the config"
     for name in meth:
-        assert set(cfg.ignore_tags(name, "vs_golden")) == METH_GOLDEN_TRANSITION_TAGS, name
-    # Non-meth vs_golden stays strict: both tags have always been on both sides.
-    assert not (METH_GOLDEN_TRANSITION_TAGS & set(cfg.ignore_tags("wgs-5M", "vs_golden")))
+        assert set(cfg.ignore_tags(name, "vs_golden")) == set(), name
+    # Non-meth vs_golden is strict for the same reason.
+    assert cfg.ignore_tags("wgs-5M", "vs_golden") == []
 
 
 def test_the_two_halves_of_the_bisulfite_fact_stay_consistent() -> None:
     """Every tag excluded from the meth score must also be anticipated by the
     allowlist, or the dead-entry audit would have nothing to check it against.
 
-    Checked across EVERY comparison kind, not just `vs_baseline`: meth
-    `vs_golden` also carries ignore entries (`METH_GOLDEN_TRANSITION_TAGS`), so
-    scoping this to one kind would leave the newer surface unpinned.
+    Checked across EVERY comparison kind, not just `vs_baseline`, so that a kind
+    which later grows an ignore entry is pinned the moment it does.
     """
     cfg = load_config(CONFIG_DIR)
     for name, sample in cfg.samples.items():
@@ -677,23 +670,15 @@ def test_meth_samples_excuse_mq_and_hn_from_the_audit() -> None:
     """On a build predating fg-labs/bwa-mem3#304 neither side emits MQ or HN under
     `--meth`, so both `vs_baseline` ignore entries match no record.
 
-    Also covers `vs_golden`, whose exemption this repo only acquired once
-    `METH_GOLDEN_TRANSITION_TAGS` put the two tags on its ignore list --
-    `absent_ok_tags` intersects the DERIVED list, so the entry appeared there as a
-    side effect. It is load-bearing rather than incidental: on a pre-#304 build
-    both sides still lack the tags, so without the exemption the two new ignore
-    entries would trip `DeadIgnoreEntry` and fail the run.
-
-    The `vs_golden` expectation is written as the intersection of the two
-    constants rather than as a literal, so that emptying
-    `METH_GOLDEN_TRANSITION_TAGS` on re-bless collapses it to `== set()` on its
-    own -- the same no-test-edit property the rest of this transition relies on.
+    `vs_golden` excuses nothing. `absent_ok_tags` intersects the DERIVED ignore
+    list, and meth `vs_golden` no longer carries one: it briefly did, while the
+    blessed golden predated #304, and that exemption went away with the v0.8.0
+    re-bless. `vs_baseline` keeps its two entries because bwameth will never emit
+    MQ or HN, whatever bwa-mem3 does.
     """
     cfg = load_config(CONFIG_DIR)
     assert set(cfg.absent_ok_tags("meth-twist-emseq-5M", "vs_baseline")) == METH_UNEMITTED_TAGS
-    assert set(cfg.absent_ok_tags("meth-twist-emseq-5M", "vs_golden")) == (
-        METH_UNEMITTED_TAGS & METH_GOLDEN_TRANSITION_TAGS
-    )
+    assert cfg.absent_ok_tags("meth-twist-emseq-5M", "vs_golden") == []
     # vs_x86 ignores nothing for meth, so there is nothing to excuse there.
     assert cfg.absent_ok_tags("meth-twist-emseq-5M", "vs_x86") == []
 

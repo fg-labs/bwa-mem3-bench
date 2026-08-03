@@ -106,7 +106,7 @@ the tag policy is a property of the comparison rather than the sample:
 | kind | compared against | skipped |
 |---|---|---|
 | `vs_baseline` | upstream bwa-mem2 (or bwameth, meth samples) | `MQ`, `HN` — plus, on meth, `NM` `MD` `XA` `SA` `XM` `XG` `XR` `YD` `YC` `RG` |
-| `vs_golden` / `vs_x86` | bwa-mem3, same search settings | nothing — except `MQ`, `HN` on meth `vs_golden`, temporarily (below) |
+| `vs_golden` / `vs_x86` | bwa-mem3, same search settings | nothing |
 | `vs_default` | bwa-mem3 `--fast` vs default | `XS` `HN` `XA` `SA` `MQ` |
 
 Two rules generate those lists. **Cross-tool**: exclude any tag one side never
@@ -124,15 +124,13 @@ behaviour, so they are where a tag-only regression is detectable at essentially
 zero cost — full strictness costs 0.0000 pp on `vs_x86` and at most 0.094 pp on
 `vs_golden`.
 
-The one exception is **temporary** and scoped to meth `vs_golden`.
-fg-labs/bwa-mem3#304 makes `--meth` emit `MQ`/`HN` for the first time, so a build
-carrying it puts a query that has both tags against a golden blessed from a build
-that does not: 100% `query_only` on two tags, on every meth cell, against a Gate #2
-that wants ≥ 99.999% — a hard failure produced by an upstream *fix*.
-`METH_GOLDEN_TRANSITION_TAGS` (`workflow_config.py`) ignores the two for exactly
-that span, and is **deleted** once the meth golden is re-blessed from a post-#304
-build; leaving it would stop guarding two real tags on the one comparison meant to
-be strict. `vs_baseline`'s `MQ`/`HN` are the opposite — permanent, because bwameth
+`vs_golden` now carries **no** exceptions. It briefly carried one, scoped to meth:
+fg-labs/bwa-mem3#304 made `--meth` emit `MQ`/`HN` for the first time, so a build
+carrying it put a query that has both tags against a golden blessed from a build
+that does not — 100% `query_only` on two tags, on every meth cell, against a Gate #2
+that wants ≥ 99.999%, i.e. a hard failure produced by an upstream *fix*. The v0.8.0
+golden (`4acb0956`) is post-#304, so both sides carry the tags and the exemption was
+removed. `vs_baseline`'s `MQ`/`HN` are the opposite — permanent, because bwameth
 emits neither and never will.
 
 A skipped tag is still counted in the report's `by_tag` block with
@@ -162,16 +160,16 @@ tags, and methylation samples add `XM`/`XG`/`XR`/`YD`/`YC`/`RG` while emitting n
 excused from the dead-entry audit via `--absent-ok-tag`, which exempts an entry
 from the *check* without un-ignoring it.
 
-That exemption is a third thing, distinct from either `MQ`/`HN` ignore above: it
-is emitted wherever the two are ignored on a meth sample — `vs_baseline`,
-`vs_default`, and, for now, `vs_golden` — because `absent_ok_tags()` intersects
-the *derived* ignore list rather than naming kinds. It is needed only while a
-pre-#304 build is still benched —
-an old-golden re-run or a bisect, where the entries genuinely match no record. On
-a post-#304 build it is redundant rather than wrong, since an `--absent-ok-tag`
-whose tag *does* appear is a no-op. So the three have three different lifetimes:
-`vs_baseline`'s ignore is permanent, `vs_golden`'s ignore dies at the next meth
-re-bless, and the audit exemption dies when no pre-#304 build is in rotation.
+That exemption is a second thing, distinct from the `MQ`/`HN` ignore above: it is
+emitted wherever the two are ignored on a meth sample — `vs_baseline` and
+`vs_default` — because `absent_ok_tags()` intersects the *derived* ignore list
+rather than naming kinds. It is needed only while a pre-#304 build is still
+benched — an old-golden re-run or a bisect, where the entries genuinely match no
+record. On a post-#304 build it is redundant rather than wrong, since an
+`--absent-ok-tag` whose tag *does* appear is a no-op. So the two have different
+lifetimes: `vs_baseline`'s ignore is permanent, because bwameth emits neither tag
+and never will, while the audit exemption dies when no pre-#304 build is in
+rotation.
 
 The report is written **before** the non-zero exit and carries the violations in
 a `tag_guard_violations` block, so a failed run is still diagnosable from its own
