@@ -11,6 +11,26 @@
 # cheapest x86 SIMD path (AVX2) and is part of every standard arch set.
 ARM_X86_REFERENCE_ARCH = "c6a"
 
+COMPAT_SUFFIX = "-compat"
+
+
+def _baseline_sample(sample_name: str) -> str:
+    """The sample whose baseline BAM a comparison should be scored against.
+
+    A `--compat` sibling aligns the SAME FASTQs with the same `mem_flags` as its
+    base, so upstream bwa-mem2 produces a byte-identical BAM for both. Aliasing
+    the sibling onto its base reuses that BAM instead of paying for a second
+    identical bwa-mem2 run per arch — on the five real datasets that is 25
+    redundant 5M-read alignments.
+
+    The aliasing is only sound while the sibling and its base agree on every
+    input to the baseline; `_validate_compat_siblings` enforces that at config
+    load so this cannot quietly start comparing against the wrong BAM.
+    """
+    if sample_name.endswith(COMPAT_SUFFIX):
+        return sample_name[: -len(COMPAT_SUFFIX)]
+    return sample_name
+
 # Batch cgroup memory for the compare rules.
 #
 # `compare-bams` walks both BAMs in lockstep and holds only ONE template's
@@ -77,9 +97,21 @@ rule compare_vs_baseline:
         # bwa-mem2 is deterministic — all baseline reps produce byte-identical
         # BAMs — so concordance is always measured against baseline rep-1.
         # Reps 2..N exist for timing only.
+        #
+        # ARM queries fall back to the x86 reference arch because upstream
+        # v2.2.1 has no ARM build, so `baseline/.../c8g/` can never exist. Only
+        # the `--compat` arms request vs-baseline on ARM (`rule all` sends ARM
+        # to vs-x86 instead), and for them the x86 baseline is the correct
+        # target anyway: `--compat=bwa-mem2` claims byte-identity to bwa-mem2's
+        # output, which is one stream regardless of which host produced it.
+        # That equivalence is not assumed — it is entailed by two facts this
+        # bench already measures every run: fg-labs default is 100% concordant
+        # with the baseline on every x86 arch, and fg-labs ARM is 100%
+        # concordant with fg-labs x86 (vs-x86).
         baseline = lambda wc: (
-            f"baseline/bwa-mem2-{CONFIG.upstream_tag}/{wc.sample}/"
-            f"{wc.arch}/rep-1/aligned.bam"
+            f"baseline/bwa-mem2-{CONFIG.upstream_tag}/{_baseline_sample(wc.sample)}/"
+            f"{wc.arch if wc.arch in BASELINE_ARCHS else ARM_X86_REFERENCE_ARCH}/"
+            f"rep-1/aligned.bam"
         ),
         meta     = "runs/{sha}/{sample}/{arch}/rep-{rep}/benchmarks/meta.json",
     output:

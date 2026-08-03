@@ -8,6 +8,7 @@ import yaml
 
 from bwa_mem3_bench.workflow_config import (
     COMPARE_KINDS,
+    COMPAT_SAMPLE_SUFFIX,
     METH_EXTRA_TAGS,
     METH_GOLDEN_TRANSITION_TAGS,
     METH_IGNORE_TAGS,
@@ -20,6 +21,7 @@ from bwa_mem3_bench.workflow_config import (
     _as_positive_int,
     _as_str_list,
     _thread_scaling_from,
+    _validate_compat_siblings,
     load_config,
     parse_ladder_override,
 )
@@ -930,3 +932,136 @@ def test_parse_ladder_override_rejects_a_malformed_spec(spec: str) -> None:
     """These tokens are pasted into the rule's shell loop; reject them up front."""
     with pytest.raises(ValueError, match="ladder override"):
         parse_ladder_override(spec)
+
+
+# ---------------------------------------------------------------------------
+# `--compat=bwa-mem2` byte-identity arms (fg-labs/bwa-mem3#277).
+# ---------------------------------------------------------------------------
+
+
+def test_compat_samples_are_strict_on_every_tag() -> None:
+    """A compat arm SUBTRACTS the kind default rather than extending it.
+
+    This is the whole point of the arm. `vs_baseline` excludes MQ/HN because
+    default-mode bwa-mem3 emits them and bwa-mem2 never does; `--compat`
+    suppresses exactly those two, so leaving them excluded would let a build
+    that stopped suppressing them still score 100%.
+    """
+    cfg = load_config(CONFIG_DIR)
+    assert cfg.ignore_tags("wgs-5M", "vs_baseline") == ["HN", "MQ"]
+    for name, sample in cfg.samples.items():
+        if sample.is_compat:
+            assert cfg.ignore_tags(name, "vs_baseline") == [], name
+
+
+def test_compat_strictness_is_scoped_to_vs_baseline() -> None:
+    """Other kinds keep their normal policy on a compat sample.
+
+    The subtraction is justified only by what `--compat` suppresses relative to
+    bwa-mem2; it says nothing about a bwa-mem3-vs-bwa-mem3 comparison.
+    """
+    cfg = load_config(CONFIG_DIR)
+    for kind in ("vs_golden", "vs_x86", "vs_default"):
+        assert cfg.ignore_tags("wgs-5M-compat", kind) == cfg.ignore_tags("wgs-5M", kind)
+
+
+def test_compat_target_is_parsed_and_off_is_not_compat() -> None:
+    """`--compat=off` selects native output, so it must not be a compat sample.
+
+    Upstream makes `off` pointer-identical to passing no flag; treating it as a
+    compat arm would apply the strict policy to a default-mode alignment.
+    """
+    common = {"baseline_tool": "bwa-mem2-upstream", "reference": "hg38", "source": "s/"}
+    assert Sample(name="x", fg_labs_flags=["--compat=bwa-mem2"], **common).is_compat
+    assert Sample(name="x", fg_labs_flags=["--compat=mem2"], **common).compat_target == "mem2"
+    assert not Sample(name="x", fg_labs_flags=["--compat=off"], **common).is_compat
+    assert not Sample(name="x", fg_labs_flags=[], **common).is_compat
+
+
+@pytest.mark.parametrize(
+    ("flags", "needle"),
+    [
+        (["--compat=bwa-mem2", "--fast"], "--fast"),
+        (["--compat=bwa-mem2", "--meth"], "bisulfite"),
+    ],
+)
+def test_compat_rejects_combinations_the_aligner_rejects(flags: list, needle: str) -> None:
+    """Fail at config load, not twenty minutes into a bless on a Batch worker.
+
+    `bwa-mem3 mem` refuses both pairs at startup; a sample that encodes one
+    would burn a worker slot to produce the same refusal.
+    """
+    reference = "hg38-meth" if "--meth" in flags else "hg38"
+    baseline_tool = "bwameth" if "--meth" in flags else "bwa-mem2-upstream"
+    with pytest.raises(ValueError, match=needle):
+        Sample(
+            name="bad-compat",
+            baseline_tool=baseline_tool,
+            reference=reference,
+            source="s/",
+            fg_labs_flags=flags,
+        )
+
+
+def test_every_compat_sibling_matches_its_base_on_baseline_inputs() -> None:
+    """The baseline alias is only sound while sibling and base agree.
+
+    `compare_vs_baseline` scores `<base>-compat` against `<base>`'s upstream BAM
+    rather than realigning identical input. If the two disagreed on `source`,
+    the arm would compare one dataset's reads against another dataset's BAM and
+    report it as a compat regression.
+    """
+    cfg = load_config(CONFIG_DIR)
+    compat = [n for n, s in cfg.samples.items() if s.is_compat]
+    assert compat, "expected at least one --compat sibling"
+    for name in compat:
+        assert name.endswith(COMPAT_SAMPLE_SUFFIX), name
+        base = cfg.samples[name[: -len(COMPAT_SAMPLE_SUFFIX)]]
+        sibling = cfg.samples[name]
+        for field_name in ("baseline_tool", "reference", "source", "layout", "mem_flags"):
+            assert getattr(sibling, field_name) == getattr(base, field_name), (name, field_name)
+
+
+def test_validate_compat_siblings_rejects_a_drifted_source() -> None:
+    """The guard fires on the failure it exists to prevent."""
+    common = {"baseline_tool": "bwa-mem2-upstream", "reference": "hg38"}
+    samples = {
+        "wgs": Sample(name="wgs", source="data/wgs/", **common),
+        "wgs-compat": Sample(
+            name="wgs-compat",
+            source="data/SOMETHING-ELSE/",
+            fg_labs_flags=["--compat=bwa-mem2"],
+            **common,
+        ),
+    }
+    with pytest.raises(ValueError, match="disagrees with its base"):
+        _validate_compat_siblings(samples)
+
+
+def test_validate_compat_siblings_rejects_a_missing_base() -> None:
+    """A compat sample with no base has no baseline BAM to be scored against."""
+    samples = {
+        "orphan-compat": Sample(
+            name="orphan-compat",
+            baseline_tool="bwa-mem2-upstream",
+            reference="hg38",
+            source="data/x/",
+            fg_labs_flags=["--compat=bwa-mem2"],
+        )
+    }
+    with pytest.raises(ValueError, match="has no base sample"):
+        _validate_compat_siblings(samples)
+
+
+def test_compat_samples_are_excluded_from_the_regression_sweep() -> None:
+    """`rule all` must stay byte-stable: `bench regression` diffs this run's
+    `all` outputs against the golden's, so adding a sibling to SWEEP_SAMPLES
+    would silently change what the gate compares."""
+    cfg = load_config(CONFIG_DIR)
+    sweep = [
+        s
+        for s in cfg.samples
+        if not cfg.samples[s].truth and not s.endswith("-fast") and not cfg.samples[s].is_compat
+    ]
+    assert not [s for s in sweep if cfg.samples[s].is_compat]
+    assert "wgs-5M" in sweep and "wgs-5M-compat" not in sweep

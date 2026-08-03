@@ -71,6 +71,11 @@ METH_UNEMITTED_TAGS = frozenset({"MQ", "HN"})
 # two real tags on the one comparison that is meant to be strict.
 METH_GOLDEN_TRANSITION_TAGS = frozenset({"MQ", "HN"})
 
+# Name suffix marking a `--compat=bwa-mem2` sibling. The baseline alias in
+# `workflow/rules/compare.smk` strips it to find the base sample whose upstream
+# BAM the sibling is scored against, so the suffix is load-bearing, not cosmetic.
+COMPAT_SAMPLE_SUFFIX = "-compat"
+
 # Tags that appear only on methylation comparisons: XM/XG/XR from `bwa-mem3
 # --meth`, and YD/YC/RG from bwameth. Derived rather than declared per sample
 # because it is one fact about bisulfite alignment, and restating it across ~10
@@ -150,6 +155,49 @@ class Sample:
                 f"fg_labs_flags={self.fg_labs_flags}) but reference={self.reference!r}. "
                 f"Meth samples must use a '-meth' reference and non-meth samples must not."
             )
+        # Mirror the two guards `bwa-mem3 mem` enforces at runtime, so an
+        # impossible sample fails at config load instead of on a Batch worker
+        # twenty minutes into a bless. `--compat` is output-shaping only, and
+        # both of these change the alignments themselves:
+        #   [E::main_mem] --compat and --fast are mutually exclusive
+        #   [E::main_mem] --compat is not supported with --meth
+        if self.is_compat:
+            if self.is_meth:
+                raise ValueError(
+                    f"sample {self.name!r} combines --compat with methylation "
+                    f"(baseline_tool={self.baseline_tool!r}, fg_labs_flags={self.fg_labs_flags}). "
+                    f"bwa-mem2 has no bisulfite mode, so bwa-mem3 rejects the combination."
+                )
+            if "--fast" in self.fg_labs_flags:
+                raise ValueError(
+                    f"sample {self.name!r} combines --compat with --fast "
+                    f"(fg_labs_flags={self.fg_labs_flags}). --fast changes alignments while "
+                    f"--compat only shapes output, so the pair would produce a diff-clean-"
+                    f"looking stream over genuinely different alignments."
+                )
+
+    @property
+    def compat_target(self) -> str:
+        """The `--compat` target this sample requests, or `""` for none.
+
+        Only the `--compat=<target>` spelling is recognised: the workflow builds
+        flag lists programmatically, so the space-separated form never occurs.
+        """
+        for flag in self.fg_labs_flags:
+            if flag.startswith("--compat="):
+                return flag.split("=", 1)[1]
+        return ""
+
+    @property
+    def is_compat(self) -> bool:
+        """Whether this sample asks bwa-mem3 to reproduce another aligner's
+        output byte-for-byte.
+
+        `--compat=off` selects native output and is explicitly NOT a compat
+        sample -- it is pointer-identical to passing no flag at all, so treating
+        it as one would apply the strict tag policy to a default-mode arm.
+        """
+        return self.compat_target not in ("", "off")
 
     @property
     def is_meth(self) -> bool:
@@ -330,10 +378,25 @@ class WorkflowConfig:
         They also get `METH_GOLDEN_TRANSITION_TAGS` on `vs_golden`, for as long as
         the blessed golden predates fg-labs/bwa-mem3#304. See that constant.
 
+        `--compat` samples invert the usual direction on `vs_baseline`: they
+        SUBTRACT the default exclusions rather than adding to them, so the kind
+        is strict on every tag. The default list exists because default-mode
+        bwa-mem3 emits MQ/HN and bwa-mem2 never does; `--compat=bwa-mem2`
+        suppresses exactly those, so both sides now lack them and excluding them
+        would hide the regression the arm exists to catch -- a build that
+        stopped suppressing them would still score 100%. Strictness is the whole
+        assertion: byte-identity, not identity-modulo-the-tags-we-excused.
+
+        This is why the subtraction lives here rather than in the YAML:
+        `_resolve_tags` unions a sample's list onto the kind default and cannot
+        express a removal.
+
         :param sample_name: sample being compared.
         :param kind: comparison kind, one of `COMPARE_KINDS`.
         :return: sorted, de-duplicated tag names.
         """
+        if self.samples[sample_name].is_compat and kind == "vs_baseline":
+            return []
         tags = self._resolve_tags(sample_name, kind, "ignore_tags")
         if self.samples[sample_name].is_meth:
             if kind == "vs_baseline":
@@ -613,6 +676,56 @@ def _validate_compare_options(sample_name: str, options: Any) -> dict[str, Any]:
     return options
 
 
+def _validate_compat_siblings(samples: dict[str, Sample]) -> None:
+    """Every `--compat` sibling must have a base sample it agrees with.
+
+    `compare_vs_baseline` aliases a `<base>-compat` sample onto `<base>`'s
+    baseline BAM so upstream bwa-mem2 is not run twice over identical input
+    (`_baseline_sample` in `workflow/rules/compare.smk`). That aliasing is only
+    correct while the two agree on every input the baseline alignment consumes.
+    If a sibling's `source` were edited and its base's were not, the compat arm
+    would silently score one dataset's reads against another dataset's BAM --
+    near-total discordance attributed to a compat regression that never happened.
+
+    Checked here rather than in `Sample.__post_init__` because it is a relation
+    between two samples, which a single sample cannot see.
+
+    :param samples: every configured sample, keyed by name.
+    :raises ValueError: if a compat sibling has no base, or disagrees with it on
+        `baseline_tool`, `reference`, `source`, `layout`, or `mem_flags`.
+    """
+    baseline_inputs = ("baseline_tool", "reference", "source", "layout", "mem_flags")
+    for name, sample in sorted(samples.items()):
+        if not sample.is_compat:
+            continue
+        if not name.endswith(COMPAT_SAMPLE_SUFFIX):
+            raise ValueError(
+                f"sample {name!r} sets --compat but is not named '<base>{COMPAT_SAMPLE_SUFFIX}'. "
+                f"The baseline alias strips that suffix to find the base sample, so an "
+                f"differently-named compat sample would be scored against its own "
+                f"(redundantly realigned) baseline."
+            )
+        base_name = name[: -len(COMPAT_SAMPLE_SUFFIX)]
+        base = samples.get(base_name)
+        if base is None:
+            raise ValueError(
+                f"compat sample {name!r} has no base sample {base_name!r}. "
+                f"The compat arm is scored against the base sample's baseline BAM, "
+                f"which cannot exist if the base is not configured."
+            )
+        mismatched = [
+            field_name
+            for field_name in baseline_inputs
+            if getattr(sample, field_name) != getattr(base, field_name)
+        ]
+        if mismatched:
+            raise ValueError(
+                f"compat sample {name!r} disagrees with its base {base_name!r} on "
+                f"{', '.join(mismatched)}. Both are aligned by upstream bwa-mem2 from the "
+                f"same baseline BAM, so every input to that alignment must match."
+            )
+
+
 def _validate_compare_defaults(raw: Any) -> dict[str, dict[str, list[str]]]:
     """Validate the top-level `compare_defaults` block and flatten it to lists.
 
@@ -805,6 +918,8 @@ def load_config(config_dir: Path) -> WorkflowConfig:
         )
         for name, data in archs_raw["archs"].items()
     }
+
+    _validate_compat_siblings(samples)
 
     return WorkflowConfig(
         samples=samples,

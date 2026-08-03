@@ -26,7 +26,7 @@ COORDINATOR_JOB_DEF = _cfg.coordinator_job_definition
 # targets iterate MINIBWA_ARCHS (= ARCHS minus m7i), so passing full_archs is
 # correct: m7i is filtered out in the Snakefile.
 _FULL_SWEEP_TARGETS = frozenset(
-    {"all", "baseline_all", "bless_release", "minibwa", "minibwa_smoke"}
+    {"all", "baseline_all", "bless_release", "minibwa", "minibwa_smoke", "compat"}
 )
 
 
