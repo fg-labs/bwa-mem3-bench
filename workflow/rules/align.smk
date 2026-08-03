@@ -56,6 +56,27 @@ def _mem_flags(sample_name: str) -> str:
     return " ".join(CONFIG.samples[sample_name].mem_flags)
 
 
+def _batch_flag() -> str:
+    """`-K <bases>`, pinning the batch size for bwa-mem3 and upstream bwa-mem2.
+
+    Deliberately a SEPARATE helper from `_mem_flags` rather than folded into it:
+    `rules/scaling.smk` also uses `_mem_flags`, and the thread-scaling ladder must
+    keep DEFAULT batching -- it exists to measure the batch-size/thread-count
+    interaction, so pinning the batch there would flatten the very effect Gate #3
+    reads. Adding `-K` to `_mem_flags` would silently reach the ladder.
+
+    Only `align_fg_labs` and `align_baseline` interpolate this. bwameth never sees
+    it (it has no such flag and wraps bwa-mem2 itself), and `align_minibwa` never
+    sees it (minibwa's `-K` sets a differently-scoped mini-batch, its batching is
+    already thread-invariant, and it is a wall-time comparator that should run at
+    its author's defaults).
+
+    See `batch_bases` in config/defaults.yaml for why it is pinned and why the
+    value is output-neutral against pre-existing BAMs.
+    """
+    return f"-K {CONFIG.batch_bases}"
+
+
 def _baseline_bwa_bin(sample_name: str) -> str:
     """Which baseline aligner to invoke. `bwa-mem2.upstream` by default; `bwameth.py` for meth."""
     if CONFIG.samples[sample_name].baseline_tool == "bwameth":
@@ -249,6 +270,7 @@ rule align_fg_labs:
     params:
         extra   = lambda wc: _fg_labs_flags(wc.sample),
         mem_flags = lambda wc: _mem_flags(wc.sample),
+        batch_flag = _batch_flag(),
         is_meth = lambda wc: "1" if _is_meth(wc.sample) else "0",
     shell:
         # Both paths stage the index into /dev/shm via `bwa-mem2 shm` so the
@@ -302,7 +324,7 @@ rule align_fg_labs:
         # untouched; a crashed aligner leaves a truncated/empty `.raw` that the
         # record-count check below rejects.
         tricorder --out {output.timing} -- \
-            bash -c 'set -o pipefail; bwa-mem2.fg-labs mem -t {threads} {params.mem_flags} {params.extra} \
+            bash -c 'set -o pipefail; bwa-mem2.fg-labs mem -t {threads} {params.batch_flag} {params.mem_flags} {params.extra} \
                 --bam=0 -o "{output.bam}.raw" \
                 {input.ref[0]} {input.fastqs} 2>"{output.bwa_stderr}"'
         # Defense in depth: reject a header-only BAM even if the aligner exited 0.
@@ -361,6 +383,7 @@ rule align_baseline:
     params:
         binary  = lambda wc: _baseline_bwa_bin(wc.sample),
         mem_flags = lambda wc: _mem_flags(wc.sample),
+        batch_flag = _batch_flag(),
         # Index sidecar prefix to warm. Meth samples use the doubled-c2t
         # prefix so the c2t-suffixed index files (which `mem --meth` and
         # `bwameth.py` actually read) get cached.
@@ -398,7 +421,7 @@ rule align_baseline:
             # `mem_flags` (e.g. -K for Hi-C) applied here too so the baseline
             # matches the fg-labs invocation and concordance stays symmetric.
             tricorder --out {output.timing} -- \
-                bash -c 'set -o pipefail; {params.binary} mem -t {threads} {params.mem_flags} \
+                bash -c 'set -o pipefail; {params.binary} mem -t {threads} {params.batch_flag} {params.mem_flags} \
                     {input.ref[0]} {input.fastqs} 2>"{output.bwa_stderr}" \
                   | samtools view -@4 -u -o {output.bam}.raw -'
         fi

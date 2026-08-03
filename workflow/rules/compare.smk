@@ -13,6 +13,15 @@ ARM_X86_REFERENCE_ARCH = "c6a"
 
 COMPAT_SUFFIX = "-compat"
 
+# The two thread counts `compat_thread_invariance` compares. The low rung is the
+# bench's standard `threads:` so one side of the comparison is the same invocation
+# every other cell uses. The high rung is 32 because it must clear 26 -- the point
+# at which the DEFAULT batch (`chunk_size * n_threads` = 10M * 26 = 260M) crosses
+# the 256M bound bwa-mem3 used to cap at (fg-labs/bwa-mem3#298), so it exercises
+# the thread range where unpinned batching provably diverged. 32 also fits the
+# 64-vCPU c8g64 host that runs this.
+COMPAT_INVARIANCE_THREADS = (CONFIG.threads, 32)
+
 
 def _baseline_sample(sample_name: str) -> str:
     """The sample whose baseline BAM a comparison should be scored against.
@@ -196,6 +205,78 @@ rule compare_compat_identity:
         fgumi compare bams {input.query} {input.baseline} \
             --threads {threads} --max-diffs 20 > {output.report}.tmp 2>&1
         mv {output.report}.tmp {output.report}
+        """
+
+
+rule compat_thread_invariance:
+    """Prove `--compat` output does not depend on `-t`, given a pinned `-K`.
+
+    The property under test. bwa, bwa-mem2 and bwa-mem3 all default the batch to
+    `chunk_size * n_threads`, and `mem_pestat()` derives the paired-end
+    insert-size percentiles from whatever reads land in a batch, feeding pairing,
+    mate rescue and MAPQ. So DEFAULT output is a function of thread count --
+    measured, upstream bwa-mem2 disagrees with itself on 290 of 10,030,558
+    records between -t 16 and -t 32. `-K` (bwa's own answer: "process INT input
+    bases in each batch regardless of nThreads (for reproducibility)") removes
+    that dependence, and `batch_bases` pins it for both aligners. This rule is
+    what stops that from being a claim in a comment.
+
+    Runs BOTH thread counts inside ONE Batch job on ONE host, for the same reason
+    the scaling ladder does: it needs a machine with more vCPUs than the standard
+    *.4xlarge queues have, and doing it in one job avoids requiring two.
+
+    Deliberately a SELF-comparison, which is what makes it cheap and infra-free:
+    no upstream baseline is involved, so it needs no x86 host and no new Batch
+    queue -- it runs on the existing 64-vCPU `c8g64` arm queue that the ladder
+    already uses. (A cross-aligner check at high `-t` would need a >=32 vCPU x86
+    queue, which does not exist; that parity is covered per-arch at the standard
+    thread count by `compare_compat_identity`.)
+
+    Fails the run on any difference, via fgumi's exit status.
+    """
+    input:
+        ref = lambda wc: _ref_inputs(wc, meth_index="none"),
+        fastqs = lambda wc: _query_fastqs(wc),
+    output:
+        report = "runs/{sha}/compat-invariance/{sample}/{arch}/report.txt",
+    threads: CONFIG.thread_scaling.max_threads
+    resources:
+        batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
+        container_image = lambda wc: image_for_arch(wc.arch),
+        mem_mb = lambda wc: _mem_mb_for(wc.sample),
+        shared_memory_size_mb = lambda wc: _shm_size_mb_for(wc.sample),
+        runtime = 7200,
+    params:
+        batch_flag = _batch_flag(),
+        mem_flags = lambda wc: _mem_flags(wc.sample),
+        extra = lambda wc: _fg_labs_flags(wc.sample),
+        lo = COMPAT_INVARIANCE_THREADS[0],
+        hi = COMPAT_INVARIANCE_THREADS[1],
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p $(dirname {output.report})
+        REF={input.ref[0]}
+        # Stage the index once and reuse it for both thread counts — the index is
+        # identical, and loading it twice would double the job's wall for nothing.
+        bwa-mem2.fg-labs shm "$REF"
+        trap 'bwa-mem2.fg-labs shm -d || true' EXIT
+        for T in {params.lo} {params.hi}; do
+            bwa-mem2.fg-labs mem -t "$T" {params.batch_flag} {params.mem_flags} {params.extra} \
+                --compat=bwa-mem2 --bam=0 -o "$(dirname {output.report})/t$T.bam" \
+                "$REF" {input.fastqs} 2> "$(dirname {output.report})/t$T.stderr"
+            if [ "$(samtools view -c "$(dirname {output.report})/t$T.bam")" -eq 0 ]; then
+                echo "ERROR: t=$T produced 0 records (crash/OOM?)" >&2; exit 1
+            fi
+        done
+        # Written to .tmp and moved on success: fgumi exits 1 on a difference, and a
+        # complete output file left behind would let the next run skip the failure.
+        fgumi compare bams \
+            "$(dirname {output.report})/t{params.lo}.bam" \
+            "$(dirname {output.report})/t{params.hi}.bam" \
+            --threads 8 --max-diffs 20 > {output.report}.tmp 2>&1
+        mv {output.report}.tmp {output.report}
+        rm -f "$(dirname {output.report})"/t*.bam
         """
 
 
