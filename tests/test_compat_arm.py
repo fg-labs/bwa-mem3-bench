@@ -10,10 +10,16 @@ would still succeed and still report a number, just not the number claimed.
 
 from pathlib import Path
 
+from bwa_mem3_bench.workflow_config import load_config
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
+CONFIG_DIR = REPO_ROOT / "config"
 # Length of a full git object name; a shorter FGUMI_REF would be a branch or an
 # abbreviation, either of which can move under us.
 _FULL_SHA_LEN = 40
+# Thread count at which the DEFAULT batch (chunk_size 10,000,000 x threads)
+# first exceeds the 256 Mbase bound bwa-mem3 used to cap at: 10M * 26 = 260M.
+_CAP_THRESHOLD_THREADS = 26
 SNAKEFILE = (REPO_ROOT / "workflow" / "Snakefile").read_text()
 COMPARE_SMK = (REPO_ROOT / "workflow" / "rules" / "compare.smk").read_text()
 
@@ -159,3 +165,87 @@ def test_compat_is_a_full_sweep_target() -> None:
     submit = (REPO_ROOT / "bwa_mem3_bench" / "commands" / "submit.py").read_text()
     full_sweep = submit.split("_FULL_SWEEP_TARGETS = frozenset(")[1].split(")")[0]
     assert '"compat"' in full_sweep
+
+
+# ---------------------------------------------------------------------------
+# `-K` batch pinning and the thread-invariance gate.
+# ---------------------------------------------------------------------------
+
+
+def test_batch_size_is_pinned_for_both_bwa_family_aligners() -> None:
+    """`-K` must reach bwa-mem3 AND upstream bwa-mem2, or the comparison is asymmetric.
+
+    Default batching is `chunk_size * n_threads`, and `mem_pestat` reads the batch,
+    so an unpinned side would make output a function of `-t`.
+    """
+    align = (REPO_ROOT / "workflow" / "rules" / "align.smk").read_text()
+    assert "def _batch_flag(" in align
+    fg = align.split("rule align_fg_labs:")[1].split("\nrule ")[0]
+    base = align.split("rule align_baseline:")[1].split("\nrule ")[0]
+    for name, body in (("align_fg_labs", fg), ("align_baseline", base)):
+        assert "batch_flag = _batch_flag()" in body, name
+        assert "{params.batch_flag}" in body, name
+
+
+def test_batch_pinning_does_not_reach_the_scaling_ladder() -> None:
+    """The ladder measures the batch-size/thread interaction; pinning the batch
+    would flatten exactly the effect Gate #3 reads.
+
+    This is why `-K` is a separate helper rather than folded into `_mem_flags` —
+    scaling.smk uses `_mem_flags` too, so it would have inherited it silently.
+    """
+    scaling = (REPO_ROOT / "workflow" / "rules" / "scaling.smk").read_text()
+    assert "batch_flag" not in scaling
+    assert "_batch_flag" not in scaling
+
+
+def test_batch_pinning_does_not_reach_minibwa_or_bwameth() -> None:
+    """minibwa's `-K` has different semantics and it is a wall-time comparator that
+    should run at its author's defaults; bwameth has no such flag at all."""
+    minibwa = (REPO_ROOT / "workflow" / "rules" / "align_minibwa.smk").read_text()
+    assert "batch_flag" not in minibwa
+    align = (REPO_ROOT / "workflow" / "rules" / "align.smk").read_text()
+    # Only the bwameth arm of the if/else — the else arm is upstream bwa-mem2,
+    # which SHOULD carry the flag.
+    bwameth_branch = align.split("bwameth.py --threads")[1].split("else")[0]
+    assert "batch_flag" not in bwameth_branch
+
+
+def test_batch_bases_is_a_literal_not_derived_from_threads() -> None:
+    """Deriving `-K` from `threads` would re-couple the golden to the knob this
+    decouples it from. It must be a fixed literal equal to the historical default
+    (chunk_size 10,000,000 x 16 threads), which is what makes it output-neutral.
+    """
+    cfg = load_config(CONFIG_DIR)
+    assert cfg.batch_bases == 10_000_000 * 16
+    raw = (CONFIG_DIR / "defaults.yaml").read_text()
+    line = next(ln for ln in raw.splitlines() if ln.startswith("batch_bases:"))
+    assert line.split(":", 1)[1].strip().isdigit(), line
+
+
+def test_thread_invariance_gate_exists_and_compares_two_thread_counts() -> None:
+    """Without this the `-K` pin is a claim in a comment rather than a property.
+
+    Self-comparison by design: no upstream baseline, so it needs no x86 host and
+    no new Batch queue.
+    """
+    rule = COMPARE_SMK.split("rule compat_thread_invariance:")[1].split("\nrule ")[0]
+    assert "COMPAT_INVARIANCE_THREADS" in COMPARE_SMK
+    assert "fgumi compare bams" in rule
+    assert "--compat=bwa-mem2" in rule
+    assert "{params.batch_flag}" in rule, "invariance is only expected WITH -K pinned"
+    assert "{output.report}.tmp" in rule and "mv {output.report}.tmp" in rule
+
+
+def test_invariance_high_rung_clears_the_historical_cap_threshold() -> None:
+    """The high thread count must exceed 26, where the default batch (10M * 26 =
+    260M) crossed the 256M bound bwa-mem3 used to cap at — the thread range where
+    unpinned batching provably diverged from upstream."""
+    smk = COMPARE_SMK.split("COMPAT_INVARIANCE_THREADS = (")[1].split(")")[0]
+    hi = int(smk.split(",")[1].strip())
+    assert hi > _CAP_THRESHOLD_THREADS, hi
+
+
+def test_invariance_gate_is_in_bless_release() -> None:
+    body = SNAKEFILE.split("rule bless_release:")[1].split("\nrule ")[0]
+    assert "_compat_invariance_target()" in body

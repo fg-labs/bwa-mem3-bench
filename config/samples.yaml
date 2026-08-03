@@ -356,6 +356,26 @@ samples:
     layout: single
     fg_labs_flags: ["--compat=bwa-mem2"]
 
+  # Simulated (holodeck) compat arms. These were the only non-meth datasets with
+  # no compat sibling, and they carry a different error profile from the real
+  # 1000 Genomes / Twist data — worth having on a claim this strong. Their bases
+  # are `truth: true`, but the siblings are NOT: they are scored by compare-bams
+  # and fgumi against the upstream baseline, not graded against simulation truth,
+  # and `truth: true` would route them into the accuracy machinery instead.
+  # The bases' baselines already exist (the accuracy target produces them), so a
+  # sibling costs only its own alignment.
+  sim-wgs-place-compat:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/sim/sim-wgs-place/
+    fg_labs_flags: ["--compat=bwa-mem2"]
+
+  sim-wgs-vars-compat:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/sim/sim-wgs-vars/
+    fg_labs_flags: ["--compat=bwa-mem2"]
+
   # Wiring check for the compat pipeline, driven by `--target compat_smoke`.
   smoke-1M-compat:
     baseline_tool: bwa-mem2-upstream

@@ -331,6 +331,12 @@ class WorkflowConfig:
     threads: int
     reps_default: int
     reps_baseline: int
+    # `-K` in bases, passed to BOTH bwa-mem3 and upstream bwa-mem2 so their output
+    # is thread-invariant and the golden does not depend on `threads`. See the long
+    # rationale in config/defaults.yaml; the short version is that the default batch
+    # is `chunk_size * n_threads` and mem_pestat reads it, so unpinned output is a
+    # function of -t. Deliberately NOT derived from `threads`.
+    batch_bases: int
     thread_scaling: ThreadScaling
     references: dict[str, dict[str, str]]
     runs_prefix: str
@@ -935,6 +941,7 @@ def load_config(config_dir: Path) -> WorkflowConfig:
         threads=int(defaults["threads"]),
         reps_default=int(defaults["reps_default"]),
         reps_baseline=int(defaults["reps_baseline"]),
+        batch_bases=_as_positive_int("defaults.yaml", "batch_bases", defaults["batch_bases"]),
         thread_scaling=_thread_scaling_from(
             defaults["thread_scaling"], samples=samples, archs=archs
         ),

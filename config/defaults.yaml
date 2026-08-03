@@ -14,6 +14,37 @@ threads: 16
 reps_default: 1
 reps_baseline: 5
 
+# Batch size in bases, passed as `-K` to BOTH bwa-mem3 and upstream bwa-mem2 on
+# every alignment the concordance comparisons read.
+#
+# Why pin it at all. bwa (fastmap.c:394), bwa-mem2 v2.2.1 and bwa-mem3 all compute
+# the default batch as `chunk_size * n_threads`, and mem_pestat() infers the
+# paired-end insert-size distribution from whatever reads land in a batch -- those
+# percentile bounds then feed pairing, mate rescue and MAPQ. So the DEFAULT output
+# is a function of `-t`. Measured on wgs-5M: upstream bwa-mem2 disagrees with
+# ITSELF on 290 of 10,030,558 records between -t 16 and -t 32 (insert-size mean
+# 401.00+/-308.50 vs 285.27+/-163.76). `-K` is upstream's own answer -- bwa's help
+# text reads "process INT input bases in each batch regardless of nThreads (for
+# reproducibility)". With it pinned equally on both sides, output is thread-
+# invariant (verified: 0 diffs, t=16 vs t=32, both aligners) and the blessed golden
+# stops depending on the value of `threads:` above.
+#
+# Why THIS value. 160,000,000 == the historical default: chunk_size (10,000,000,
+# `bwamem.c:99` / `bwamem.cpp:382` in both tools) x 16 threads. So pinning it is
+# output-NEUTRAL against every BAM produced before it existed (verified: 0 diffs
+# vs the un-pinned invocation at -t 16). It is deliberately a LITERAL and not
+# `chunk_size * threads`: deriving it from `threads` would re-couple the golden to
+# the very knob this decouples it from. Changing this number changes every
+# alignment's output and requires a re-bless.
+#
+# NOT applied to: the thread-scaling ladder (rules/scaling.smk -- it exists to
+# measure the batch-size/thread interaction, and pinning the batch would distort
+# Gate #3), bwameth (no such flag; it wraps bwa-mem2 itself), or minibwa (its `-K`
+# sets a mini-batch with different semantics, its batching is already
+# thread-invariant at fixed 100M/1G defaults, and it is a wall-time comparator
+# that should run at its author's defaults).
+batch_bases: 160000000
+
 # Thread-scaling ladder (`--target thread_scaling`, part of `bless_release`).
 #
 # Strong-scaling efficiency E(n) = T(1) / (n * T(n)) is only meaningful on FIXED

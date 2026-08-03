@@ -383,9 +383,36 @@ def _compat_targets(samples: list, reps: int) -> list:
 
 COMPAT_REAL_SAMPLES = [
     f"{base}-compat"
-    for base in ("wgs-5M", "wes-5M", "panel-twist-5M", "hic-1M", "sbx-1M")
+    for base in (
+        "wgs-5M",
+        "wes-5M",
+        "panel-twist-5M",
+        "hic-1M",
+        "sbx-1M",
+        # Simulated (holodeck) siblings: the only non-meth datasets that lacked a
+        # compat arm, and a different error profile from the 1000 Genomes / Twist
+        # real data. Their baselines already exist (the accuracy target produces
+        # them), so scoring them costs only the compat alignments.
+        "sim-wgs-place",
+        "sim-wgs-vars",
+    )
     if f"{base}-compat" in CONFIG.samples
 ]
+
+# Thread-invariance probe: one job, one host, both thread counts, self-compared.
+# Keyed on the BASE sample (not the `-compat` sibling) because the rule adds
+# `--compat=bwa-mem2` itself -- pointing it at the sibling would pass the flag
+# twice. `c8g64` is the only queue with more vCPUs than the high rung needs.
+COMPAT_INVARIANCE_SAMPLE = "wgs-5M"
+COMPAT_INVARIANCE_ARCH = "c8g64"
+
+
+def _compat_invariance_target() -> list:
+    """Sentinel for the `-K` thread-invariance gate (see rules/compare.smk)."""
+    return [
+        f"runs/{FG_LABS_SHA}/compat-invariance/{COMPAT_INVARIANCE_SAMPLE}/"
+        f"{COMPAT_INVARIANCE_ARCH}/report.txt"
+    ]
 
 
 def _fast_minibwa_targets() -> list:
@@ -512,6 +539,7 @@ rule bless_release:
         _accuracy_targets(FULL_SIM_SAMPLES, REPS),
         _thread_scaling_target(),
         _compat_targets(COMPAT_REAL_SAMPLES, REPS),
+        _compat_invariance_target(),
 
 
 rule compat:
@@ -537,6 +565,7 @@ rule compat:
     """
     input:
         _compat_targets(COMPAT_REAL_SAMPLES, REPS),
+        _compat_invariance_target(),
 
 
 rule compat_smoke:
