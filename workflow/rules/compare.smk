@@ -134,6 +134,71 @@ rule compare_vs_baseline:
         """
 
 
+rule compare_compat_identity:
+    """`--compat=bwa-mem2` arms only: full-content identity vs upstream bwa-mem2,
+    via `fgumi compare bams`.
+
+    This is the assertion the compat arm exists to make, and `compare-bams`
+    cannot make it. `compare-bams` compares placement (ref / pos / CIGAR / MAPQ),
+    four FLAG bits, and aux tags — it never reads QNAME, SEQ, QUAL, TLEN,
+    RNEXT/PNEXT, the other twelve FLAG bits, or the header. So a compat arm
+    scored only by compare-bams can report 100% while SEQ, TLEN, the proper-pair
+    flag or the @SQ dictionary all differ.
+
+    `fgumi compare bams` compares all eleven core SAM fields plus tags
+    (order-independent, so BAM tag ordering is not a false difference) and
+    enforces @HD(SO/GO)/@SQ/@RG compatibility as a hard precondition, with
+    @PG/@CO excluded — exactly right here, since @PG differs by construction
+    (`ID:bwa-mem3` vs `ID:bwa-mem2`, plus per-run command lines).
+
+    Boolean by design: exit 0 = identical, exit 1 = differ, which fails the rule
+    and so fails the run. There is no percentage to ingest, and none is wanted —
+    "almost byte-identical" is not a meaningful state for this claim. The graded
+    `vs-baseline.json` is still produced alongside for the DB and trend
+    reporting; this rule is the gate.
+
+    Both arms are validated: measured locally on wgs-5M at 4.1-6.6M records/s
+    with ~77 MB RSS, so the check costs seconds against alignments costing
+    minutes. `--threads` is tied to the rule's `threads` so the Batch vCPU
+    reservation matches what fgumi actually uses.
+
+    NOT usable for the other comparison kinds: default-mode bwa-mem3 vs bwa-mem2
+    hard-errors in fgumi's header precondition (`@SQ reference dictionaries
+    differ` — default mode emits M5/AS/UR/SP from the .hdr sidecar, upstream does
+    not), and vs_golden / vs_x86 / vs_default all need a concordance percentage
+    that fgumi does not report.
+    """
+    input:
+        query = "runs/{sha}/{sample}/{arch}/rep-{rep}/aligned.bam",
+        # Same baseline resolution as compare_vs_baseline: aliased to the base
+        # sample, with ARM falling back to the x86 reference arch.
+        baseline = lambda wc: (
+            f"baseline/bwa-mem2-{CONFIG.upstream_tag}/{_baseline_sample(wc.sample)}/"
+            f"{wc.arch if wc.arch in BASELINE_ARCHS else ARM_X86_REFERENCE_ARCH}/"
+            f"rep-1/aligned.bam"
+        ),
+    output:
+        report = "runs/{sha}/{sample}/{arch}/rep-{rep}/compare/compat-identity.txt",
+    # Explicit for the same executor-fork reason as compare_vs_baseline. fgumi's
+    # content engine parallelises BGZF decode + comparison, so unlike
+    # compare-bams this genuinely uses the threads it is given.
+    threads: 4
+    resources:
+        batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
+        container_image = lambda wc: image_for_arch(wc.arch),
+        mem_mb = COMPARE_MEM_MB,
+    shell:
+        r"""
+        mkdir -p $(dirname {output.report})
+        # Write to a temp file and move on success: a DIFFER exit must not leave
+        # a satisfied output behind, or the next run would treat the failure as
+        # already-done and skip it.
+        fgumi compare bams {input.query} {input.baseline} \
+            --threads {threads} --max-diffs 20 > {output.report}.tmp 2>&1
+        mv {output.report}.tmp {output.report}
+        """
+
+
 rule compare_vs_x86:
     """ARM-only: compare fg-labs ARM BAM against fg-labs x86 BAM (transitive
     concordance signal — see ARM_X86_REFERENCE_ARCH note above)."""

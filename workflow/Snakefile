@@ -359,12 +359,25 @@ def _compat_targets(samples: list, reps: int) -> list:
 
     Baseline BAMs are NOT requested here: the compat sibling aliases onto its
     base sample's baseline, which `rule all` already produces.
+
+    Two outputs per cell, deliberately:
+
+    * `compat-identity.txt` — `fgumi compare bams`, the GATE. All eleven core SAM
+      fields plus tags, with @HD/@SQ/@RG compatibility enforced; boolean, so a
+      difference fails the run. This is what makes the byte-identity claim.
+    * `vs-baseline.json` — `compare-bams`, for the DB and trend reporting. Graded,
+      and narrower (placement + tags only), so it cannot carry the claim on its
+      own — but it is what `collect` ingests and what the concordance tables show.
+
+    Keeping both means the strict assertion is enforced without losing the cell
+    from `benchmark.db`.
     """
     return [
-        f"runs/{FG_LABS_SHA}/{sample}/{arch}/rep-{rep}/compare/vs-baseline.json"
+        f"runs/{FG_LABS_SHA}/{sample}/{arch}/rep-{rep}/compare/{output}"
         for sample in samples
         for arch in ARCHS
         for rep in range(1, reps + 1)
+        for output in ("compat-identity.txt", "vs-baseline.json")
     ]
 
 
@@ -540,6 +553,10 @@ rule compat_smoke:
     input:
         f"runs/{FG_LABS_SHA}/smoke-1M-compat/c6a/rep-1/compare/vs-baseline.json",
         f"runs/{FG_LABS_SHA}/smoke-1M-compat/c8g/rep-1/compare/vs-baseline.json",
+        # The fgumi identity gate on both an x86 and an ARM arch — the ARM cell
+        # also exercises the x86-baseline fallback.
+        f"runs/{FG_LABS_SHA}/smoke-1M-compat/c6a/rep-1/compare/compat-identity.txt",
+        f"runs/{FG_LABS_SHA}/smoke-1M-compat/c8g/rep-1/compare/compat-identity.txt",
 
 
 rule thread_scaling:
