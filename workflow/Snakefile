@@ -147,6 +147,8 @@ localrules:
     fast_meth,
     fast_smoke,
     thread_scaling,
+    compat,
+    compat_smoke,
 
 
 def _is_meth_sample(sample_name: str) -> bool:
@@ -176,8 +178,23 @@ def _is_fast_sample(sample_name: str) -> bool:
     return sample_name.endswith("-fast")
 
 
+def _is_compat_sample(sample_name: str) -> bool:
+    """Whether this is a `--compat=bwa-mem2` sibling.
+
+    Keyed off the resolved flag rather than the name suffix (unlike
+    `_is_fast_sample`) so the predicate and the strict tag policy in
+    `WorkflowConfig.ignore_tags()` read the same fact. The two are kept in
+    agreement by `_validate_compat_siblings`, which requires the suffix.
+    """
+    return CONFIG.samples[sample_name].is_compat
+
+
 SWEEP_SAMPLES = [
-    s for s in SAMPLES if not CONFIG.samples[s].truth and not _is_fast_sample(s)
+    s
+    for s in SAMPLES
+    if not CONFIG.samples[s].truth
+    and not _is_fast_sample(s)
+    and not _is_compat_sample(s)
 ]
 
 
@@ -324,6 +341,40 @@ def _fast_accuracy_targets() -> list:
     )
 
 
+def _compat_targets(samples: list, reps: int) -> list:
+    """Byte-identity arms: `--compat=bwa-mem2` scored against upstream bwa-mem2
+    with an EMPTY ignore list, on every arch.
+
+    Two things distinguish this from the sweep's own `vs_baseline`:
+
+    * The tag policy is strict. The sweep excludes MQ/HN because default-mode
+      bwa-mem3 emits them and bwa-mem2 does not, so its 100% is
+      "identical-modulo-two-tags". `--compat` suppresses exactly those, so the
+      exclusion can go away and the score becomes byte-identity.
+    * It runs on ARM as well as x86. `rule all` sends ARM to `vs_x86` because
+      upstream has no ARM build, which leaves NEON's compat behaviour untested
+      — and NEON is one of the two tiers carrying the known phantom-XS defect
+      (fg-labs/bwa-mem3#290). The ARM arms are scored against the x86 baseline;
+      `compare_vs_baseline` handles that fallback.
+
+    Baseline BAMs are NOT requested here: the compat sibling aliases onto its
+    base sample's baseline, which `rule all` already produces.
+    """
+    return [
+        f"runs/{FG_LABS_SHA}/{sample}/{arch}/rep-{rep}/compare/vs-baseline.json"
+        for sample in samples
+        for arch in ARCHS
+        for rep in range(1, reps + 1)
+    ]
+
+
+COMPAT_REAL_SAMPLES = [
+    f"{base}-compat"
+    for base in ("wgs-5M", "wes-5M", "panel-twist-5M", "hic-1M", "sbx-1M")
+    if f"{base}-compat" in CONFIG.samples
+]
+
+
 def _fast_minibwa_targets() -> list:
     """minibwa wall-time probe for the fast comparison, cached by MINIBWA_SHA.
 
@@ -447,6 +498,48 @@ rule bless_release:
         _fast_minibwa_targets(),
         _accuracy_targets(FULL_SIM_SAMPLES, REPS),
         _thread_scaling_target(),
+        _compat_targets(COMPAT_REAL_SAMPLES, REPS),
+
+
+rule compat:
+    """`--compat=bwa-mem2` byte-identity against upstream, every real dataset
+    on every arch (fg-labs/bwa-mem3#277).
+
+    Answers the question the sweep's `vs_baseline` cannot: is bwa-mem3's output
+    byte-identical to bwa-mem2's, or merely identical once MQ/HN are excused?
+    Under `--compat` those two tags are suppressed on both sides, so the ignore
+    list is empty and any divergence — placement OR tag — counts against the
+    score. A passing run is a 100% byte-identity claim.
+
+    Runs on ARM as well as x86, which is the coverage that matters most: the
+    open phantom-XS defect (fg-labs/bwa-mem3#290) is specific to the NEON and
+    AVX-512BW 8-bit kswv kernels, and no compat check has ever run there.
+
+    Included in `bless_release`. Reuses each base sample's baseline BAM, so on
+    top of a completed `all` it costs only the compat alignments themselves.
+
+    Usage:
+        snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
+            --config fg_labs_sha=<sha> -- compat
+    """
+    input:
+        _compat_targets(COMPAT_REAL_SAMPLES, REPS),
+
+
+rule compat_smoke:
+    """Cheap wiring check for the compat pipeline before the full `compat` run.
+
+    smoke-1M on the x86 baseline arch and on the core ARM arch at 1 rep — enough
+    to prove the flag reaches the aligner, the strict (empty) ignore list is
+    applied, and the ARM-to-x86 baseline fallback resolves.
+
+    Usage:
+        snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
+            --config fg_labs_sha=<sha> -- compat_smoke
+    """
+    input:
+        f"runs/{FG_LABS_SHA}/smoke-1M-compat/c6a/rep-1/compare/vs-baseline.json",
+        f"runs/{FG_LABS_SHA}/smoke-1M-compat/c8g/rep-1/compare/vs-baseline.json",
 
 
 rule thread_scaling:
@@ -478,7 +571,12 @@ rule baseline_all:
         [
             f"baseline/bwa-mem2-{CONFIG.upstream_tag}/{sample}/{arch}/rep-{rep}/aligned.bam"
             for sample in CONFIG.samples
-            if not CONFIG.samples[sample].truth and not _is_fast_sample(sample)
+            if not CONFIG.samples[sample].truth
+            and not _is_fast_sample(sample)
+            # Compat siblings are scored against their BASE sample's baseline
+            # (see `_baseline_sample` in rules/compare.smk), so giving them their
+            # own would realign identical input under a second name.
+            and not _is_compat_sample(sample)
             for arch in _archs_for_sample(sample)
             for rep in range(1, REPS_BASELINE + 1)
         ]

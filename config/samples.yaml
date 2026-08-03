@@ -298,6 +298,72 @@ samples:
     fg_labs_flags: ["--fast"]
 
   # ---------------------------------------------------------------------------
+  # `--compat=bwa-mem2` siblings (fg-labs/bwa-mem3#277).
+  #
+  # The default sweep's `vs_baseline` already scores 100% against upstream, but
+  # only with `ignore_tags: [MQ, HN]` -- bwa-mem3 emits both and bwa-mem2 emits
+  # neither, so comparing them would score 0%. That makes the standing claim
+  # "100% concordant modulo two tags we had to exclude", not "byte-identical".
+  #
+  # `--compat=bwa-mem2` suppresses exactly those two tags plus the default @HD
+  # and the .hdr/.dict sidecar, so the exclusion list can go to EMPTY and the
+  # comparison becomes a true byte-identity assertion. `ignore_tags` is dropped
+  # for these samples by `WorkflowConfig.ignore_tags()`, derived from
+  # `is_compat` -- not declared here, so it cannot drift across siblings.
+  #
+  # Cross-arch coverage is the point. Byte-identity was only ever verified on
+  # AVX2, while the known phantom-XS defect in the 8-bit kswv mate-rescue
+  # kernels (fg-labs/bwa-mem3#290) is specific to NEON and AVX-512BW -- c8g,
+  # c7g, c7a and c7i, four of the six benched arches. These arms run on every
+  # arch, comparing against the x86 baseline (bwa-mem2 has no ARM build), which
+  # is what turns that defect from an assumed ~1-in-8M into a measured number.
+  #
+  # `--compat` is mutually exclusive with both `--fast` and `--meth` upstream,
+  # so there are no meth or fast siblings here; `Sample.__post_init__` rejects
+  # either combination at config load.
+  # ---------------------------------------------------------------------------
+  wgs-5M-compat:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/wgs/1kg-HG00096/downsampled-5M/
+    fg_labs_flags: ["--compat=bwa-mem2"]
+
+  wes-5M-compat:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/wes/1kg-HG00100/downsampled-5M/
+    fg_labs_flags: ["--compat=bwa-mem2"]
+
+  panel-twist-5M-compat:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/panel/twist-umi/downsampled-5M/
+    fg_labs_flags: ["--compat=bwa-mem2"]
+
+  hic-1M-compat:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/hic/hg002-1M/
+    layout: paired
+    fg_labs_flags: ["--compat=bwa-mem2"]
+    # Same canonical Hi-C mem flags as the base (applied to both arms).
+    mem_flags: ["-5", "-S", "-P"]
+
+  sbx-1M-compat:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/sbx/hg002-1M/
+    layout: single
+    fg_labs_flags: ["--compat=bwa-mem2"]
+
+  # Wiring check for the compat pipeline, driven by `--target compat_smoke`.
+  smoke-1M-compat:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/smoke/1M/
+    fg_labs_flags: ["--compat=bwa-mem2"]
+
+  # ---------------------------------------------------------------------------
   # Truth-based accuracy arms (holodeck-graded placement + MAPQ calibration +
   # variant representation, and methylation correlation for meth). These verify
   # PR #189's "no high-confidence accuracy loss" claim against known truth.
