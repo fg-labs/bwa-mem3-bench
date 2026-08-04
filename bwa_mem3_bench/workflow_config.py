@@ -22,7 +22,19 @@ _AUX_TAG_RE = re.compile(r"[A-Za-z][A-Za-z0-9]")
 #   - `vs_default` — the exception to the "same binary, skip nothing" rule:
 #     `--fast` prunes the candidate set on purpose, so the tags describing that
 #     set are skipped while the tags describing the chosen alignment stay strict.
-COMPARE_KINDS = frozenset({"vs_baseline", "vs_golden", "vs_x86", "vs_default"})
+COMPARE_KINDS = frozenset({"vs_baseline", "vs_golden", "vs_x86", "vs_default", "vs_bwa"})
+
+# For the two CROSS-TOOL kinds, the `--compat` target whose output shaping makes
+# bwa-mem3 tag-symmetric with the other side. `WorkflowConfig.ignore_tags()`
+# drops the kind's default exclusions only for a sample whose target matches --
+# a `--compat=bwa-mem` arm scored against the bwa-mem2 baseline retains MQ:i and
+# is NOT symmetric, so it must keep them. The same-binary kinds (vs_golden,
+# vs_x86, vs_default) are absent on purpose: there is no upstream, and they are
+# already strict for every sample.
+COMPARE_KIND_UPSTREAM = {
+    "vs_baseline": "bwa-mem2",
+    "vs_bwa": "bwa-mem",
+}
 
 # The per-kind tag lists a `compare_options` / `compare_defaults` body may carry.
 # Enumerated once so adding a third list is one edit, not three.
@@ -51,10 +63,42 @@ MATE_ONLY_TAGS = frozenset({"MQ", "MC"})
 # because bwameth will never emit them.
 METH_UNEMITTED_TAGS = frozenset({"MQ", "HN"})
 
-# Name suffix marking a `--compat=bwa-mem2` sibling. The baseline alias in
-# `workflow/rules/compare.smk` strips it to find the base sample whose upstream
-# BAM the sibling is scored against, so the suffix is load-bearing, not cosmetic.
-COMPAT_SAMPLE_SUFFIX = "-compat"
+# Name suffixes marking a `--compat` sibling, mapped to the target each one
+# declares. The baseline alias in `workflow/rules/compare.smk` strips the suffix
+# to find the base sample whose upstream BAM the sibling is scored against, so
+# these are load-bearing, not cosmetic.
+#
+# `-compat` is grandfathered as bwa-mem2 rather than renamed to
+# `-compat-bwa-mem2`: sample names are S3 cache keys, so a rename would orphan
+# every blessed compat BAM and force a re-run of all eight arms across every
+# arch to buy nothing but symmetry.
+#
+# The mapping is checked, not just used: a sibling whose `--compat=` target
+# disagrees with its own suffix fails config load. Otherwise a `-compat` arm
+# silently switched to `--compat=bwa-mem` would keep being scored against the
+# bwa-mem2 baseline, where its retained MQ:i reads as a compat regression.
+COMPAT_SAMPLE_SUFFIXES = {
+    "-compat-bwa-mem": "bwa-mem",
+    "-compat": "bwa-mem2",
+}
+
+
+def compat_sample_suffix(sample_name: str) -> str | None:
+    """The `COMPAT_SAMPLE_SUFFIXES` key `sample_name` ends with, or None.
+
+    Longest match wins. No two current suffixes are suffixes of each other
+    (`"…-compat-bwa-mem".endswith("-compat")` is False), so the ordering is
+    belt-and-braces against a future key like `-compat-bwa-mem-0.7.17` that
+    would otherwise be shadowed.
+
+    :param sample_name: sample name to classify.
+    :return: the matching suffix, or None if the name declares no compat target.
+    """
+    for suffix in sorted(COMPAT_SAMPLE_SUFFIXES, key=len, reverse=True):
+        if sample_name.endswith(suffix):
+            return suffix
+    return None
+
 
 # Tags that appear only on methylation comparisons: XM/XG/XR from `bwa-mem3
 # --meth`, and YD/YC/RG from bwameth. Derived rather than declared per sample
@@ -356,22 +400,35 @@ class WorkflowConfig:
         """Aux tags `compare-bams` must skip for one (sample, comparison kind).
 
         Methylation samples get `METH_IGNORE_TAGS` added automatically on
-        `vs_baseline` -- the cross-tool kind, and the only one where the two
-        sides are different aligners. See that constant for why it is derived
-        rather than declared, and why it must stay derived in lockstep with
-        `METH_EXTRA_TAGS` in `expect_tags`.
+        `vs_baseline`. That is the cross-tool kind where the two sides can be
+        *different kinds of aligner* (bwameth is 3-letter, bwa-mem3 is not); the
+        other cross-tool kind, `vs_bwa`, has no meth arm because `--compat` and
+        `--meth` are mutually exclusive, so it needs no such exemption. See that
+        constant for why it is derived rather than declared, and why it must
+        stay derived in lockstep with `METH_EXTRA_TAGS` in `expect_tags`.
 
         `vs_golden` carries no exemptions at all, for meth or anything else: two
         fg-labs builds should be ~identical, so Gate #2 is strict on every tag.
 
-        `--compat` samples invert the usual direction on `vs_baseline`: they
-        SUBTRACT the default exclusions rather than adding to them, so the kind
-        is strict on every tag. The default list exists because default-mode
-        bwa-mem3 emits MQ/HN and bwa-mem2 never does; `--compat=bwa-mem2`
-        suppresses exactly those, so both sides now lack them and excluding them
-        would hide the regression the arm exists to catch -- a build that
-        stopped suppressing them would still score 100%. Strictness is the whole
-        assertion: byte-identity, not identity-modulo-the-tags-we-excused.
+        A `--compat` sample inverts the usual direction: it SUBTRACTS the
+        default exclusions rather than adding to them, so the comparison is
+        strict on every tag. The default list exists because default-mode
+        bwa-mem3 emits MQ/HN and upstream does not; a compat target suppresses
+        exactly what its own upstream lacks, so both sides end up with the same
+        tag set and excluding anything would hide the regression the arm exists
+        to catch -- a build that stopped suppressing would still score 100%.
+        Strictness is the whole assertion: byte-identity, not
+        identity-modulo-the-tags-we-excused.
+
+        **The subtraction applies only when the target matches the aligner on
+        the other side**, which is why it consults `COMPARE_KIND_UPSTREAM`
+        rather than just `is_compat`. A `--compat=bwa-mem` arm scored against
+        the bwa-mem2 baseline is NOT tag-symmetric: it retains `MQ:i` (bwa emits
+        it; bwa-mem2 forked before that landed), so a strict list would score
+        every mated record as discordant and read as a compat regression that
+        never happened. That arm falls through to the kind default, which
+        excludes MQ and HN -- correct on both counts, since HN is absent from
+        both sides there and excluding an absent tag is a no-op.
 
         This is why the subtraction lives here rather than in the YAML:
         `_resolve_tags` unions a sample's list onto the kind default and cannot
@@ -381,10 +438,11 @@ class WorkflowConfig:
         :param kind: comparison kind, one of `COMPARE_KINDS`.
         :return: sorted, de-duplicated tag names.
         """
-        if self.samples[sample_name].is_compat and kind == "vs_baseline":
+        sample = self.samples[sample_name]
+        if sample.is_compat and sample.compat_target == COMPARE_KIND_UPSTREAM.get(kind):
             return []
         tags = self._resolve_tags(sample_name, kind, "ignore_tags")
-        if self.samples[sample_name].is_meth and kind == "vs_baseline":
+        if sample.is_meth and kind == "vs_baseline":
             tags |= METH_IGNORE_TAGS
         return sorted(tags)
 
@@ -681,14 +739,25 @@ def _validate_compat_siblings(samples: dict[str, Sample]) -> None:
     for name, sample in sorted(samples.items()):
         if not sample.is_compat:
             continue
-        if not name.endswith(COMPAT_SAMPLE_SUFFIX):
+        suffix = compat_sample_suffix(name)
+        if suffix is None:
+            expected = "', '<base>".join(sorted(COMPAT_SAMPLE_SUFFIXES))
             raise ValueError(
-                f"sample {name!r} sets --compat but is not named '<base>{COMPAT_SAMPLE_SUFFIX}'. "
-                f"The baseline alias strips that suffix to find the base sample, so an "
+                f"sample {name!r} sets --compat but is not named '<base>{expected}'. "
+                f"The baseline alias strips that suffix to find the base sample, so a "
                 f"differently-named compat sample would be scored against its own "
                 f"(redundantly realigned) baseline."
             )
-        base_name = name[: -len(COMPAT_SAMPLE_SUFFIX)]
+        want_target = COMPAT_SAMPLE_SUFFIXES[suffix]
+        if sample.compat_target != want_target:
+            raise ValueError(
+                f"compat sample {name!r} is named '{suffix}' but requests "
+                f"--compat={sample.compat_target}. The suffix decides which upstream the "
+                f"arm is scored against, so a mismatch would grade the output against the "
+                f"wrong aligner -- and the two targets disagree on MQ:i and @HD by design, "
+                f"so it would read as a compat regression rather than a naming error."
+            )
+        base_name = name[: -len(suffix)]
         base = samples.get(base_name)
         if base is None:
             raise ValueError(

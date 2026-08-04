@@ -51,6 +51,14 @@ compare_defaults:
   vs_x86:
     ignore_tags: []
     expect_tags: *core_expect_tags
+  # bwa-mem3 `--compat=bwa-mem` vs lh3/bwa. Strict on every tag, and unlike
+  # vs_baseline it needs no exclusions to get there: the bwa-mem target keeps
+  # MQ:i (bwa emits it, from 0.7.18) and drops HN:i (bwa has no counterpart),
+  # so both sides carry exactly the same tag set. An exclusion here would hide
+  # the regression the arm exists to catch.
+  vs_bwa:
+    ignore_tags: []
+    expect_tags: *core_expect_tags
   # `--fast` vs default is the ONE same-binary comparison that is not
   # same-behaviour: the preset prunes the candidate set on purpose
   # (`--smem-dedup`, the score-gated chain-extension cap), and `--extend-csub`
@@ -382,6 +390,35 @@ samples:
     reference: hg38
     source: data/smoke/1M/
     fg_labs_flags: ["--compat=bwa-mem2"]
+
+  # ---------------------------------------------------------------------------
+  # `--compat=bwa-mem` siblings (fg-labs/bwa-mem3 0.9.0).
+  #
+  # The second compat target. It is NOT a variant spelling of the first: bwa
+  # gained the default `@HD` (0.7.18) and `MQ:i` (lh3/bwa#330) after bwa-mem2
+  # forked at 0.7.17, so `--compat=bwa-mem` KEEPS both where `--compat=bwa-mem2`
+  # suppresses them. Only `HN:i` and the .hdr/.dict sidecar are genuinely
+  # bwa-mem3-only, and both targets drop those.
+  #
+  # Scored against the `bwa/` arm (rules/align_bwa.smk), not the bwa-mem2
+  # baseline -- against bwa-mem2 this arm's retained `MQ:i` would read as
+  # discordance. `vs_bwa` carries an EMPTY ignore list, same as the bwa-mem2
+  # arms: both sides emit the same tag set, so no exclusion is needed to reach
+  # byte-identity and adding one would hide the regression the arm exists for.
+  #
+  # The `-compat-bwa-mem` suffix is load-bearing: `_validate_compat_siblings`
+  # strips it to find the base sample AND asserts it matches the `--compat=`
+  # target, so a sibling cannot be graded against the wrong upstream.
+  #
+  # Only smoke-1M for now, driven by `--target compat_bwa_smoke`. bwa needs its
+  # own index family and is materially slower than bwa-mem2, so the real cells
+  # are added once the wiring is proven green on both arches.
+  # ---------------------------------------------------------------------------
+  smoke-1M-compat-bwa-mem:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/smoke/1M/
+    fg_labs_flags: ["--compat=bwa-mem"]
 
   # ---------------------------------------------------------------------------
   # Truth-based accuracy arms (holodeck-graded placement + MAPQ calibration +

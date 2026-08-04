@@ -19,7 +19,11 @@ from pathlib import Path
 # Make the Python package importable from the repo root.
 sys.path.insert(0, str(Path(workflow.basedir).parent))
 
-from bwa_mem3_bench.workflow_config import load_config, parse_ladder_override
+from bwa_mem3_bench.workflow_config import (
+    compat_sample_suffix,
+    load_config,
+    parse_ladder_override,
+)
 
 
 CONFIG = load_config(Path(workflow.basedir).parent / "config")
@@ -119,6 +123,7 @@ wildcard_constraints:
 include: "rules/align.smk"
 include: "rules/compare.smk"
 include: "rules/align_minibwa.smk"
+include: "rules/align_bwa.smk"
 include: "rules/eval.smk"
 include: "rules/scaling.smk"
 
@@ -149,6 +154,7 @@ localrules:
     thread_scaling,
     compat,
     compat_smoke,
+    compat_bwa_smoke,
 
 
 def _is_meth_sample(sample_name: str) -> bool:
@@ -586,6 +592,30 @@ rule compat_smoke:
         # also exercises the x86-baseline fallback.
         f"runs/{FG_LABS_SHA}/smoke-1M-compat/c6a/rep-1/compare/compat-identity.txt",
         f"runs/{FG_LABS_SHA}/smoke-1M-compat/c8g/rep-1/compare/compat-identity.txt",
+
+
+rule compat_bwa_smoke:
+    """Cheap wiring check for the `--compat=bwa-mem` arm against lh3/bwa.
+
+    Deliberately NOT part of `rule all`, `compat`, or `bless_release` yet. This
+    is the first cell the bwa arm has ever run, and bwa needs its own index
+    format and is materially slower than bwa-mem2, so the cost of a
+    misconfiguration should be paid on smoke-1M rather than on a full sweep.
+    Promote to `compat` once this is green on both arches.
+
+    Both arches are load-bearing, and for different reasons than the bwa-mem2
+    smoke. c6a proves the arm at all. c8g proves the thing the bwa-mem2 arm
+    structurally cannot: bwa builds on ARM (NEON since 0.7.18) while upstream
+    bwa-mem2 does not, so this compares an ARM bwa-mem3 against an ARM bwa
+    DIRECTLY instead of inferring it through x86. See align_bwa.
+
+    Usage:
+        snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
+            --config fg_labs_sha=<sha> -- compat_bwa_smoke
+    """
+    input:
+        f"runs/{FG_LABS_SHA}/smoke-1M-compat-bwa-mem/c6a/rep-1/compare/bwa-identity.txt",
+        f"runs/{FG_LABS_SHA}/smoke-1M-compat-bwa-mem/c8g/rep-1/compare/bwa-identity.txt",
 
 
 rule thread_scaling:

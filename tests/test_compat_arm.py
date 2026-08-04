@@ -8,6 +8,7 @@ directive. Each guard pins a decision whose breakage would be silent: the run
 would still succeed and still report a number, just not the number claimed.
 """
 
+import re
 from pathlib import Path
 
 from bwa_mem3_bench.workflow_config import load_config
@@ -249,3 +250,129 @@ def test_invariance_high_rung_clears_the_historical_cap_threshold() -> None:
 def test_invariance_gate_is_in_bless_release() -> None:
     body = SNAKEFILE.split("rule bless_release:")[1].split("\nrule ")[0]
     assert "_compat_invariance_target()" in body
+
+
+# ---------------------------------------------------------------------------
+# The `--compat=bwa-mem` arm against lh3/bwa.
+# ---------------------------------------------------------------------------
+
+ALIGN_BWA_SMK = (REPO_ROOT / "workflow" / "rules" / "align_bwa.smk").read_text()
+
+
+def _code_only(text: str) -> str:
+    """`text` with triple-quoted blocks and `#` comments removed.
+
+    Several guards below assert that a token is ABSENT. Run against raw source
+    those are unsound: this feature's prose necessarily NAMES the things the
+    code must not do (`.bwt.2bit.64` is the index family bwa cannot read,
+    `ARM_X86_REFERENCE_ARCH` is the fallback this rule deliberately omits), so a
+    docstring explaining the decision would fail the test enforcing it -- and
+    the obvious "fix" is to delete the explanation.
+    """
+    text = re.sub(r'"""..*?"""', "", text, flags=re.DOTALL)
+    return "\n".join(line.split("#", 1)[0] for line in text.splitlines())
+
+
+def test_bwa_arm_pins_the_batch_size_like_the_other_two_aligners() -> None:
+    """`-K` must reach bwa too, for exactly the reason it reaches the other two.
+
+    bwa computes its default batch as `chunk_size * n_threads` and `mem_pestat`
+    reads whatever lands in it, so an unpinned bwa run would be a function of
+    `-t` and could not be compared against a pinned bwa-mem3 run at all.
+    """
+    assert "batch_flag = _batch_flag()" in ALIGN_BWA_SMK
+    assert "{params.batch_flag}" in ALIGN_BWA_SMK
+
+
+def test_bwa_arm_applies_the_same_mem_flags_as_the_other_arms() -> None:
+    """Asymmetric `mem` flags would make the comparison measure the flags.
+
+    `hic-1M` carries `-5 -S -P`; a bwa arm without them would diverge on
+    mate rescue and read as a compat failure.
+    """
+    assert "mem_flags = lambda wc: _mem_flags(wc.sample)" in ALIGN_BWA_SMK
+    assert "{params.mem_flags}" in ALIGN_BWA_SMK
+
+
+def test_bwa_arm_is_cached_on_the_bwa_version_not_the_fg_labs_sha() -> None:
+    """bwa's output depends only on its own pin, so a new fg-labs SHA must reuse
+    the cached BAMs rather than re-running a materially slower aligner."""
+    assert 'bam        = "bwa/{tool_version}/{sample}/{arch}/rep-{rep}/aligned.bam"' in (
+        ALIGN_BWA_SMK
+    )
+    assert "runs/{sha}" not in ALIGN_BWA_SMK
+
+
+def test_bwa_arm_stages_bwas_own_index_family() -> None:
+    """bwa reads `.bwt`/`.sa`; bwa-mem2 and bwa-mem3 read `.bwt.2bit.64`/`.0123`.
+    Neither can read the other's, so staging the wrong family fails at runtime
+    on a Batch worker rather than here."""
+    code = _code_only(ALIGN_BWA_SMK)
+    for suffix in (".amb", ".ann", ".bwt", ".pac", ".sa"):
+        assert f'f"{{base}}{suffix}"' in code, suffix
+    # The bwa-mem2 family must NOT be staged for this rule.
+    assert ".bwt.2bit.64" not in code
+    assert ".0123" not in code
+
+
+def test_bwa_arm_prewarms_the_index_so_the_timed_region_excludes_load() -> None:
+    """bwa has no `shm` command, so warm symmetry with `align_fg_labs` comes from
+    the same `cat`-into-page-cache prewarm `align_baseline` uses. Without it the
+    bwa arm eats its cold index load inside the timed region."""
+    prewarm = ALIGN_BWA_SMK.split("tricorder")[0]
+    assert "cat {input.ref[0]}.bwt" in prewarm
+    assert "> /dev/null" in prewarm
+
+
+def test_bwa_identity_gate_uses_fgumi_and_compares_against_the_bwa_arm() -> None:
+    """The assertion is boolean byte-identity over all core fields, which
+    compare-bams cannot make -- it never reads QNAME, SEQ, QUAL, TLEN or the
+    header, so it would report 100% while SEQ or the `@SQ` dictionary differed."""
+    body = COMPARE_SMK.split("rule compare_bwa_identity:")[1].split("\nrule ")[0]
+    assert "fgumi compare bams" in body
+    assert "bwa/{CONFIG.bwa_version}/" in body
+
+
+def test_bwa_identity_gate_does_not_fall_back_to_an_x86_reference_arch() -> None:
+    """The whole point of this arm on ARM.
+
+    `compare_vs_baseline` and `compare_compat_identity` fall back to
+    `ARM_X86_REFERENCE_ARCH` because upstream bwa-mem2 has no ARM build, making
+    ARM concordance transitive. bwa DOES build on ARM (NEON since 0.7.18), so
+    this arm compares same-arch against same-arch -- a fallback here would throw
+    away the directness that justifies the arm.
+    """
+    body = _code_only(COMPARE_SMK.split("rule compare_bwa_identity:")[1].split("\nrule ")[0])
+    assert "ARM_X86_REFERENCE_ARCH" not in body
+    assert "{wc.arch}/rep-1/aligned.bam" in body
+
+
+def test_bwa_identity_output_is_not_left_behind_on_a_difference() -> None:
+    """A DIFFER exit must not leave a satisfied output, or the next run treats
+    the failure as already-done and skips it. Same contract as the bwa-mem2 gate."""
+    body = COMPARE_SMK.split("rule compare_bwa_identity:")[1].split("\nrule ")[0]
+    assert "{output.report}.tmp" in body
+    assert "mv {output.report}.tmp {output.report}" in body
+
+
+def test_bwa_smoke_covers_both_an_x86_and_an_arm_arch() -> None:
+    """c6a proves the arm; c8g proves the thing the bwa-mem2 arm structurally
+    cannot -- a direct ARM-vs-ARM upstream comparison."""
+    body = SNAKEFILE.split("rule compat_bwa_smoke:")[1].split("\nrule ")[0]
+    assert "/c6a/rep-1/compare/bwa-identity.txt" in body
+    assert "/c8g/rep-1/compare/bwa-identity.txt" in body
+
+
+def test_bwa_arm_is_not_yet_in_the_sweep_or_the_release_bless() -> None:
+    """Deliberately opt-in until the smoke is green on both arches.
+
+    This is the first cell the bwa arm has ever run and bwa is materially slower
+    than bwa-mem2, so a misconfiguration should cost a smoke run, not a sweep.
+    Delete this test in the change that promotes it -- its failure is the
+    reminder that the promotion is intentional.
+    """
+    cfg = load_config(CONFIG_DIR)
+    bwa_arms = [n for n, s in cfg.samples.items() if s.compat_target == "bwa-mem"]
+    assert bwa_arms == ["smoke-1M-compat-bwa-mem"], bwa_arms
+    bless = SNAKEFILE.split("rule bless_release:")[1].split("\nrule ")[0]
+    assert "bwa-identity" not in bless
