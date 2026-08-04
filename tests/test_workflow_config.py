@@ -7,8 +7,9 @@ import pytest
 import yaml
 
 from bwa_mem3_bench.workflow_config import (
+    COMPARE_KIND_UPSTREAM,
     COMPARE_KINDS,
-    COMPAT_SAMPLE_SUFFIX,
+    COMPAT_SAMPLE_SUFFIXES,
     METH_EXTRA_TAGS,
     METH_IGNORE_TAGS,
     METH_UNEMITTED_TAGS,
@@ -21,6 +22,7 @@ from bwa_mem3_bench.workflow_config import (
     _as_str_list,
     _thread_scaling_from,
     _validate_compat_siblings,
+    compat_sample_suffix,
     load_config,
     parse_ladder_override,
 )
@@ -924,19 +926,39 @@ def test_parse_ladder_override_rejects_a_malformed_spec(spec: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_compat_samples_are_strict_on_every_tag() -> None:
-    """A compat arm SUBTRACTS the kind default rather than extending it.
+def test_compat_samples_are_strict_against_their_own_upstream() -> None:
+    """A compat arm SUBTRACTS the kind default rather than extending it --
+    but only for the kind that scores it against the aligner it targets.
 
     This is the whole point of the arm. `vs_baseline` excludes MQ/HN because
-    default-mode bwa-mem3 emits them and bwa-mem2 never does; `--compat`
+    default-mode bwa-mem3 emits them and bwa-mem2 never does; `--compat=bwa-mem2`
     suppresses exactly those two, so leaving them excluded would let a build
     that stopped suppressing them still score 100%.
+
+    The scoping matters as much as the strictness. `--compat=bwa-mem` RETAINS
+    MQ:i (bwa emits it, from 0.7.18), so the same subtraction applied to its
+    `vs_baseline` score would mark every mated record discordant against a
+    bwa-mem2 baseline that has no MQ to compare -- a compat regression that
+    never happened. Its strict comparison is `vs_bwa`.
     """
     cfg = load_config(CONFIG_DIR)
     assert cfg.ignore_tags("wgs-5M", "vs_baseline") == ["HN", "MQ"]
-    for name, sample in cfg.samples.items():
-        if sample.is_compat:
-            assert cfg.ignore_tags(name, "vs_baseline") == [], name
+
+    kind_for_target = {target: kind for kind, target in COMPARE_KIND_UPSTREAM.items()}
+    compat = [(n, s) for n, s in cfg.samples.items() if s.is_compat]
+    assert compat, "expected at least one --compat sibling"
+    for name, sample in compat:
+        own_kind = kind_for_target[sample.compat_target]
+        assert cfg.ignore_tags(name, own_kind) == [], (name, own_kind)
+
+    # The trap the scoping exists to prevent, asserted on a real sample rather
+    # than in the abstract: a bwa-mem arm graded against the bwa-mem2 baseline
+    # must keep the MQ exclusion, because it retains MQ:i and that baseline has
+    # none. Strictness there would report a regression that never happened.
+    bwa_arms = [n for n, s in compat if s.compat_target == "bwa-mem"]
+    assert bwa_arms, "expected at least one --compat=bwa-mem sibling"
+    for name in bwa_arms:
+        assert cfg.ignore_tags(name, "vs_baseline") == ["HN", "MQ"], name
 
 
 def test_compat_strictness_is_scoped_to_vs_baseline() -> None:
@@ -1000,8 +1022,13 @@ def test_every_compat_sibling_matches_its_base_on_baseline_inputs() -> None:
     compat = [n for n, s in cfg.samples.items() if s.is_compat]
     assert compat, "expected at least one --compat sibling"
     for name in compat:
-        assert name.endswith(COMPAT_SAMPLE_SUFFIX), name
-        base = cfg.samples[name[: -len(COMPAT_SAMPLE_SUFFIX)]]
+        suffix = compat_sample_suffix(name)
+        assert suffix is not None, name
+        # The suffix is not just a naming convention -- it selects which
+        # upstream the arm is graded against, so it must agree with the target
+        # the sample actually asks bwa-mem3 for.
+        assert cfg.samples[name].compat_target == COMPAT_SAMPLE_SUFFIXES[suffix], name
+        base = cfg.samples[name[: -len(suffix)]]
         sibling = cfg.samples[name]
         for field_name in ("baseline_tool", "reference", "source", "layout", "mem_flags"):
             assert getattr(sibling, field_name) == getattr(base, field_name), (name, field_name)
@@ -1050,3 +1077,42 @@ def test_compat_samples_are_excluded_from_the_regression_sweep() -> None:
     ]
     assert not [s for s in sweep if cfg.samples[s].is_compat]
     assert "wgs-5M" in sweep and "wgs-5M-compat" not in sweep
+
+
+def test_compat_sample_suffix_matches_longest_first() -> None:
+    """`-compat` is not a suffix of `-compat-bwa-mem`, but the resolver sorts by
+    length anyway so a future key cannot be shadowed by a shorter one."""
+    assert compat_sample_suffix("wgs-5M-compat-bwa-mem") == "-compat-bwa-mem"
+    assert compat_sample_suffix("wgs-5M-compat") == "-compat"
+    assert compat_sample_suffix("wgs-5M") is None
+    assert set(COMPAT_SAMPLE_SUFFIXES.values()) == {"bwa-mem", "bwa-mem2"}
+
+
+def test_validate_compat_siblings_rejects_a_suffix_target_mismatch() -> None:
+    """The suffix selects which upstream grades the arm, so it must agree with
+    the `--compat=` target the sample actually requests.
+
+    Left unchecked, a `-compat` arm switched to `--compat=bwa-mem` would keep
+    being scored against the bwa-mem2 baseline under the strict (empty) tag
+    policy, and its retained MQ:i would read as a compat regression.
+    """
+    common = {"baseline_tool": "bwa-mem2-upstream", "reference": "hg38", "source": "data/wgs/"}
+    samples = {
+        "wgs": Sample(name="wgs", **common),
+        # Named for bwa-mem2, but asks for bwa-mem.
+        "wgs-compat": Sample(name="wgs-compat", fg_labs_flags=["--compat=bwa-mem"], **common),
+    }
+    with pytest.raises(ValueError, match="wrong aligner"):
+        _validate_compat_siblings(samples)
+
+
+def test_validate_compat_siblings_accepts_a_matching_bwa_mem_sibling() -> None:
+    """The positive case, so the guard above is not passing for the wrong reason."""
+    common = {"baseline_tool": "bwa-mem2-upstream", "reference": "hg38", "source": "data/wgs/"}
+    samples = {
+        "wgs": Sample(name="wgs", **common),
+        "wgs-compat-bwa-mem": Sample(
+            name="wgs-compat-bwa-mem", fg_labs_flags=["--compat=bwa-mem"], **common
+        ),
+    }
+    _validate_compat_siblings(samples)

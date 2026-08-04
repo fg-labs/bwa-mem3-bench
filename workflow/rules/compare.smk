@@ -11,7 +11,11 @@
 # cheapest x86 SIMD path (AVX2) and is part of every standard arch set.
 ARM_X86_REFERENCE_ARCH = "c6a"
 
-COMPAT_SUFFIX = "-compat"
+# The `--compat` sibling suffix -> base-sample mapping lives in
+# `bwa_mem3_bench.workflow_config` (imported by the Snakefile as
+# `compat_sample_suffix`), not here: `_validate_compat_siblings` enforces the
+# same mapping at config load, and a second copy in this file is exactly how the
+# two would drift once a target was added on one side only.
 
 # The two thread counts `compat_thread_invariance` compares. The low rung is the
 # bench's standard `threads:` so one side of the comparison is the same invocation
@@ -35,9 +39,17 @@ def _baseline_sample(sample_name: str) -> str:
     The aliasing is only sound while the sibling and its base agree on every
     input to the baseline; `_validate_compat_siblings` enforces that at config
     load so this cannot quietly start comparing against the wrong BAM.
+
+    Suffix-driven rather than `-compat`-literal so a `--compat=bwa-mem` sibling
+    (`<base>-compat-bwa-mem`) resolves to the same base. Its bwa-mem2 baseline
+    is still the right artifact for the graded `vs_baseline` score -- that arm
+    ignores MQ/HN, so a retained MQ:i does not read as discordance. The strict
+    byte-identity assertion for that sibling is `compare_bwa_identity`, against
+    the bwa arm, not this one.
     """
-    if sample_name.endswith(COMPAT_SUFFIX):
-        return sample_name[: -len(COMPAT_SUFFIX)]
+    suffix = compat_sample_suffix(sample_name)
+    if suffix is not None:
+        return sample_name[: -len(suffix)]
     return sample_name
 
 # Batch cgroup memory for the compare rules.
@@ -198,11 +210,80 @@ rule compare_compat_identity:
         mem_mb = COMPARE_MEM_MB,
     shell:
         r"""
+        # EXPLICIT, not redundant. `mv` is the last command here, so without
+        # `-e` it runs after a DIFFER exit AND supplies the rule's exit code --
+        # the gate would report success on a real difference. Snakemake happens
+        # to prepend `set -euo pipefail` today (it sets bash as the shell
+        # executable), but only while nothing calls `shell.prefix()`, which
+        # replaces that prefix wholesale. Too quiet a way to lose a gate.
+        set -euo pipefail
         mkdir -p $(dirname {output.report})
         # Write to a temp file and move on success: a DIFFER exit must not leave
         # a satisfied output behind, or the next run would treat the failure as
         # already-done and skip it.
         fgumi compare bams {input.query} {input.baseline} \
+            --threads {threads} --max-diffs 20 > {output.report}.tmp 2>&1
+        mv {output.report}.tmp {output.report}
+        """
+
+
+rule compare_bwa_identity:
+    """`--compat=bwa-mem` arms only: full-content identity vs lh3/bwa, via
+    `fgumi compare bams`.
+
+    The bwa-side twin of `compare_compat_identity`, and the same reasoning
+    applies for why fgumi rather than compare-bams: this is a BOOLEAN
+    byte-identity claim over all eleven core SAM fields plus order-independent
+    tags, with `@HD`/`@SQ`/`@RG` as a hard precondition and `@PG`/`@CO`
+    excluded. `@PG` differs by construction here too (`ID:bwa-mem3` vs
+    `ID:bwa`), and compare-bams would report 100% while SEQ, TLEN, the
+    proper-pair flag or the `@SQ` dictionary all differed.
+
+    Why fgumi's `@SQ` precondition passes here, when it hard-errors for
+    default-mode bwa-mem3: `--compat=bwa-mem` sets `read_sidecar=0`, so `@SQ` is
+    generated from the index as bare `SN`/`LN` (+`AH:*`) exactly as bwa's
+    `bwa_print_sam_hdr` does, off the same `.ann`. Default mode emits
+    `M5`/`AS`/`UR`/`SP` from the `.hdr`/`.dict` sidecar and has no counterpart.
+
+    No `ignore_tags` and none wanted: the bwa-mem target keeps `MQ:i` (bwa emits
+    it, since 0.7.18) and drops `HN:i` (bwa has no counterpart), so both sides
+    carry the same tag set with no exclusions. That is the whole assertion --
+    byte-identity, not identity-modulo-the-tags-we-excused. It is also why this
+    needs a separate rule rather than a target parameter on
+    `compare_compat_identity`: the two arms resolve to different upstream BAMs.
+
+    Boolean by design: exit 0 = identical, exit 1 = differ, which fails the rule
+    and so fails the run.
+    """
+    input:
+        query = "runs/{sha}/{sample}/{arch}/rep-{rep}/aligned.bam",
+        # No ARM fallback, unlike compare_vs_baseline / compare_compat_identity.
+        # Those fall back to `ARM_X86_REFERENCE_ARCH` because upstream bwa-mem2
+        # has no ARM build; bwa does (NEON since 0.7.18), so an ARM run is
+        # compared against a bwa binary built for the SAME arch. That directness
+        # is a large part of why this arm is worth having -- see align_bwa.
+        bwa = lambda wc: (
+            f"bwa/{CONFIG.bwa_version}/{wc.sample}/{wc.arch}/rep-1/aligned.bam"
+        ),
+    output:
+        report = "runs/{sha}/{sample}/{arch}/rep-{rep}/compare/bwa-identity.txt",
+    # Explicit for the same executor-fork reason as compare_compat_identity;
+    # fgumi's content engine genuinely parallelises BGZF decode + comparison.
+    threads: 4
+    resources:
+        batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
+        container_image = lambda wc: image_for_arch(wc.arch),
+        mem_mb = COMPARE_MEM_MB,
+    shell:
+        r"""
+        # Same contract as compare_compat_identity's gate -- see the note there
+        # for why this is set explicitly rather than left to snakemake.
+        set -euo pipefail
+        mkdir -p $(dirname {output.report})
+        # Write to a temp file and move on success: a DIFFER exit must not leave
+        # a satisfied output behind, or the next run would treat the failure as
+        # already-done and skip it.
+        fgumi compare bams {input.query} {input.bwa} \
             --threads {threads} --max-diffs 20 > {output.report}.tmp 2>&1
         mv {output.report}.tmp {output.report}
         """
