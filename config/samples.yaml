@@ -410,14 +410,66 @@ samples:
   # strips it to find the base sample AND asserts it matches the `--compat=`
   # target, so a sibling cannot be graded against the wrong upstream.
   #
-  # Only smoke-1M for now, driven by `--target compat_bwa_smoke`. bwa needs its
-  # own index family and is materially slower than bwa-mem2, so the real cells
-  # are added once the wiring is proven green on both arches.
+  # smoke-1M is driven by `--target compat_bwa_smoke`; the seven datasets below
+  # it by `--target compat_bwa`, which mirrors `COMPAT_REAL_SAMPLES` so the two
+  # compat arms cover the same bases (pinned by a test -- a bwa-only or
+  # mem2-only base would claim parity on a wider set than was measured).
+  #
+  # Still out of `rule all` and `bless_release`: bwa needs its own index family
+  # and is materially slower than bwa-mem2, and the arm has no track record yet.
+  # Its cache is keyed on `bwa_version`, so the first sweep pays for every cell
+  # and later ones are free.
   # ---------------------------------------------------------------------------
   smoke-1M-compat-bwa-mem:
     baseline_tool: bwa-mem2-upstream
     reference: hg38
     source: data/smoke/1M/
+    fg_labs_flags: ["--compat=bwa-mem"]
+
+  wgs-5M-compat-bwa-mem:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/wgs/1kg-HG00096/downsampled-5M/
+    fg_labs_flags: ["--compat=bwa-mem"]
+
+  wes-5M-compat-bwa-mem:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/wes/1kg-HG00100/downsampled-5M/
+    fg_labs_flags: ["--compat=bwa-mem"]
+
+  panel-twist-5M-compat-bwa-mem:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/panel/twist-umi/downsampled-5M/
+    fg_labs_flags: ["--compat=bwa-mem"]
+
+  hic-1M-compat-bwa-mem:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/hic/hg002-1M/
+    layout: paired
+    fg_labs_flags: ["--compat=bwa-mem"]
+    # Same canonical Hi-C mem flags as the base, applied to bwa too.
+    mem_flags: ["-5", "-S", "-P"]
+
+  sbx-1M-compat-bwa-mem:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/sbx/hg002-1M/
+    layout: single
+    fg_labs_flags: ["--compat=bwa-mem"]
+
+  sim-wgs-place-compat-bwa-mem:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/sim/sim-wgs-place/
+    fg_labs_flags: ["--compat=bwa-mem"]
+
+  sim-wgs-vars-compat-bwa-mem:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/sim/sim-wgs-vars/
     fg_labs_flags: ["--compat=bwa-mem"]
 
   # ---------------------------------------------------------------------------

@@ -11,6 +11,8 @@ would still succeed and still report a number, just not the number claimed.
 import re
 from pathlib import Path
 
+import pytest
+
 from bwa_mem3_bench.workflow_config import load_config
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -157,15 +159,20 @@ def test_every_aggregator_rule_is_a_localrule() -> None:
     assert aggregators <= declared, f"aggregators missing from localrules: {aggregators - declared}"
 
 
-def test_compat_is_a_full_sweep_target() -> None:
-    """`--target compat` with no `--archs` must expand to every arch.
+@pytest.mark.parametrize("target", ["compat", "compat_bwa"])
+def test_every_arch_iterating_compat_target_is_a_full_sweep_target(target: str) -> None:
+    """`--target <compat arm>` with no `--archs` must expand to every arch.
 
     Targets outside `_FULL_SWEEP_TARGETS` fall back to `core_arch` alone -- which
-    is how the `fast` run silently measured one arch instead of six.
+    is how the `fast` run silently measured one arch instead of six. Both compat
+    arms build their target list `for arch in ARCHS`, so both qualify, and the
+    failure is silent: a one-arch run still reports a clean pass. It costs the
+    bwa arm the most, since comparing ARM against an ARM upstream directly is
+    the whole reason that arm exists.
     """
     submit = (REPO_ROOT / "bwa_mem3_bench" / "commands" / "submit.py").read_text()
-    full_sweep = submit.split("_FULL_SWEEP_TARGETS = frozenset(")[1].split(")")[0]
-    assert '"compat"' in full_sweep
+    full_sweep = submit.split("_FULL_SWEEP_TARGETS = frozenset(")[1].split("\n)")[0]
+    assert f'"{target}"' in full_sweep
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +267,7 @@ ALIGN_BWA_SMK = (REPO_ROOT / "workflow" / "rules" / "align_bwa.smk").read_text()
 
 
 def _code_only(text: str) -> str:
-    """`text` with triple-quoted blocks and `#` comments removed.
+    """`text` with docstrings and `#` comments removed, but shell bodies KEPT.
 
     Several guards below assert that a token is ABSENT. Run against raw source
     those are unsound: this feature's prose necessarily NAMES the things the
@@ -268,8 +275,22 @@ def _code_only(text: str) -> str:
     `ARM_X86_REFERENCE_ARCH` is the fallback this rule deliberately omits), so a
     docstring explaining the decision would fail the test enforcing it -- and
     the obvious "fix" is to delete the explanation.
+
+    A rule's `shell:` body is code, not prose, and is deliberately preserved: it
+    is where a wrong index suffix would most plausibly appear (`align_bwa`'s
+    prewarm `cat`s index files by name), so stripping it would leave exactly the
+    mutation `test_bwa_arm_stages_bwas_own_index_family` exists to catch outside
+    the guard's view. The match alternates over raw and plain blocks in source
+    order so triple-quote pairing stays correct; matching only the plain ones
+    would let a shell body's CLOSING delimiter pair with the next docstring's
+    opening one and delete every line between them.
     """
-    text = re.sub(r'"""..*?"""', "", text, flags=re.DOTALL)
+    text = re.sub(
+        r'r?""".+?"""',
+        lambda m: m.group(0) if m.group(0).startswith("r") else "",
+        text,
+        flags=re.DOTALL,
+    )
     return "\n".join(line.split("#", 1)[0] for line in text.splitlines())
 
 
@@ -297,9 +318,9 @@ def test_bwa_arm_applies_the_same_mem_flags_as_the_other_arms() -> None:
 def test_bwa_arm_is_cached_on_the_bwa_version_not_the_fg_labs_sha() -> None:
     """bwa's output depends only on its own pin, so a new fg-labs SHA must reuse
     the cached BAMs rather than re-running a materially slower aligner."""
-    assert 'bam        = "bwa/{tool_version}/{sample}/{arch}/rep-{rep}/aligned.bam"' in (
-        ALIGN_BWA_SMK
-    )
+    # The path pattern only -- asserting the `output:` block's internal column
+    # alignment too would break this on a reformat that changed no behaviour.
+    assert '"bwa/{tool_version}/{sample}/{arch}/rep-{rep}/aligned.bam"' in ALIGN_BWA_SMK
     assert "runs/{sha}" not in ALIGN_BWA_SMK
 
 
@@ -355,6 +376,49 @@ def test_bwa_identity_output_is_not_left_behind_on_a_difference() -> None:
     assert "mv {output.report}.tmp {output.report}" in body
 
 
+@pytest.mark.parametrize("rule", ["compare_compat_identity", "compare_bwa_identity"])
+def test_identity_gates_set_shell_strictness_explicitly(rule: str) -> None:
+    """Both `fgumi` gates must set `-e` themselves, not inherit it.
+
+    `mv` is the last command in these bodies, so without `-e` it runs after a
+    DIFFER exit and supplies the rule's exit code -- the gate reports success on
+    a real difference, which is the one failure mode it exists to prevent.
+    Snakemake prepends `set -euo pipefail` today because it sets bash as the
+    shell executable, but that prefix is dropped the moment anything calls
+    `shell.prefix()`. A gate should not depend on that staying untrue.
+    """
+    # The shell body alone -- both docstrings name `fgumi compare bams`, so the
+    # ordering check below would compare against the prose otherwise.
+    body = COMPARE_SMK.split(f"rule {rule}:")[1].split("\nrule ")[0].split("shell:")[1]
+    assert "set -euo pipefail" in body
+    # Ordering matters as much as presence: after `fgumi` it guards nothing.
+    assert body.index("set -euo pipefail") < body.index("fgumi compare bams")
+
+
+def test_code_only_keeps_shell_bodies_but_drops_docstrings() -> None:
+    """The absence guards must still see a rule's `shell:` body.
+
+    A wrong index suffix is most plausible in the prewarm `cat`, which lives in
+    a shell body; stripping those would put that mutation outside the view of
+    the very guards written to catch it.
+    """
+    q = '"""'
+    src = "\n".join(
+        [
+            f"{q}a docstring naming .bwt.2bit.64{q}",
+            "x = 1  # trailing",
+            f"shell = r{q}",
+            "cat ref.bwt",
+            q,
+        ]
+    )
+    code = _code_only(src)
+    assert ".bwt.2bit.64" not in code
+    assert "cat ref.bwt" in code
+    assert "trailing" not in code
+    assert "x = 1" in code
+
+
 def test_bwa_smoke_covers_both_an_x86_and_an_arm_arch() -> None:
     """c6a proves the arm; c8g proves the thing the bwa-mem2 arm structurally
     cannot -- a direct ARM-vs-ARM upstream comparison."""
@@ -363,16 +427,44 @@ def test_bwa_smoke_covers_both_an_x86_and_an_arm_arch() -> None:
     assert "/c8g/rep-1/compare/bwa-identity.txt" in body
 
 
-def test_bwa_arm_is_not_yet_in_the_sweep_or_the_release_bless() -> None:
-    """Deliberately opt-in until the smoke is green on both arches.
+def test_bwa_arm_covers_every_compat_cell_on_every_arch() -> None:
+    """The bwa arm is promoted from one smoke cell to the full compat matrix.
 
-    This is the first cell the bwa arm has ever run and bwa is materially slower
-    than bwa-mem2, so a misconfiguration should cost a smoke run, not a sweep.
-    Delete this test in the change that promotes it -- its failure is the
-    reminder that the promotion is intentional.
+    This test replaces the scope pin that previously asserted the arm was
+    smoke-only; the pin existed so promotion had to be a deliberate edit, and
+    this is that edit. It stays as the guard against the opposite failure --
+    a cell silently dropping out of the matrix.
+
+    Deliberately mirrors `COMPAT_REAL_SAMPLES`: the two arms must cover the
+    same datasets, or "bwa-mem2 parity implies bwa parity" is asserted on a
+    narrower base than it is claimed for.
     """
     cfg = load_config(CONFIG_DIR)
-    bwa_arms = [n for n, s in cfg.samples.items() if s.compat_target == "bwa-mem"]
-    assert bwa_arms == ["smoke-1M-compat-bwa-mem"], bwa_arms
-    bless = SNAKEFILE.split("rule bless_release:")[1].split("\nrule ")[0]
+    bwa_arms = {n for n, s in cfg.samples.items() if s.compat_target == "bwa-mem"}
+    mem2_arms = {n for n, s in cfg.samples.items() if s.compat_target == "bwa-mem2"}
+    bases_bwa = {n.removesuffix("-compat-bwa-mem") for n in bwa_arms}
+    bases_mem2 = {n.removesuffix("-compat") for n in mem2_arms}
+    assert bases_bwa == bases_mem2, (
+        f"compat arms cover different datasets; "
+        f"bwa-only={bases_bwa - bases_mem2}, mem2-only={bases_mem2 - bases_bwa}"
+    )
+    # The target uses ARCHS, not BASELINE_ARCHS -- bwa builds on arm64, so
+    # restricting it to x86 would throw away the arm's main advantage.
+    body = _code_only(SNAKEFILE.split("rule compat_bwa:")[1].split("\nrule ")[0])
+    assert "_compat_bwa_targets(COMPAT_BWA_SAMPLES, REPS)" in body
+    targets = _code_only(SNAKEFILE.split("def _compat_bwa_targets(")[1].split("\n\n\n")[0])
+    assert "for arch in ARCHS" in targets
+    assert "BASELINE_ARCHS" not in targets
+
+
+def test_bwa_arm_is_not_in_the_release_bless_yet() -> None:
+    """Still out of `bless_release` on purpose.
+
+    The arm's cache is keyed on `bwa_version`, so the first full run pays for
+    every cell and later runs are free. Folding it into the release gate before
+    it has a track record would fail a bless on an arm nobody has watched.
+    Delete this test in the change that promotes it.
+    """
+    bless = _code_only(SNAKEFILE.split("rule bless_release:")[1].split("\nrule ")[0])
     assert "bwa-identity" not in bless
+    assert "_compat_bwa_targets" not in bless
