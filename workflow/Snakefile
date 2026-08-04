@@ -118,6 +118,10 @@ wildcard_constraints:
     arch        = "[a-z0-9]+",
     rep         = r"\d+",
     minibwa_sha = "[0-9a-f]+",
+    # `align_bwa`'s cache key -- a bwa release string ("0.7.19"). Constrained for
+    # the same reason `minibwa_sha` is: the default `.+` matches `/`, so an
+    # unconstrained version wildcard can swallow path segments.
+    tool_version = r"[0-9A-Za-z._-]+",
     tool        = "fg-labs|baseline|minibwa"
 
 include: "rules/align.smk"
@@ -155,6 +159,7 @@ localrules:
     compat,
     compat_smoke,
     compat_bwa_smoke,
+    compat_bwa,
 
 
 def _is_meth_sample(sample_name: str) -> bool:
@@ -387,21 +392,59 @@ def _compat_targets(samples: list, reps: int) -> list:
     ]
 
 
+def _compat_bwa_targets(samples: list, reps: int) -> list:
+    """`--compat=bwa-mem` byte-identity arms, scored against lh3/bwa.
+
+    One output per cell, not two. The bwa-mem2 arm also emits `vs-baseline.json`
+    so the cell survives in `benchmark.db`, but that file is produced by the
+    SWEEP for the base sample already, and a graded score against the bwa-mem2
+    baseline says nothing about bwa parity -- this arm retains MQ:i, so its
+    vs_baseline number would be the base sample's with extra steps.
+
+    `ARCHS`, not `BASELINE_ARCHS`: bwa builds on arm64 (NEON since 0.7.18), so
+    unlike the bwa-mem2 arm this compares same-arch against same-arch with no
+    transitive step. See rules/align_bwa.smk.
+    """
+    return [
+        f"runs/{FG_LABS_SHA}/{sample}/{arch}/rep-{rep}/compare/bwa-identity.txt"
+        for sample in samples
+        for arch in ARCHS
+        for rep in range(1, reps + 1)
+    ]
+
+
+# The datasets both compat arms are scored on. ONE literal, because the two
+# arms must cover the same bases -- "bwa-mem2 parity implies bwa parity" is
+# otherwise claimed on a wider set than it was measured on. Two copies would
+# have to be kept in step by hand; deriving both from here makes the drift
+# impossible to write. `test_bwa_arm_covers_every_compat_cell_on_every_arch`
+# still has teeth, because the `in CONFIG.samples` filters below can diverge
+# on their own if only one arm's sibling is declared in samples.yaml.
+COMPAT_BASE_SAMPLES = (
+    "wgs-5M",
+    "wes-5M",
+    "panel-twist-5M",
+    "hic-1M",
+    "sbx-1M",
+    # Simulated (holodeck) siblings: the only non-meth datasets that lacked a
+    # compat arm, and a different error profile from the 1000 Genomes / Twist
+    # real data. Their baselines already exist (the accuracy target produces
+    # them), so scoring them costs only the compat alignments.
+    "sim-wgs-place",
+    "sim-wgs-vars",
+)
+
+
+COMPAT_BWA_SAMPLES = [
+    f"{base}-compat-bwa-mem"
+    for base in COMPAT_BASE_SAMPLES
+    if f"{base}-compat-bwa-mem" in CONFIG.samples
+]
+
+
 COMPAT_REAL_SAMPLES = [
     f"{base}-compat"
-    for base in (
-        "wgs-5M",
-        "wes-5M",
-        "panel-twist-5M",
-        "hic-1M",
-        "sbx-1M",
-        # Simulated (holodeck) siblings: the only non-meth datasets that lacked a
-        # compat arm, and a different error profile from the 1000 Genomes / Twist
-        # real data. Their baselines already exist (the accuracy target produces
-        # them), so scoring them costs only the compat alignments.
-        "sim-wgs-place",
-        "sim-wgs-vars",
-    )
+    for base in COMPAT_BASE_SAMPLES
     if f"{base}-compat" in CONFIG.samples
 ]
 
@@ -597,11 +640,13 @@ rule compat_smoke:
 rule compat_bwa_smoke:
     """Cheap wiring check for the `--compat=bwa-mem` arm against lh3/bwa.
 
-    Deliberately NOT part of `rule all`, `compat`, or `bless_release` yet. This
-    is the first cell the bwa arm has ever run, and bwa needs its own index
-    format and is materially slower than bwa-mem2, so the cost of a
-    misconfiguration should be paid on smoke-1M rather than on a full sweep.
-    Promote to `compat` once this is green on both arches.
+    The cheap way in: bwa needs its own index format and is materially slower
+    than bwa-mem2, so the cost of a misconfiguration is paid on smoke-1M rather
+    than on the full `compat_bwa` matrix. Run this first after any change to the
+    arm's wiring, its index staging, or the `bwa_version` pin.
+
+    Still outside `rule all` and `bless_release`, as is `compat_bwa` itself --
+    see that rule for why the arm has not been folded into the release gate.
 
     Both arches are load-bearing, and for different reasons than the bwa-mem2
     smoke. c6a proves the arm at all. c8g proves the thing the bwa-mem2 arm
@@ -616,6 +661,28 @@ rule compat_bwa_smoke:
     input:
         f"runs/{FG_LABS_SHA}/smoke-1M-compat-bwa-mem/c6a/rep-1/compare/bwa-identity.txt",
         f"runs/{FG_LABS_SHA}/smoke-1M-compat-bwa-mem/c8g/rep-1/compare/bwa-identity.txt",
+
+
+rule compat_bwa:
+    """`--compat=bwa-mem` byte-identity against lh3/bwa, every real dataset on
+    every arch.
+
+    The bwa-side counterpart to `rule compat`. Answers a question no other
+    target can: bwa-mem2 v2.2.1 is frozen at bwa 0.7.17, so the whole existing
+    matrix says nothing about parity with the bwa people actually install today.
+
+    Kept OUT of `bless_release` for now. The bwa arm is new and its cache is
+    keyed on `bwa_version`, so the first run pays for every cell while later
+    runs are free -- folding it into the release gate before it has a track
+    record would make a bless fail on an arm nobody has watched yet. Promote it
+    once this target has run clean across a release cycle.
+
+    Usage:
+        snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
+            --config fg_labs_sha=<sha> -- compat_bwa
+    """
+    input:
+        _compat_bwa_targets(COMPAT_BWA_SAMPLES, REPS),
 
 
 rule thread_scaling:
