@@ -19,8 +19,19 @@ from bwa_mem3_bench.storage.sqlite import (
 
 _MIN_TSV_LINES = 2  # header + at least one data row (timing, meth, etc.)
 
-# compare-bams supplementary-disagreement fields, stored as a JSON blob in
-# comparisons.supp_json. Absent on older comparison JSON (pre-supp-metrics).
+# compare-bams NON-PRIMARY divergence fields, stored as a JSON blob in
+# comparisons.supp_json. Absent on older comparison JSON (pre-supp-metrics), and
+# the `sec_*` / `*_matched` / `*_content_diffs` entries are absent on anything
+# written before compare-bams gained the secondary axis and content comparison.
+#
+# This is a WHITELIST and it is a hand-maintained mirror of `ConcordanceReport`
+# in tools/compare-bams/src/report.rs. A field the comparator emits but this
+# tuple omits is dropped here and never reaches `benchmark.db` or any report --
+# silently, because the numbers still land in S3, so the loss only surfaces when
+# someone tries to read them back out, by which point recovering them means
+# re-running the benchmark. `test_supp_keys_mirror_the_report_struct` reads the
+# Rust source and fails if the two drift, which is the only reason this
+# duplication is safe to keep.
 _SUPP_KEYS = (
     "total_templates",
     "supp_query_total",
@@ -29,6 +40,18 @@ _SUPP_KEYS = (
     "supp_count_mismatch_pct",
     "supp_unmatched",
     "supp_unmatched_pct",
+    "supp_matched",
+    "supp_content_diffs",
+    "supp_by_class",
+    "sec_query_total",
+    "sec_baseline_total",
+    "sec_count_mismatch_templates",
+    "sec_count_mismatch_pct",
+    "sec_unmatched",
+    "sec_unmatched_pct",
+    "sec_matched",
+    "sec_content_diffs",
+    "sec_by_class",
 )
 
 
