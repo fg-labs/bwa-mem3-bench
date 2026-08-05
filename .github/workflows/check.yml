@@ -40,5 +40,30 @@ jobs:
         run: pixi run py-lint
       - name: python types
         run: pixi run py-type
+      # Built here rather than declared as a dependency: `fgumi compare bams` is
+      # feature-gated off in a default build, so it must come from the pinned git
+      # ref. Without it tests/test_fgumi_non_primary.py skips, and the compat
+      # arms' non-primary coverage would go unasserted — which is the state this
+      # test exists to end.
+      #
+      # Cached on its own, NOT by the cargo cache above: `cargo install` builds
+      # in a temporary target directory, so `target/` and `~/.cargo` cover only
+      # the dependency sources and every run would otherwise pay a full release
+      # build of the fgumi workspace. `cargo install` no-ops when the install
+      # root already holds the requested rev, so restoring `.fgumi` skips it
+      # outright.
+      #
+      # The key hashes the WHOLE pin file, not just FGUMI_REF -- `hashFiles` has
+      # no way to read one variable out of it. So bumping any unrelated pin in
+      # there (BWA_VERSION, HOLODECK_REF, ...) also discards this cache and pays
+      # one full fgumi build. Accepted: those pins move rarely, and the
+      # alternative is a second file holding a copy of the ref, which is the
+      # drift this script was written to avoid.
+      - uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: .fgumi
+          key: fgumi-${{ runner.os }}-${{ hashFiles('docker/build-arg-defaults.env') }}
+      - name: install fgumi (pinned)
+        run: pixi run install-fgumi
       - name: python tests
         run: pixi run py-test
