@@ -193,9 +193,9 @@ RUN cargo +stable install --locked --git "${HOLODECK_REPO}" --rev "${HOLODECK_RE
 #
 # Why a second comparison tool rather than extending our own compare-bams:
 # compare-bams answers a GRADED question (concordance_pct + per-class/per-tag
-# breakdown, feeding the SQLite gates) and deliberately compares only placement
-# plus aux tags — it never looks at QNAME, SEQ, QUAL, TLEN, RNEXT/PNEXT, the
-# non-placement FLAG bits, or the header. `fgumi compare bams` answers the
+# breakdown, feeding the SQLite gates) and deliberately compares only placement,
+# FLAG and aux tags — it never looks at QNAME, SEQ, QUAL, TLEN, RNEXT/PNEXT, or
+# the header. `fgumi compare bams` answers the
 # BOOLEAN question (equal / not equal) over all eleven core SAM fields plus
 # order-independent tags, and enforces @HD/@SQ/@RG compatibility as a hard
 # precondition with @PG/@CO excluded. For a byte-identity assertion the boolean
@@ -217,12 +217,22 @@ RUN cargo +stable install --locked --git "${FGUMI_REPO}" --rev "${FGUMI_REF}" \
     --features compare --root /out fgumi
 
 # Build fg-labs bwa-mem3 — intentionally the LAST builder step (see the NOTE
-# above the compare-bams build for the layer-cache rationale). Fetch all branches
-# so ${FG_LABS_SHA} can point to any branch (e.g. fg-main) or a release-please
-# branch, not just the repo's default.
+# above the compare-bams build for the layer-cache rationale).
+#
+# Fetch the SHA ITSELF, not `--all`. `git fetch --all` walks the configured
+# refspecs, i.e. branches and tags, so it can only reach a commit that is
+# currently the head of one. That silently excludes exactly the SHAs this bench
+# blesses: a release-please branch head stops being reachable the moment the PR
+# squash-merges and the branch is deleted, and every blessed golden is such a
+# head (see docs/release-allowances.yaml — v0.5.0, v0.6.0, v0.7.0 and v0.8.0 all
+# record the pattern). Rebuilding the v0.8.0 golden 4acb0956 failed with
+# `fatal: reference is not a tree` for precisely this reason.
+#
+# GitHub serves any commit by SHA, so naming it directly works whether or not it
+# is on a branch — and keeps working after the branch is gone.
 RUN git clone --recursive ${FG_LABS_REPO} fg-labs && \
     cd fg-labs && \
-    git fetch --all --quiet && \
+    git fetch --quiet origin ${FG_LABS_SHA} && \
     git checkout ${FG_LABS_SHA} && \
     git submodule update --init --recursive && \
     # Same GCC-12 __rdtsc redefinition fix as upstream (no-op if fg-labs already
