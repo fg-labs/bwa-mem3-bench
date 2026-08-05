@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from bwa_mem3_bench.registry import DivergenceEntry, allowed_drift_pct, load_registry
+from bwa_mem3_bench.registry import (
+    DEFAULT_REGISTRY_PATH,
+    DivergenceEntry,
+    allowed_drift_pct,
+    load_registry,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REGISTRY = REPO_ROOT / "docs" / "expected-divergences.yaml"
@@ -127,3 +132,24 @@ def test_shipped_registry_budgets_cover_observed_bffae5a_drift() -> None:
     }
     for sample, drift in observed.items():
         assert allowed_drift_pct(entries, sample) >= drift, sample
+
+
+def test_alt_arm_has_no_drift_budget() -> None:
+    """The ALT arm is deliberately gated at exactly 0.0%, and that is the lock-in.
+
+    `wgs-5M-alt` carries no registry entry, so any drift above the 0.001% margin
+    fails Gate #1. fg-labs/bwa-mem3#363 (the 0x2 proper-pair divergence) and #365
+    (unrounded `pa:f:` from the BAM writers) are both fixed on main, so the arm is
+    expected to run clean and the zero budget is what keeps those fixes from
+    silently regressing.
+
+    Asserted on the COMPUTED total, not on the absence of an entry. `FG-SUPP-
+    ADDITIONS` has an empty `samples` list, so `allowed_drift_pct` adds it to
+    every sample — a non-zero value there would hand this arm a budget and
+    silently disable the lock-in without any entry naming the sample.
+    """
+    registry = load_registry(DEFAULT_REGISTRY_PATH)
+    assert allowed_drift_pct(registry, "wgs-5M-alt") == 0.0, (
+        "the ALT arm must have zero budget; check that no entry with an empty "
+        "`samples` list has acquired a non-zero expected_drift_pct"
+    )

@@ -116,7 +116,13 @@ divergences:
       EVERY sample's budget. It must stay 0.0 unless a divergence genuinely
       applies corpus-wide — a non-zero value here silently grants budget to
       samples that are meant to have none, including any deliberately gated at
-      0.0.
+      0.0. `wgs-5M-alt` is exactly that case: it carries no entry of its own so
+      that ANY ALT-aware drift fails Gate #1. fg-labs/bwa-mem3#363 (proper-pair
+      `0x2`) and #365 (unrounded `pa:f:`) are both fixed on main, so the arm is
+      expected to be clean and the zero budget locks those fixes in.
+      `test_alt_arm_has_no_drift_budget` asserts the computed total rather than
+      the absence of an entry, so editing this value breaks that test rather
+      than the lock-in.
     affected: supplementary_alignment
     expected_drift_pct: 0.0
     samples: []

@@ -160,7 +160,7 @@ localrules:
     compat_smoke,
     compat_bwa_smoke,
     compat_bwa,
-    compat_alt,
+    alt,
 
 
 def _is_meth_sample(sample_name: str) -> bool:
@@ -217,7 +217,7 @@ SWEEP_SAMPLES = [
     if not CONFIG.samples[s].truth
     and not _is_fast_sample(s)
     and not _is_compat_sample(s)
-    # ALT-aware arms are driven by `--target compat_alt` alone. The compat
+    # ALT-aware arms are driven by `--target alt` alone. The compat
     # SIBLINGS are already excluded above, but their base (`wgs-5M-alt`) is a
     # plain sample and would otherwise join the sweep -- where all three of the
     # sweep's comparisons are wrong for it. `vs_golden` has no ALT-aware BAM to
@@ -225,7 +225,7 @@ SWEEP_SAMPLES = [
     # runs compare-bams under an `expect_tags` allowlist that deliberately omits
     # `pa`, which is precisely the tag ALT-aware mapping emits, so it would fail
     # BY NAME; and `bench regression` diffs `all` against the golden's, so a new
-    # member silently changes what Gate #1 compares. Under `compat_alt` every
+    # member silently changes what Gate #1 compares. Under `alt` every
     # comparison is `fgumi compare bams` against an upstream computed with the
     # same flag, which is sound.
     and not _is_alt_sample(s)
@@ -443,6 +443,47 @@ def _compat_bwa_targets(samples: list, reps: int) -> list:
 # impossible to write. `test_bwa_arm_covers_every_compat_cell_on_every_arch`
 # still has teeth, because the `in CONFIG.samples` filters below can diverge
 # on their own if only one arm's sibling is declared in samples.yaml.
+def _alt_targets() -> list:
+    """Every ALT-aware target: the default arm plus both `--compat` arms.
+
+    THREE modes, not two. The two compat arms assert byte-identity against their
+    own upstream, which is the strongest claim available -- but both run
+    `--compat`, and fg-labs/bwa-mem3#362 was a divergence of the DEFAULT path
+    from bwa and bwa-mem2 simultaneously. Without mode 1 the bench would only
+    ever exercise ALT-awareness through a flag most users never pass.
+
+    Mode 1 is graded (`vs-baseline.json`) rather than a boolean gate, because
+    default-mode bwa-mem3 differs from bwa-mem2 by construction -- it emits
+    HN/MQ and takes its `@SQ` from the `.hdr` sidecar. That is exactly why
+    `--compat` exists, and why compare-bams rather than fgumi scores this arm.
+    It can see the proper-pair bit at all only since the FLAG mask was widened.
+
+    `vs_baseline` is x86-only (upstream bwa-mem2 has no ARM build), so ARM picks
+    up `vs-x86.json` instead -- the same transitive route `rule all` uses. The
+    compat arms need no such split: they compare against upstreams that build on
+    every arch.
+
+    All three share one ALT-aware bwa-mem2 baseline. `compare_vs_baseline`
+    aliases both siblings onto `wgs-5M-alt`, so it is built once, not three
+    times.
+    """
+    base = f"runs/{FG_LABS_SHA}/wgs-5M-alt"
+    targets = [
+        f"{base}/{arch}/rep-1/compare/"
+        + ("vs-baseline.json" if arch in BASELINE_ARCHS else "vs-x86.json")
+        for arch in ARCHS
+    ]
+    targets += [
+        f"runs/{FG_LABS_SHA}/wgs-5M-alt-compat/{arch}/rep-1/compare/compat-identity.txt"
+        for arch in ARCHS
+    ]
+    targets += [
+        f"runs/{FG_LABS_SHA}/wgs-5M-alt-compat-bwa-mem/{arch}/rep-1/compare/bwa-identity.txt"
+        for arch in ARCHS
+    ]
+    return targets
+
+
 COMPAT_BASE_SAMPLES = (
     "wgs-5M",
     "wes-5M",
@@ -612,6 +653,7 @@ rule bless_release:
         _thread_scaling_target(),
         _compat_targets(COMPAT_REAL_SAMPLES, REPS),
         _compat_invariance_target(),
+        _alt_targets(),
 
 
 rule compat:
@@ -638,6 +680,7 @@ rule compat:
     input:
         _compat_targets(COMPAT_REAL_SAMPLES, REPS),
         _compat_invariance_target(),
+        _alt_targets(),
 
 
 rule compat_smoke:
@@ -686,8 +729,8 @@ rule compat_bwa_smoke:
         f"runs/{FG_LABS_SHA}/smoke-1M-compat-bwa-mem/c8g/rep-1/compare/bwa-identity.txt",
 
 
-rule compat_alt:
-    """ALT-aware compat arms: both targets, with the `.alt` sidecar staged.
+rule alt:
+    """ALT-aware alignment in all three modes, with the `.alt` sidecar staged.
 
     The one configuration this harness has never run. Every other cell has
     ALT-awareness OFF, so `bns->anns[].is_alt` is never set and the ALT-specific
@@ -697,25 +740,31 @@ rule compat_alt:
     rather than a marginal toggle -- and the one two upstream divergence reports
     (bwa-mem2#227, #61) are about.
 
-    Both targets are requested against their own upstream: `-compat` vs the
-    bwa-mem2 baseline (via `compat-identity.txt`) and `-compat-bwa-mem` vs the
-    bwa arm (via `bwa-identity.txt`). The `wgs-5M-alt` base is pulled in
-    implicitly -- `compare_vs_baseline` aliases both siblings onto it, so its
-    ALT-aware bwa-mem2 baseline is built once and shared.
+    Each mode is scored against its own upstream: the default arm graded vs the
+    ALT-aware bwa-mem2 baseline, `-compat` byte-identical to that same baseline,
+    and `-compat-bwa-mem` byte-identical to the bwa arm. See `_alt_targets`.
+
+    The arm carries a ZERO drift budget, which locks in the two ALT-only defects
+    it was written to catch. Both are fixed on bwa-mem3 main, so it is expected
+    to run clean from `a9a96cc` onward; against any earlier SHA it fails, and
+    that failure is the arm working:
+      * fg-labs/bwa-mem3#362 -- the default path set 0x2 where both upstreams
+        clear it (3,013 records on a 5M-pair cell, decoy/ALT contigs only).
+        Fixed by #363, merged as `a9a96cc`.
+      * fg-labs/bwa-mem3#365 -- the BAM writers emitted `pa:f:` unrounded while
+        the SAM writer uses `%.3f`, so ~89% of pa-carrying records differed from
+        any SAM-path upstream. ALT-only, because pa is the sole float tag and is
+        emitted only when a sidecar is staged. Fixed by #366, merged as
+        `fd7e3fe`.
+    The two hit disjoint populations: #362 landed on decoy/ALT contigs and never
+    the primary assembly, #365 exclusively on the primary assembly.
 
     Usage:
         snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
-            --config fg_labs_sha=<sha> -- compat_alt
+            --config fg_labs_sha=<sha> -- alt
     """
     input:
-        [
-            f"runs/{FG_LABS_SHA}/wgs-5M-alt-compat/{arch}/rep-1/compare/compat-identity.txt"
-            for arch in ARCHS
-        ],
-        [
-            f"runs/{FG_LABS_SHA}/wgs-5M-alt-compat-bwa-mem/{arch}/rep-1/compare/bwa-identity.txt"
-            for arch in ARCHS
-        ],
+        _alt_targets(),
 
 
 rule compat_bwa:

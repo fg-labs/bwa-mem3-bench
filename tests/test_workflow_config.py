@@ -1145,3 +1145,35 @@ def test_validate_compat_siblings_accepts_a_matching_bwa_mem_sibling() -> None:
         ),
     }
     _validate_compat_siblings(samples)
+
+
+def test_pa_is_expected_only_on_alt_aware_samples() -> None:
+    """`pa:f:` is emitted by bwa, bwa-mem2 and bwa-mem3 alike, but ONLY under
+    ALT-aware alignment: `alt_sc` is set for a non-ALT region shadowed by an ALT
+    one, and without a `.alt` sidecar no contig is ever marked ALT.
+
+    So it must be allowlisted exactly where it can appear. Left off an ALT
+    sample, compare-bams' tag guard fails the run BY NAME on a tag that is
+    entirely expected. Added everywhere, an unexpected `pa` on a non-ALT cell —
+    which would mean a sidecar leaked into a run that should not have one —
+    stops being a finding.
+
+    Derived from `alt_aware` rather than declared per sample, matching how
+    `METH_EXTRA_TAGS` is applied: there are three ALT samples and several
+    comparison kinds, so declaring it per cell is that many places for one fact
+    to drift.
+    """
+    cfg = load_config(CONFIG_DIR)
+    alt = [name for name, s in cfg.samples.items() if s.alt_aware]
+    assert alt, "expected at least one alt_aware sample"
+    for name in alt:
+        for kind in ("vs_baseline", "vs_golden", "vs_x86"):
+            assert "pa" in cfg.expect_tags(name, kind), f"{name}/{kind} must allow pa"
+            assert "pa" not in cfg.ignore_tags(name, kind), (
+                f"{name}/{kind} must not IGNORE pa — all three aligners emit it "
+                f"off the same score/alt_sc, so a difference is a real finding"
+            )
+    non_alt = next(n for n, s in cfg.samples.items() if not s.alt_aware and not s.is_meth)
+    assert "pa" not in cfg.expect_tags(non_alt, "vs_baseline"), (
+        f"{non_alt} is not ALT-aware, so an observed pa should fail the guard"
+    )
