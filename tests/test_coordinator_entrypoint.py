@@ -45,12 +45,20 @@ def stubbed_path(tmp_path: Path) -> Iterator[str]:
     yield f"{bin_dir}:{os.environ['PATH']}"
 
 
-def _run_entrypoint(env_overrides: dict[str, str], stubbed_path: str) -> str:
-    """Run the entrypoint with `env_overrides`; return the stub-snakemake stdout line."""
+def _run_entrypoint(
+    env_overrides: dict[str, str], stubbed_path: str, cwd: Path | None = None
+) -> str:
+    """Run the entrypoint with `env_overrides`; return the stub-snakemake stdout line.
+
+    `cwd` matters for any test about unquoted expansion: a glob in an env var is
+    resolved against the process's working directory, so reproducing that needs a
+    directory whose contents are known.
+    """
     env = {"PATH": stubbed_path, **env_overrides}
     result = subprocess.run(
         ["bash", str(ENTRYPOINT)],
         env=env,
+        cwd=cwd,
         capture_output=True,
         text=True,
         check=True,
@@ -187,3 +195,93 @@ def test_docstring_example_matches_implementation() -> None:
         Expected substring: {expected_doc!r}
         Update both the comment block and this test together.
     """)
+
+
+def test_forcerun_passes_rules_through_to_snakemake(stubbed_path: str) -> None:
+    """FORCERUN reaches snakemake as `--forcerun <rules>`.
+
+    Needed because a rule's outputs already existing in S3 makes snakemake skip
+    it, and the thing that changed may be a BINARY inside the image rather than
+    any rule's shell text — which no rerun-trigger detects. Re-deriving the
+    compare artifacts for an already-aligned SHA is exactly that case, and
+    without this the coordinator runs and does nothing.
+    """
+    line = _run_entrypoint(
+        {"FG_LABS_SHA": "deadbeef", "FORCERUN": "compare_vs_baseline compare_vs_golden"},
+        stubbed_path,
+    )
+    assert "--forcerun compare_vs_baseline compare_vs_golden" in line
+
+
+def test_forcerun_absent_adds_no_flag(stubbed_path: str) -> None:
+    """An unset FORCERUN must not emit a bare `--forcerun`, which snakemake
+    interprets as "force every rule" — re-running a whole alignment sweep."""
+    line = _run_entrypoint({"FG_LABS_SHA": "deadbeef"}, stubbed_path)
+    assert "--forcerun" not in line
+
+
+@pytest.mark.parametrize("blank", ["   ", "\t", " \n "])
+def test_forcerun_whitespace_only_adds_no_flag(blank: str, stubbed_path: str) -> None:
+    """A whitespace-only FORCERUN is the same accident as an unset one, and must
+    not degrade into a bare `--forcerun`.
+
+    `-n` is true for a string of spaces, so the naive guard admits it and the
+    unquoted expansion then contributes no words — leaving `--forcerun` alone on
+    the command line, i.e. "force EVERY rule". On an already-aligned SHA that is
+    a full re-run of the alignment sweep: the exact outcome the rule list exists
+    to avoid, triggered by a stray space in a Batch override.
+    """
+    line = _run_entrypoint({"FG_LABS_SHA": "deadbeef", "FORCERUN": blank}, stubbed_path)
+    assert "--forcerun" not in line
+
+
+def test_forcerun_rules_are_not_glob_expanded(stubbed_path: str, tmp_path: Path) -> None:
+    """A `*` in FORCERUN must reach snakemake literally, not as filenames.
+
+    The coordinator's working directory is not empty, so an unquoted expansion
+    resolves the pattern against whatever happens to be sitting there and hands
+    snakemake paths where it expects rule names. Splitting with `read -ra`
+    performs word splitting without pathname expansion, which is the distinction
+    that matters here.
+    """
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    (workdir / "compare_decoy.txt").write_text("")
+    line = _run_entrypoint(
+        {"FG_LABS_SHA": "deadbeef", "FORCERUN": "compare_*"}, stubbed_path, cwd=workdir
+    )
+    assert "--forcerun compare_*" in line
+    assert "compare_decoy.txt" not in line
+
+
+def test_forcerun_rules_survive_a_newline_separator(stubbed_path: str) -> None:
+    """Rules split across lines must all reach snakemake.
+
+    `read` stops at the first newline, so splitting the raw value would keep
+    `compare_vs_baseline` and silently drop `compare_vs_golden` — a forced re-run
+    that quietly forces less than it was told to. The unquoted form this replaced
+    split on newlines too, since they are in the default IFS.
+    """
+    line = _run_entrypoint(
+        {"FG_LABS_SHA": "deadbeef", "FORCERUN": "compare_vs_baseline\ncompare_vs_golden"},
+        stubbed_path,
+    )
+    assert "--forcerun compare_vs_baseline compare_vs_golden" in line
+
+
+def test_config_args_are_not_glob_expanded(stubbed_path: str, tmp_path: Path) -> None:
+    """The same protection for `--config`, which carries the same kind of value.
+
+    Every CONFIG_ARGS entry comes from a Batch env override, so it is exposed to
+    exactly what FORCERUN was. Kept as a separate guard because the two are built
+    by different code -- an array append here, a `read -ra` split there -- and a
+    refactor of either could quietly reintroduce the string form.
+    """
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    (workdir / "samples_decoy.txt").write_text("")
+    line = _run_entrypoint(
+        {"FG_LABS_SHA": "deadbeef", "SAMPLES": "samples_*"}, stubbed_path, cwd=workdir
+    )
+    assert "samples=samples_*" in line
+    assert "samples_decoy.txt" not in line

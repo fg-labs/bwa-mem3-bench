@@ -54,6 +54,7 @@ def submit(  # noqa: PLR0913
     make_target: str = "",
     golden_ref_sha: str = "",
     ladder: str = "",
+    forcerun: str = "",
     job_name: str | None = None,
     dry_run: bool = False,
 ) -> None:
@@ -90,6 +91,13 @@ def submit(  # noqa: PLR0913
         ``16:3,32:3,64:3``. Empty (default) uses ``thread_scaling.ladder`` from
         config. Omitting the 1-thread rung makes efficiency uncomputable, so
         Gate #3 no-ops for that run — intended for diagnostics, not for a bless.
+    :param forcerun: space-separated rule names to re-run even though their
+        outputs already exist, e.g. ``"compare_vs_baseline compare_vs_golden"``.
+        Snakemake's rerun-triggers watch a rule's own definition, not the
+        binaries inside the image, so re-deriving artifacts for a SHA that is
+        already aligned (after a compare-bams change, say) needs the rules named
+        or the coordinator does nothing. Rules, never a bare flag: forcing
+        everything on an aligned SHA re-runs the whole alignment sweep.
     :param job_name: Batch job name; defaults to ``<target>-<sha>`` (or
         ``<target>-<sha>-<make_target>`` when make_target is set).
     :param dry_run: print the ``aws batch submit-job`` command without executing.
@@ -113,6 +121,8 @@ def submit(  # noqa: PLR0913
         env_overrides.append({"name": "REPS", "value": str(reps)})
     if ladder:
         env_overrides.append({"name": "LADDER", "value": ladder})
+    if forcerun:
+        env_overrides.append({"name": "FORCERUN", "value": forcerun})
     if golden_ref_sha:
         # Resolve an aliased golden SHA (e.g. a squash-merged release tag) to the
         # canonical SHA its golden BAMs live under, so the coordinator's
