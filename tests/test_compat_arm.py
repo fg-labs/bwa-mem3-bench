@@ -160,7 +160,7 @@ def test_every_aggregator_rule_is_a_localrule() -> None:
     assert aggregators <= declared, f"aggregators missing from localrules: {aggregators - declared}"
 
 
-@pytest.mark.parametrize("target", ["compat", "compat_bwa"])
+@pytest.mark.parametrize("target", ["compat", "compat_bwa", "compat_alt"])
 def test_every_arch_iterating_compat_target_is_a_full_sweep_target(target: str) -> None:
     """`--target <compat arm>` with no `--archs` must expand to every arch.
 
