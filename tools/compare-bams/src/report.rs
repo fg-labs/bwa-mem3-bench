@@ -68,9 +68,13 @@ impl TagCounter {
 ///
 /// `concordance_pct` and `by_class` cover **primary** alignments only (one unit
 /// per read end), so the headline number stays comparable across aligner
-/// versions even when supplementary emission differs. The `supp_*` fields report
-/// supplementary disagreement as a separate, non-fatal axis. All fields are
-/// additive over the historical schema, so existing JSON consumers keep working.
+/// versions even when non-primary emission differs. The `supp_*` and `sec_*`
+/// fields report supplementary and secondary divergence as separate, non-fatal
+/// axes — each carrying totals, unmatched records, matched pairs and the subset
+/// of matched pairs whose content differs. All fields are additive over the
+/// historical schema, so existing JSON consumers keep working; `ingest.py`'s
+/// `_SUPP_KEYS` whitelist must be widened in step with them or a new field is
+/// silently dropped before it reaches `benchmark.db`.
 ///
 /// A read is concordant only when it differs in **no** compared field —
 /// placement or aux tag. Because one read can differ in several fields at once,
@@ -107,6 +111,47 @@ pub struct ConcordanceReport {
     /// side (union over both BAMs).
     pub supp_unmatched: u64,
     pub supp_unmatched_pct: f64,
+    /// Supplementary pairs that DID match on `(end, ref_id, start, strand)`, and
+    /// how many of those differ once their content is compared.
+    ///
+    /// Position-matching alone never read a supplementary's FLAG, CIGAR, MAPQ or
+    /// tags, so a pair could sit at the same locus and still disagree on every
+    /// other field. Measured on one real ALT-aware cell: 1 FLAG and 567 `pa`
+    /// differences rode supplementary records and were invisible.
+    #[serde(default)]
+    pub supp_matched: u64,
+    #[serde(default)]
+    pub supp_content_diffs: u64,
+    /// `supp_content_diffs` split by class — see `NonPrimaryTally::by_class`.
+    #[serde(default)]
+    pub supp_by_class: BTreeMap<String, u64>,
+
+    /// The secondary-alignment axis, mirroring `supp_*` field for field.
+    ///
+    /// Secondary records reached NEITHER the primary map nor the supplementary
+    /// tally before this existed — the routing chain tested `is_supplementary()`
+    /// then `is_primary()`, and a secondary is neither. Live on the meth samples,
+    /// where `--meth` implicitly sets `MEM_F_NO_MULTI` and split hits are
+    /// re-flagged secondary rather than supplementary.
+    #[serde(default)]
+    pub sec_query_total: u64,
+    #[serde(default)]
+    pub sec_baseline_total: u64,
+    #[serde(default)]
+    pub sec_count_mismatch_templates: u64,
+    #[serde(default)]
+    pub sec_count_mismatch_pct: f64,
+    #[serde(default)]
+    pub sec_unmatched: u64,
+    #[serde(default)]
+    pub sec_unmatched_pct: f64,
+    #[serde(default)]
+    pub sec_matched: u64,
+    #[serde(default)]
+    pub sec_content_diffs: u64,
+    /// `sec_content_diffs` split by class — see `NonPrimaryTally::by_class`.
+    #[serde(default)]
+    pub sec_by_class: BTreeMap<String, u64>,
 
     /// Ways the observed tag set deviated from what the config declared. Empty
     /// on a healthy run, and omitted from the JSON when empty so the schema is
@@ -122,6 +167,51 @@ pub struct ConcordanceReport {
     /// stand alone rather than to annotate this block.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tag_guard_violations: Vec<TagGuardViolation>,
+}
+
+/// Which non-primary alignment class a tally belongs to.
+///
+/// The two are reported as separate axes rather than merged: they mean
+/// different things (a split hit versus an alternative placement), the
+/// divergence registry's `affected` field already distinguishes
+/// `supplementary_alignment` from `secondary_alignment`, and merging them
+/// would hide a class appearing where it never did before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonPrimaryClass {
+    Supplementary,
+    Secondary,
+}
+
+/// One template's tally for a single non-primary class.
+#[derive(Debug, Default)]
+pub struct NonPrimaryTally {
+    pub query_total: u64,
+    pub baseline_total: u64,
+    /// Pairs that matched on `(end, ref_id, start, strand)`.
+    pub matched: u64,
+    /// Matched pairs whose CONTENT differs — the axis position-matching alone
+    /// could never see, since it never read FLAG, CIGAR, MAPQ or tags.
+    pub content_diffs: u64,
+    /// `content_diffs` split by discordance class, same keys as the primary
+    /// `by_class`. A bare count is not diagnosable: on a real ALT-aware cell it
+    /// read 568 with no way to tell 1 FLAG difference from 567 `pa` tag
+    /// differences without re-deriving the comparison outside the tool. Like
+    /// `by_class`, a pair contributes at most once per class but may appear in
+    /// several, so this sums to at least `content_diffs`.
+    pub by_class: BTreeMap<String, u64>,
+    /// Records with no counterpart on the other side, summed over both BAMs.
+    ///
+    /// **The definition changed when the pairing key gained the read end.** The
+    /// multiset symmetric difference this replaced keyed on
+    /// `(ref_id, start, strand)`, so two non-primaries of one template at the
+    /// same locus on DIFFERENT ends cancelled and reported 0; keyed on
+    /// `(end, ref_id, start, strand)` they no longer pair and report 2. The new
+    /// answer is the correct one — they are different reads — but the metric is
+    /// persisted in `benchmark.db`, so values either side of this boundary are
+    /// not comparable and a jump in `supp_unmatched` across it is expected
+    /// rather than a regression. Pinned by
+    /// `non_primaries_on_different_ends_at_one_locus_no_longer_cancel`.
+    pub unmatched: u64,
 }
 
 impl ConcordanceReport {
@@ -226,15 +316,54 @@ impl ConcordanceReport {
         }
     }
 
-    /// Record one template's supplementary tallies.
-    pub fn record_supplementary(&mut self, query_total: u64, baseline_total: u64, unmatched: u64) {
+    /// Count one template. Kept separate from [`Self::record_non_primary`],
+    /// which is now called once per class per template and must not multiply
+    /// the template count by the number of classes.
+    pub fn count_template(&mut self) {
         self.total_templates += 1;
-        self.supp_query_total += query_total;
-        self.supp_baseline_total += baseline_total;
-        if query_total != baseline_total {
-            self.supp_count_mismatch_templates += 1;
+    }
+
+    /// Record one template's tally for a single non-primary class.
+    ///
+    /// Deliberately NOT routed through [`Self::record`]: that increments
+    /// `total_reads`, `concordant` and `by_class`, and calls `tally_tag`. Feeding
+    /// non-primary records to it would decouple `by_tag`'s diff counts from
+    /// `total_reads`' denominator and make `guard`'s `"N of {total_reads}
+    /// primaries"` message false. `concordance_pct` and `by_class` stay
+    /// primary-only, as this type's docstring promises.
+    pub fn record_non_primary(&mut self, class: NonPrimaryClass, tally: &NonPrimaryTally) {
+        let (query_total, baseline_total, mismatch, unmatched, matched, content, by_class) =
+            match class {
+                NonPrimaryClass::Supplementary => (
+                    &mut self.supp_query_total,
+                    &mut self.supp_baseline_total,
+                    &mut self.supp_count_mismatch_templates,
+                    &mut self.supp_unmatched,
+                    &mut self.supp_matched,
+                    &mut self.supp_content_diffs,
+                    &mut self.supp_by_class,
+                ),
+                NonPrimaryClass::Secondary => (
+                    &mut self.sec_query_total,
+                    &mut self.sec_baseline_total,
+                    &mut self.sec_count_mismatch_templates,
+                    &mut self.sec_unmatched,
+                    &mut self.sec_matched,
+                    &mut self.sec_content_diffs,
+                    &mut self.sec_by_class,
+                ),
+            };
+        for (key, count) in &tally.by_class {
+            *by_class.entry(key.clone()).or_default() += count;
         }
-        self.supp_unmatched += unmatched;
+        *query_total += tally.query_total;
+        *baseline_total += tally.baseline_total;
+        if tally.query_total != tally.baseline_total {
+            *mismatch += 1;
+        }
+        *unmatched += tally.unmatched;
+        *matched += tally.matched;
+        *content += tally.content_diffs;
     }
 
     /// Compute derived percentages. Call once after all records have been fed via [`Self::record`].
@@ -250,14 +379,23 @@ impl ConcordanceReport {
 
         #[allow(clippy::cast_precision_loss)]
         if self.total_templates > 0 {
+            let templates = self.total_templates as f64;
             self.supp_count_mismatch_pct =
-                self.supp_count_mismatch_templates as f64 / self.total_templates as f64 * 100.0;
+                self.supp_count_mismatch_templates as f64 / templates * 100.0;
+            self.sec_count_mismatch_pct =
+                self.sec_count_mismatch_templates as f64 / templates * 100.0;
         }
 
         let supp_total = self.supp_query_total + self.supp_baseline_total;
         #[allow(clippy::cast_precision_loss)]
         if supp_total > 0 {
             self.supp_unmatched_pct = self.supp_unmatched as f64 / supp_total as f64 * 100.0;
+        }
+
+        let sec_total = self.sec_query_total + self.sec_baseline_total;
+        #[allow(clippy::cast_precision_loss)]
+        if sec_total > 0 {
+            self.sec_unmatched_pct = self.sec_unmatched as f64 / sec_total as f64 * 100.0;
         }
     }
 
@@ -279,7 +417,7 @@ impl ConcordanceReport {
 /// All three tag variants collapse to a single `tag_diff` bucket so the class
 /// list stays fixed-cardinality for the report tables; the per-tag breakdown
 /// lives in `by_tag`.
-fn discordance_key(d: &Discordance) -> &'static str {
+pub(crate) fn discordance_key(d: &Discordance) -> &'static str {
     match d {
         Discordance::MappedOnlyQuery => "mapped_only_query",
         Discordance::MappedOnlyBaseline => "mapped_only_baseline",
@@ -287,7 +425,6 @@ fn discordance_key(d: &Discordance) -> &'static str {
         Discordance::CigarDiff => "cigar_diff",
         Discordance::MapqDiff { .. } => "mapq_diff",
         Discordance::FlagDiff { .. } => "flag_diff",
-        Discordance::SecondarySetDiff => "secondary_set_diff",
         Discordance::TagValueDiff { .. }
         | Discordance::TagQueryOnly { .. }
         | Discordance::TagBaselineOnly { .. } => "tag_diff",
