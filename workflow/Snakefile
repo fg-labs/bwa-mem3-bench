@@ -160,6 +160,7 @@ localrules:
     compat_smoke,
     compat_bwa_smoke,
     compat_bwa,
+    compat_alt,
 
 
 def _is_meth_sample(sample_name: str) -> bool:
@@ -683,6 +684,38 @@ rule compat_bwa_smoke:
     input:
         f"runs/{FG_LABS_SHA}/smoke-1M-compat-bwa-mem/c6a/rep-1/compare/bwa-identity.txt",
         f"runs/{FG_LABS_SHA}/smoke-1M-compat-bwa-mem/c8g/rep-1/compare/bwa-identity.txt",
+
+
+rule compat_alt:
+    """ALT-aware compat arms: both targets, with the `.alt` sidecar staged.
+
+    The one configuration this harness has never run. Every other cell has
+    ALT-awareness OFF, so `bns->anns[].is_alt` is never set and the ALT-specific
+    primary selection, MAPQ adjustment, `pa:f:` tag and `-h INT,INT` alt cap are
+    all dead code from the benchmark's point of view. Staging the sidecar marks
+    3,171 of hg38's 3,366 contigs ALT, which is a different alignment problem
+    rather than a marginal toggle -- and the one two upstream divergence reports
+    (bwa-mem2#227, #61) are about.
+
+    Both targets are requested against their own upstream: `-compat` vs the
+    bwa-mem2 baseline (via `compat-identity.txt`) and `-compat-bwa-mem` vs the
+    bwa arm (via `bwa-identity.txt`). The `wgs-5M-alt` base is pulled in
+    implicitly -- `compare_vs_baseline` aliases both siblings onto it, so its
+    ALT-aware bwa-mem2 baseline is built once and shared.
+
+    Usage:
+        snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
+            --config fg_labs_sha=<sha> -- compat_alt
+    """
+    input:
+        [
+            f"runs/{FG_LABS_SHA}/wgs-5M-alt-compat/{arch}/rep-1/compare/compat-identity.txt"
+            for arch in ARCHS
+        ],
+        [
+            f"runs/{FG_LABS_SHA}/wgs-5M-alt-compat-bwa-mem/{arch}/rep-1/compare/bwa-identity.txt"
+            for arch in ARCHS
+        ],
 
 
 rule compat_bwa:
