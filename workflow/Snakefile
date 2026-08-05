@@ -200,12 +200,34 @@ def _is_compat_sample(sample_name: str) -> bool:
     return CONFIG.samples[sample_name].is_compat
 
 
+def _is_alt_sample(sample_name: str) -> bool:
+    """Whether this sample stages the `.alt` sidecar (ALT-aware mapping).
+
+    Keyed off the resolved flag, same as `_is_compat_sample`, so the predicate
+    reads the fact the staging in `_ref_inputs` actually keys off rather than a
+    name convention.
+    """
+    return CONFIG.samples[sample_name].alt_aware
+
+
 SWEEP_SAMPLES = [
     s
     for s in SAMPLES
     if not CONFIG.samples[s].truth
     and not _is_fast_sample(s)
     and not _is_compat_sample(s)
+    # ALT-aware arms are driven by `--target compat_alt` alone. The compat
+    # SIBLINGS are already excluded above, but their base (`wgs-5M-alt`) is a
+    # plain sample and would otherwise join the sweep -- where all three of the
+    # sweep's comparisons are wrong for it. `vs_golden` has no ALT-aware BAM to
+    # compare against (the blessed corpus predates the sample); `vs_baseline`
+    # runs compare-bams under an `expect_tags` allowlist that deliberately omits
+    # `pa`, which is precisely the tag ALT-aware mapping emits, so it would fail
+    # BY NAME; and `bench regression` diffs `all` against the golden's, so a new
+    # member silently changes what Gate #1 compares. Under `compat_alt` every
+    # comparison is `fgumi compare bams` against an upstream computed with the
+    # same flag, which is sound.
+    and not _is_alt_sample(s)
 ]
 
 

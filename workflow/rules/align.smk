@@ -197,7 +197,7 @@ def _ref_inputs(wc, *, meth_index: str) -> list[str]:
             f"{base}.meth.pac",
         ]
     # Non-meth: plain bwa-mem2 index sidecars.
-    return [
+    files = [
         base,  # plain .fasta — must be index 0
         f"{base}.fai",
         f"{base}.0123",
@@ -207,6 +207,14 @@ def _ref_inputs(wc, *, meth_index: str) -> list[str]:
         f"{base}.pac",
         base.replace(".fasta", ".dict"),
     ]
+    # ALT-aware only: the `.alt` sidecar lives in the same prefix as the index
+    # but is staged ONLY for samples that ask for it, which is what lets one
+    # reference tree serve both alt-aware and alt-naive runs. Every aligner here
+    # (bwa, bwa-mem2, bwa-mem3) picks it up from `<idxbase>.alt` automatically,
+    # so staging the file IS the switch -- there is no flag to pass.
+    if sample.alt_aware:
+        files.append(f"{base}.alt")
+    return files
 
 
 def _query_fastqs(wc):

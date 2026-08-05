@@ -233,6 +233,35 @@ def test_sample_meth_reference_invariant_enforced() -> None:
     Sample(name="t", baseline_tool="bwa-mem2-upstream", reference="hg38", source="s/")
 
 
+def test_sample_rejects_alt_aware_methylation() -> None:
+    """ALT-awareness on a meth sample must fail at load, not run ALT-naive.
+
+    `_ref_inputs` returns from its bisulfite branches BEFORE the `.alt` append,
+    so a meth sample with `alt_aware: true` would stage no sidecar and produce
+    exactly the alt-naive output it always did -- while its name and config
+    claimed otherwise. That is the one failure mode this flag cannot tolerate:
+    a green ALT-aware result proving nothing.
+    """
+    for baseline_tool, fg_labs_flags in (
+        ("bwameth", []),
+        ("bwa-mem2-upstream", ["--meth"]),
+    ):
+        with pytest.raises(ValueError, match="alt_aware"):
+            Sample(
+                name="t",
+                baseline_tool=baseline_tool,
+                reference="hg38-meth",
+                source="s/",
+                fg_labs_flags=fg_labs_flags,
+                alt_aware=True,
+            )
+    # Both halves in isolation are fine.
+    Sample(name="t", baseline_tool="bwameth", reference="hg38-meth", source="s/")
+    Sample(
+        name="t", baseline_tool="bwa-mem2-upstream", reference="hg38", source="s/", alt_aware=True
+    )
+
+
 def test_config_samples_satisfy_meth_invariant() -> None:
     """Every shipped sample already satisfies the meth/reference invariant."""
     cfg = load_config(CONFIG_DIR)

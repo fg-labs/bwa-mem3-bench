@@ -426,6 +426,47 @@ samples:
     source: data/smoke/1M/
     fg_labs_flags: ["--compat=bwa-mem"]
 
+  # ---------------------------------------------------------------------------
+  # ALT-aware arms (`alt_aware: true`).
+  #
+  # Everything else in this file runs with ALT-awareness OFF: the hg38 index has
+  # 261 `_alt` + 525 HLA + 2,385 `_decoy` contigs, but no `.alt` sidecar was
+  # staged, so `bns->anns[].is_alt` was never set and the entire ALT-aware code
+  # path -- ALT primary selection, the ALT MAPQ adjustment, the `pa:f:` tag, the
+  # `-h INT,INT` alt hit cap -- never executed. Proven, not assumed: the compat
+  # arms run with a strict `expect_tags` allowlist that has no `pa` entry, and
+  # compare-bams fails by name on an unexpected tag; zero `pa:f:` were ever seen.
+  #
+  # These arms close that gap. Staging the sidecar marks 3,171 of 3,366 contigs
+  # ALT, so this is not a marginal toggle -- it is a different alignment problem,
+  # and the one two upstream divergence reports (bwa-mem2#227, #61) are about.
+  #
+  # A separate base sample is required, not just siblings: `alt_aware` changes
+  # the alignment, so the compat arms need a baseline computed WITH it. Reusing
+  # `wgs-5M`'s alt-naive baseline would score a real behavioural difference as a
+  # compat failure. `_validate_compat_siblings` enforces the agreement.
+  # ---------------------------------------------------------------------------
+  wgs-5M-alt:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/wgs/1kg-HG00096/downsampled-5M/
+    alt_aware: true
+    fg_labs_flags: []
+
+  wgs-5M-alt-compat:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/wgs/1kg-HG00096/downsampled-5M/
+    alt_aware: true
+    fg_labs_flags: ["--compat=bwa-mem2"]
+
+  wgs-5M-alt-compat-bwa-mem:
+    baseline_tool: bwa-mem2-upstream
+    reference: hg38
+    source: data/wgs/1kg-HG00096/downsampled-5M/
+    alt_aware: true
+    fg_labs_flags: ["--compat=bwa-mem"]
+
   wgs-5M-compat-bwa-mem:
     baseline_tool: bwa-mem2-upstream
     reference: hg38
