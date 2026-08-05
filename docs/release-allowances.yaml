@@ -30,10 +30,14 @@
 # QUAL) plus every aux tag, and enforces @HD(SO/GO)/@SQ/@RG compatibility, while
 # ignoring exactly the things the paragraph above disclaims (on-disk tag order
 # and integer width, @PG/@CO). `compare-bams` CANNOT support such a claim and
-# must not be cited for one: it compares placement (ref/pos/CIGAR/MAPQ), FLAG
-# masked to 0x10|0x20|0x40|0x80, and aux tags -- it never reads QNAME, SEQ, QUAL,
-# TLEN, RNEXT/PNEXT, the other twelve FLAG bits, or the header. Its graded
-# percentage is the right tool for BUDGETED drift (Gate #1/#2), not for identity.
+# must not be cited for one: it compares placement (ref/pos/CIGAR/MAPQ), the
+# whole FLAG, and aux tags on primary records, plus a separate non-primary axis
+# -- it never reads QNAME, SEQ, QUAL, TLEN, RNEXT/PNEXT, or the header. Its
+# graded percentage is the right tool for BUDGETED drift (Gate #1/#2), not for
+# identity. (Through the v0.8.0 golden it compared FLAG masked to
+# 0x10|0x20|0x40|0x80 and never compared non-primary content at all, so
+# concordance figures from before that widening are not strictly comparable with
+# ones after it.)
 # v0.2.0 is the first blessed golden and is blessed with `--force` (no prior
 # golden to move from, so no allowance is needed or possible).
 allowances:
@@ -306,9 +310,10 @@ allowances:
       data rather than only in config — and zero value_diff / query_only /
       baseline_only on any of the seven tags these samples emit (AS MC MD NM SA
       XA XS). It still cannot carry the claim on its own: it compares placement,
-      four FLAG bits and aux tags only, never
-      QNAME/SEQ/QUAL/TLEN/RNEXT/PNEXT/the other twelve FLAG bits/the header,
-      which is why the fgumi check and not this percentage is the gate.
+      FLAG and aux tags only, never QNAME/SEQ/QUAL/TLEN/RNEXT/PNEXT/the header,
+      which is why the fgumi check and not this percentage is the gate. (At the
+      time this entry was measured it compared only four FLAG bits; the mask was
+      widened to the whole word afterwards.)
       That directly retires the caveat the 394f8f8 entry left open: #290 was
       called out there as "NOT covered ... needs its own entry and its own bench
       run", and panel-twist-5M — the exact sample the phantom XS:i was found on

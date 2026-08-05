@@ -41,7 +41,7 @@ divergences:
 
   - id: FG-METH-DIVERGENCE
     pr: fg-labs/bwa-mem3#90
-    date: 2026-06-07
+    date: 2026-08-05
     summary: >-
       Bisulfite (--meth) mode against the bwameth.py baseline diverges in
       placement (C->T/G->A conversion handling), giving a larger but still
@@ -51,8 +51,28 @@ divergences:
       the converted reference, and the Bismark-compatible XM/XG/XR set has no
       bwameth counterpart (bwameth writes YD/YC/RG instead). See
       `compare_options` in config/samples.yaml.
+
+      Budget re-derived 2026-08-05 from 1.50%, which had been stale since the
+      v0.4.0 native-bisulfite cutover — observed drift was already 2.88% at
+      v0.7.0 and 3.02% at v0.8.0, i.e. the gate had been failing on both meth
+      cells for several releases. That excess was reviewed and accepted at the
+      time rather than budgeted (docs/release-allowances.yaml, the v0.6.0 and
+      v0.7.0 entries); this makes the registry say what those entries already
+      concluded.
+
+      Measured at the v0.8.0 golden (4acb0956) against bwameth 0.2.7, on the
+      COMPLETE meth population for this gate — meth samples run on m7i only and
+      all five reps are bit-identical, so two cells is the whole matrix:
+      meth-twist-emseq-5M 3.3764%, smoke-meth 3.2932%. Of that, ~0.3 pp is newly
+      VISIBLE rather than new: widening compare-bams to the whole FLAG exposed
+      the 0x200 QC-fail bit, which bwa-mem3 sets from a hand-ported copy of
+      bwameth.py's own chimera heuristic (src/meth_bam.cpp:488). The two
+      implementations disagree on which reads to flag, and that path sets 0x200
+      and clears 0x2 together, so the disagreement lands on both bits at once —
+      69% of differing records XOR to exactly 0x202. 4.00% sits just above the
+      3.38% peak with headroom comparable to the primary tier's.
     affected: meth_alignment
-    expected_drift_pct: 1.50
+    expected_drift_pct: 4.00
     samples: [meth-twist-emseq-5M, smoke-meth]
 
   - id: FG-SUPP-ADDITIONS
@@ -63,11 +83,40 @@ divergences:
     pr: TBD
     date: 2026-06-07
     summary: >-
-      bwa-mem3 emits a small number of additional supplementary (split/chimeric)
-      alignments vs bwa-mem2 v2.2.1 on the default build (e.g. wes-5M: 5123 vs
-      5118). Primary alignments are unchanged. Tracked as a supplementary-count
-      metric (compare-bams supp_count_mismatch / supp_unmatched); it does not
-      affect the primary-concordance drift budget, hence 0.0 here.
+      bwa-mem3 once emitted a small number of additional supplementary
+      (split/chimeric) alignments vs bwa-mem2 v2.2.1 on the default build. The
+      counts have since converged: measured across every non-meth vs_baseline
+      cell of the v0.8.0 golden (4acb0956), query and baseline supplementary
+      totals are EQUAL on all 330, with supp_unmatched 0 — the "wes-5M: 5123 vs
+      5118" this entry used to cite is now 5118 vs 5118. Kept at 0.0 rather than
+      retired: it is the registry's record that supplementary counts are watched
+      and are currently clean, and retiring it would make a future divergence
+      look unanticipated.
+
+      Supplementary CONTENT is now compared too, not just counted (matched pairs
+      run through the same classifier as primaries, with a per-class breakdown in
+      supp_by_class). That axis is reported separately and deliberately does not
+      enter concordance_pct, so it does not contribute to this budget either.
+
+      First corpus-wide measurement, same golden, identical on every arch:
+      vs_baseline and vs_x86 are ZERO on every non-meth cell — bwa-mem3 and
+      bwa-mem2 agree on the full content of every matched supplementary, which
+      is a stronger claim than this project could previously make at all.
+      vs_golden, where two bwa-mem3 releases legitimately differ, carries a
+      small bounded population: panel-twist-5M 1022, wgs-5M 470, hic-1M 35,
+      sbx-1M 12, smoke-1M 10, wes-5M 1. The secondary axis fires only on meth
+      (meth-twist-emseq-5M 2, smoke-meth 0 content diffs).
+
+      Those vs_golden counts are release-pair-specific — they describe v0.7.0 ->
+      v0.8.0 — so they are recorded as the observed baseline rather than promoted
+      to a threshold. A cross-release budget needs a second release pair to
+      establish a rate; until then a jump against these numbers is the signal.
+
+      NOTE: this entry has an empty `samples`, so `allowed_drift_pct` adds it to
+      EVERY sample's budget. It must stay 0.0 unless a divergence genuinely
+      applies corpus-wide — a non-zero value here silently grants budget to
+      samples that are meant to have none, including any deliberately gated at
+      0.0.
     affected: supplementary_alignment
     expected_drift_pct: 0.0
     samples: []
