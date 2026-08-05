@@ -99,7 +99,19 @@ def image_for_arch(arch_name: str) -> str:
 # `bwa-mem2.upstream` (align_baseline, compare_vs_baseline) is restricted to
 # baseline-supported archs; arm archs get fg-labs alignments only (and
 # eventually compare_vs_golden once a golden exists).
-BASELINE_ARCHS = [a for a in ARCHS if CONFIG.archs[a].platform == "linux/amd64"]
+def _has_upstream_baseline(arch: str) -> bool:
+    """True when `arch` can run upstream bwa-mem2, i.e. it is x86.
+
+    Separate from `arch in BASELINE_ARCHS` because that list is derived from
+    ARCHS, the user's selection. A rule that names an arch LITERALLY (the smoke
+    targets do) must not ask a list scoped to a selection that arch may not be
+    in -- under the default `--archs` the list is `core_arch` alone, so a
+    literal `c6a` would test False and be routed as if it were ARM.
+    """
+    return CONFIG.archs[arch].platform == "linux/amd64"
+
+
+BASELINE_ARCHS = [a for a in ARCHS if _has_upstream_baseline(a)]
 ARM_ARCHS = [a for a in ARCHS if CONFIG.archs[a].platform == "linux/arm64"]
 # Archs the minibwa probe runs on (private/minibwa-bench branch only). Drops
 # m7i, which exists in full_archs only for meth-FMI memory headroom — minibwa
@@ -161,6 +173,7 @@ localrules:
     compat_bwa_smoke,
     compat_bwa,
     alt,
+    alt_smoke,
 
 
 def _is_meth_sample(sample_name: str) -> bool:
@@ -443,7 +456,7 @@ def _compat_bwa_targets(samples: list, reps: int) -> list:
 # impossible to write. `test_bwa_arm_covers_every_compat_cell_on_every_arch`
 # still has teeth, because the `in CONFIG.samples` filters below can diverge
 # on their own if only one arm's sibling is declared in samples.yaml.
-def _alt_targets() -> list:
+def _alt_targets(arches: list | None = None) -> list:
     """Every ALT-aware target: the default arm plus both `--compat` arms.
 
     THREE modes, not two. The two compat arms assert byte-identity against their
@@ -466,20 +479,27 @@ def _alt_targets() -> list:
     All three share one ALT-aware bwa-mem2 baseline. `compare_vs_baseline`
     aliases both siblings onto `wgs-5M-alt`, so it is built once, not three
     times.
+
+    `arches` defaults to the run's full selection; `rule alt_smoke` passes a
+    single arch so the wiring can be proven on one cell instead of eighteen.
+    Membership is tested with `_has_upstream_baseline` rather than against
+    `BASELINE_ARCHS`, which is scoped to ARCHS and would misroute an arch named
+    literally by a smoke target.
     """
+    arches = ARCHS if arches is None else arches
     base = f"runs/{FG_LABS_SHA}/wgs-5M-alt"
     targets = [
         f"{base}/{arch}/rep-1/compare/"
-        + ("vs-baseline.json" if arch in BASELINE_ARCHS else "vs-x86.json")
-        for arch in ARCHS
+        + ("vs-baseline.json" if _has_upstream_baseline(arch) else "vs-x86.json")
+        for arch in arches
     ]
     targets += [
         f"runs/{FG_LABS_SHA}/wgs-5M-alt-compat/{arch}/rep-1/compare/compat-identity.txt"
-        for arch in ARCHS
+        for arch in arches
     ]
     targets += [
         f"runs/{FG_LABS_SHA}/wgs-5M-alt-compat-bwa-mem/{arch}/rep-1/compare/bwa-identity.txt"
-        for arch in ARCHS
+        for arch in arches
     ]
     return targets
 
@@ -765,6 +785,30 @@ rule alt:
     """
     input:
         _alt_targets(),
+
+
+rule alt_smoke:
+    """Cheap wiring check for the ALT arm: all three modes, one arch.
+
+    `rule alt` is eighteen cells, and a misconfiguration in any of the pieces
+    the arm depends on -- the `.alt` sidecar staging, the shared ALT-aware
+    baseline, the sibling aliasing in `compare_vs_baseline`, the `pa` tag policy
+    -- costs the whole matrix to discover. This proves the same three code paths
+    for the price of three. Run it first after any change to the arm's wiring.
+
+    c6a for the same reason `rule smoke` is pinned there: mode 1 is graded
+    against upstream bwa-mem2, which has no ARM build, so the cell must be x86 --
+    and c6a is the cheapest one. That leaves the ARM route (`vs-x86.json`)
+    unproven here; it is covered by `rule alt` and by the compat arms' own ARM
+    cells, and adding a second arch would double the smoke's cost for a path
+    that is shared with `rule all`.
+
+    Usage:
+        snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
+            --config fg_labs_sha=<sha> -- alt_smoke
+    """
+    input:
+        _alt_targets(["c6a"]),
 
 
 rule compat_bwa:

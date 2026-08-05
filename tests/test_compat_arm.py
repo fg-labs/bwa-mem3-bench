@@ -726,6 +726,43 @@ def test_alt_arms_are_in_bless_release_but_not_rule_all() -> None:
     assert "alt" not in all_rule.replace("_all", "").replace("baseline_all", "")
 
 
+def test_alt_smoke_covers_all_three_modes_on_one_baseline_arch() -> None:
+    """The smoke must exercise the same three modes as `rule alt`, on an x86 arch.
+
+    Deriving its targets from `_alt_targets` rather than restating the paths is
+    the point: a smoke that drifts from the rule it screens proves nothing about
+    it. The arch must be one upstream bwa-mem2 builds on, or mode 1 -- the arm's
+    only graded mode -- cannot be requested at all.
+    """
+    body = _code_only(SNAKEFILE.split("rule alt_smoke:")[1].split("\nrule ")[0])
+    assert "_alt_targets(" in body, "the smoke must derive its targets from the rule's"
+    arches = re.findall(r'_alt_targets\(\["([^"]+)"\]\)', body)
+    assert arches, "the smoke must pin an explicit arch list"
+    cfg = load_config(CONFIG_DIR)
+    for arch in arches:
+        assert cfg.archs[arch].platform == "linux/amd64", (
+            f"{arch} has no upstream bwa-mem2 build, so the graded mode-1 cell "
+            f"cannot be produced there"
+        )
+
+
+def test_alt_targets_routes_on_platform_not_on_the_selected_arch_list() -> None:
+    """`_alt_targets` must ask `_has_upstream_baseline`, never `BASELINE_ARCHS`.
+
+    `BASELINE_ARCHS` is derived from ARCHS, the user's selection, which defaults
+    to `core_arch` alone -- an ARM arch. `rule alt_smoke` names c6a literally, so
+    a membership test against that list would find it absent and route the cell
+    to `vs-x86.json`: a target no rule can produce for an x86 arch, and a silent
+    one, because the mode-1 path would simply disappear from the smoke.
+    """
+    source = _code_only(_top_level_def(_code_only(SNAKEFILE), "_alt_targets"))
+    assert "_has_upstream_baseline(" in source
+    assert "BASELINE_ARCHS" not in source, (
+        "BASELINE_ARCHS is scoped to the run's arch selection and misroutes an "
+        "arch named literally by a smoke target"
+    )
+
+
 def test_alt_base_sample_stays_out_of_the_regression_sweep() -> None:
     """`wgs-5M-alt` must not join SWEEP_SAMPLES: `rule all`'s target set is the
     cross-SHA regression anchor, and a new member silently changes what Gate #1
