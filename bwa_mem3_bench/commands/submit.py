@@ -25,10 +25,11 @@ COORDINATOR_JOB_DEF = _cfg.coordinator_job_definition
 # intent for these targets — they are all "every arch" rules. The minibwa
 # targets iterate MINIBWA_ARCHS (= ARCHS minus m7i), so passing full_archs is
 # correct: m7i is filtered out in the Snakefile.
-# `compat_bwa` belongs here for the same reason `compat` does, and more acutely:
-# the bwa arm exists to compare ARM against an ARM upstream directly, which a
-# `core_arch`-only fallback cannot do at all. The `*_smoke` compat targets are
-# absent on purpose -- they name c6a and c8g literally rather than iterating.
+# `compat_bwa` and `compat_alt` belong here for the same reason `compat` does,
+# and `compat_bwa` more acutely: the bwa arm exists to compare ARM against an
+# ARM upstream directly, which a `core_arch`-only fallback cannot do at all. The
+# `*_smoke` compat targets are absent on purpose -- they name c6a and c8g
+# literally rather than iterating.
 _FULL_SWEEP_TARGETS = frozenset(
     {
         "all",
@@ -38,6 +39,7 @@ _FULL_SWEEP_TARGETS = frozenset(
         "minibwa_smoke",
         "compat",
         "compat_bwa",
+        "compat_alt",
     }
 )
 
