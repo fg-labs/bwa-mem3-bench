@@ -61,7 +61,7 @@ def _bwa_ref_inputs(wc) -> list[str]:
     sample = CONFIG.samples[wc.sample]
     fasta_name = CONFIG.references[sample.reference]["fasta_name"]
     base = f"references/{sample.reference}/{fasta_name}"
-    return [
+    files = [
         base,  # plain .fasta — must be index 0 (the path passed to bwa)
         f"{base}.amb",
         f"{base}.ann",
@@ -69,6 +69,13 @@ def _bwa_ref_inputs(wc) -> list[str]:
         f"{base}.pac",
         f"{base}.sa",
     ]
+    # Same `.alt` contract as the bwa-mem2/bwa-mem3 arm (see `_ref_inputs`): the
+    # sidecar is shared across index families -- it names contigs, not offsets --
+    # so both arms must stage it or neither, or the comparison would put an
+    # ALT-aware aligner against an alt-naive one and blame bwa-mem3.
+    if sample.alt_aware:
+        files.append(f"{base}.alt")
+    return files
 
 
 rule align_bwa:

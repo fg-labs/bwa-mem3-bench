@@ -158,6 +158,24 @@ class Sample:
     # driven by the `accuracy` / `accuracy_smoke` targets, NOT the speed/
     # concordance sweep (`rule all` / `baseline_all` exclude them).
     truth: bool = False
+    # Stage the `<prefix>.alt` sidecar alongside the index, turning on ALT-aware
+    # mapping in every aligner that reads it (bwa, bwa-mem2, bwa-mem3 alike).
+    #
+    # Off by default, and the default is load-bearing. The sidecar lives in the
+    # SAME S3 prefix as the index it belongs to, so this flag -- not the
+    # reference name -- is what decides whether a run sees it. That keeps the
+    # existing blessed corpus valid: a sample without this flag stages exactly
+    # the files it always did and produces exactly the output it always did,
+    # with no second 21 GB reference tree to hold a 487 KB file.
+    #
+    # What it turns on is not marginal. `bns_restore` marks the first field of
+    # every non-`@` line in the sidecar as ALT, and for hg38 that is 3,171 of
+    # 3,366 contigs (261 `_alt` + 525 HLA + 2,385 `_decoy` -- decoys are listed
+    # as FLAG-4 unmapped records on purpose, which is how bwakit ships it). So
+    # an alt-aware run exercises ALT-specific primary selection, the ALT MAPQ
+    # adjustment, the `pa:f:` tag and the `-h INT,INT` alt hit cap -- an entire
+    # code path that is otherwise never executed by this harness.
+    alt_aware: bool = False
 
     def __post_init__(self) -> None:
         if self.layout not in ("paired", "single"):
@@ -178,6 +196,21 @@ class Sample:
                 f"is_meth={self.is_meth} (baseline_tool={self.baseline_tool!r}, "
                 f"fg_labs_flags={self.fg_labs_flags}) but reference={self.reference!r}. "
                 f"Meth samples must use a '-meth' reference and non-meth samples must not."
+            )
+        # ALT-awareness is a property of the 4-letter index, and the bisulfite
+        # branches of `_ref_inputs` return before the `.alt` append -- they stage
+        # a different index family entirely (`.bwameth.c2t` for bwameth, `.meth.*`
+        # for `bwa-mem3 --meth`), under a different reference prefix that holds no
+        # sidecar. So a meth sample carrying this flag would stage nothing extra,
+        # run exactly as alt-naive as it always did, and report a clean result
+        # while its config claimed an ALT-aware run. Reject at load rather than
+        # let a green cell prove nothing.
+        if self.alt_aware and self.is_meth:
+            raise ValueError(
+                f"sample {self.name!r} combines alt_aware with methylation "
+                f"(baseline_tool={self.baseline_tool!r}, fg_labs_flags={self.fg_labs_flags}). "
+                f"The bisulfite index families carry no `.alt` sidecar, so the run would be "
+                f"silently ALT-naive."
             )
         # Mirror the two guards `bwa-mem3 mem` enforces at runtime, so an
         # impossible sample fails at config load instead of on a Batch worker
@@ -735,7 +768,18 @@ def _validate_compat_siblings(samples: dict[str, Sample]) -> None:
     :raises ValueError: if a compat sibling has no base, or disagrees with it on
         `baseline_tool`, `reference`, `source`, `layout`, or `mem_flags`.
     """
-    baseline_inputs = ("baseline_tool", "reference", "source", "layout", "mem_flags")
+    # `alt_aware` belongs here for the same reason the others do: it changes the
+    # ALIGNMENT (3,171 hg38 contigs become ALT), so a sibling that enabled it
+    # while its base did not would be scored against a baseline computed with
+    # ALT-awareness OFF -- a guaranteed, and entirely spurious, compat failure.
+    baseline_inputs = (
+        "baseline_tool",
+        "reference",
+        "source",
+        "layout",
+        "mem_flags",
+        "alt_aware",
+    )
     for name, sample in sorted(samples.items()):
         if not sample.is_compat:
             continue
@@ -957,6 +1001,7 @@ def load_config(config_dir: Path) -> WorkflowConfig:
             mem_flags=_as_str_list(f"sample {name!r}", "mem_flags", data.get("mem_flags", [])),
             compare_options=_validate_compare_options(name, data.get("compare_options")),
             truth=_as_bool(name, "truth", data.get("truth", False)),
+            alt_aware=_as_bool(name, "alt_aware", data.get("alt_aware", False)),
         )
 
     archs = {

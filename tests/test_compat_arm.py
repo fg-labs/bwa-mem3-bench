@@ -8,12 +8,13 @@ directive. Each guard pins a decision whose breakage would be silent: the run
 would still succeed and still report a number, just not the number claimed.
 """
 
+import ast
 import re
 from pathlib import Path
 
 import pytest
 
-from bwa_mem3_bench.workflow_config import load_config
+from bwa_mem3_bench.workflow_config import Sample, _validate_compat_siblings, load_config
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = REPO_ROOT / "config"
@@ -468,3 +469,136 @@ def test_bwa_arm_is_not_in_the_release_bless_yet() -> None:
     bless = _code_only(SNAKEFILE.split("rule bless_release:")[1].split("\nrule ")[0])
     assert "bwa-identity" not in bless
     assert "_compat_bwa_targets" not in bless
+
+
+# ---------------------------------------------------------------------------
+# ALT-aware arms.
+# ---------------------------------------------------------------------------
+
+ALIGN_SMK = (REPO_ROOT / "workflow" / "rules" / "align.smk").read_text()
+
+
+def test_alt_aware_flag_survives_the_yaml_round_trip() -> None:
+    """`alt_aware: true` in YAML must reach the dataclass.
+
+    This is the regression that motivated the test: the field was added to
+    `Sample` and to the YAML, but not to the `Sample(...)` construction in
+    `load_config`, so every arm silently loaded with `alt_aware=False`. The runs
+    would have completed, staged no sidecar, exercised none of the ALT path, and
+    reported "identical" -- a green result proving nothing at all.
+    """
+    cfg = load_config(CONFIG_DIR)
+    alt = {n for n, s in cfg.samples.items() if s.alt_aware}
+    assert alt, "expected at least one alt_aware sample"
+    assert all(n.startswith("wgs-5M-alt") for n in alt), sorted(alt)
+    # And the default must stay off for everything else, or the existing blessed
+    # corpus would silently change meaning.
+    assert cfg.samples["wgs-5M"].alt_aware is False
+
+
+def test_alt_aware_samples_are_excluded_from_the_regression_sweep() -> None:
+    """`wgs-5M-alt` must not reach `SWEEP_SAMPLES`, and the filter must be real.
+
+    The ALT base sample is not a compat sibling and not a truth sample, so the
+    two existing exclusions do not cover it -- it would land in `rule all` and
+    `baseline_all` by default. Three things break at once if it does, and none
+    of them is a cost argument:
+
+      - `vs_golden` has no `wgs-5M-alt` BAM to compare against. The blessed
+        corpus predates the sample, so Gate #2 asks for an input that cannot
+        exist.
+      - `vs_baseline` runs compare-bams under the `expect_tags` allowlist, which
+        has no `pa` entry ON PURPOSE (`test_known_but_unemitted_tags_are_
+        deliberately_not_allowlisted` in test_workflow_config.py). ALT-aware
+        mapping is exactly the path that emits `pa:f:`, so the first such
+        comparison fails BY NAME.
+      - `bench regression` diffs this run's `all` outputs against the golden's,
+        so a new sweep member silently changes what the gate compares.
+
+    Hence the arms are driven by `--target compat_alt` alone, where every
+    comparison is `fgumi compare bams` (no allowlist) against an upstream
+    computed with the same flag.
+    """
+    # `\n]` for the closing bracket, not `]`: the body contains `CONFIG.samples[s]`,
+    # so a bare split truncates the block after its first subscript.
+    sweep = SNAKEFILE.split("SWEEP_SAMPLES = [")[1].split("\n]")[0]
+    assert "_is_alt_sample(s)" in sweep, "SWEEP_SAMPLES does not exclude ALT-aware samples"
+    # Not vacuous: the config must actually declare one for the filter to matter.
+    cfg = load_config(CONFIG_DIR)
+    assert [n for n, s in cfg.samples.items() if s.alt_aware and not s.is_compat]
+
+
+def test_alt_sidecar_is_staged_by_both_aligner_arms() -> None:
+    """bwa and bwa-mem2/bwa-mem3 read the SAME `<idxbase>.alt`.
+
+    Staging it for one arm and not the other would compare an ALT-aware aligner
+    against an alt-naive one and attribute the difference to bwa-mem3.
+    """
+    for name, text in (("align.smk", ALIGN_SMK), ("align_bwa.smk", ALIGN_BWA_SMK)):
+        code = _code_only(text)
+        assert "alt_aware" in code, name
+        assert 'f"{base}.alt"' in code, name
+
+
+def _top_level_def(text: str, name: str) -> str:
+    """The source of the top-level ``def <name>`` in an .smk file.
+
+    An .smk file is not importable and not parseable as a whole (`rule x:` is
+    not Python), but its module-level helpers are ordinary functions. Slicing
+    one out by its own `def` line and the next dedent to column 0 yields a
+    fragment `ast` can parse, which is what lets the guard below inspect the
+    real conditional structure instead of matching nearby text.
+    """
+    lines = text.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith(f"def {name}("))
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i] and not lines[i][0].isspace()),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+
+def test_alt_sidecar_is_conditional_not_unconditional() -> None:
+    """The sidecar must be gated on the flag.
+
+    Staging it unconditionally would turn ALT-awareness on for every sample in
+    the harness and silently invalidate every blessed baseline and golden.
+
+    Checked structurally, not by proximity: an `if ... alt_aware` block sitting
+    immediately above an UNCONDITIONAL append reads the same to a text scan but
+    stages the sidecar for every sample. So parse the helper and require each
+    `.alt` mention to fall inside the body of an `alt_aware` conditional.
+    """
+    for name, text, func in (
+        ("align.smk", ALIGN_SMK, "_ref_inputs"),
+        ("align_bwa.smk", ALIGN_BWA_SMK, "_bwa_ref_inputs"),
+    ):
+        source = _top_level_def(_code_only(text), func)
+        tree = ast.parse(source)
+        guarded: set[int] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.If) and "alt_aware" in ast.unparse(node.test):
+                for stmt in node.body:
+                    guarded.update(range(stmt.lineno, (stmt.end_lineno or stmt.lineno) + 1))
+        mentions = [
+            i for i, line in enumerate(source.splitlines(), start=1) if '{base}.alt"' in line
+        ]
+        assert mentions, f"{name}: {func} does not stage the .alt sidecar at all"
+        assert set(mentions) <= guarded, (
+            f"{name}: .alt append is not inside an alt_aware conditional"
+        )
+
+
+def test_alt_aware_is_a_baseline_input_for_sibling_validation() -> None:
+    """A sibling that enabled ALT-awareness while its base did not would be
+    scored against a baseline computed with it OFF -- a guaranteed and entirely
+    spurious compat failure. The guard must cover it like the other inputs."""
+    common = {"baseline_tool": "bwa-mem2-upstream", "reference": "hg38", "source": "data/wgs/"}
+    samples = {
+        "wgs": Sample(name="wgs", alt_aware=False, **common),
+        "wgs-compat": Sample(
+            name="wgs-compat", alt_aware=True, fg_labs_flags=["--compat=bwa-mem2"], **common
+        ),
+    }
+    with pytest.raises(ValueError, match="alt_aware"):
+        _validate_compat_siblings(samples)
