@@ -353,3 +353,96 @@ allowances:
     # change on a near-identical record stream rather than a placement change; the
     # DNA family's worst cell is 0.18%. A single scalar cannot express both, so it
     # is set to the larger and the split is stated in the summary above.
+  - to_sha: 4d341b7ba81246509a87680fa569ac3210af540e
+    pr: fg-labs/bwa-mem3#361
+    date: 2026-08-06
+    summary: >-
+      v0.9.0: NO alignment change vs the v0.8.0 golden. Gate #2 is 100.0000% on
+      all 190 golden-backed cells — every sample, every arch, every rep. The
+      golden moves forward for release continuity and to acquire the new
+      ALT-aware arm, not for a deliberate output change.
+
+      That zero is coherent rather than suspicious, and the reason matters:
+      #363 changes the proper-pair 0x2 bit only on the ALT-aware path, and the
+      ALT samples are NEW in this release, so no v0.8.0 golden BAM exists for
+      them to be compared against. The eight golden-backed families
+      (hic-1M, meth-twist-emseq-5M, panel-twist-5M, sbx-1M, smoke-1M,
+      smoke-meth, wes-5M, wgs-5M) never exercise the changed branch.
+
+      Contents: #360 makes --compat=bwa-mem selectable; #363 derives FLAG 0x2
+      from a[0], matching both upstreams; #366 renders pa:f from the same
+      definition as the SAM writer; #367 propagates bam_aux_append failures
+      instead of dropping tags.
+
+      Gate #1 passes on all 72 scored (sample, arch) cells. Every --compat family
+      (hic-1M, panel-twist-5M, sbx-1M, wes-5M, wgs-5M, sim-wgs-place,
+      sim-wgs-vars) sits at 100.0000% against a 0.0000% budget, and the
+      record-stream-identity claim behind that is fgumi's, not compare-bams':
+      216 compat-identity + 6 bwa-identity comparisons all report IDENTICAL at
+      equal record counts. wgs-5M-alt is 100.0000% at a deliberate ZERO budget
+      on all four x86 arches, which is the lock-in for fg-labs/bwa-mem3#362
+      (proper-pair 0x2) and #365 (unrounded pa:f); `pa` is present on 106,190
+      records in BOTH streams with value_diff 0, on every arch. Meth is the only
+      budgeted drift: 3.3764% (meth-twist-emseq-5M) and 3.2932% (smoke-meth)
+      against the 4.00% re-derived from measurement in bwa-mem3-bench#48.
+
+      ARM is 100.0% concordant with x86 on all 62 vs_x86 cells. This is the
+      FIRST release able to record that at all: vs_x86 was silently dropped on
+      ingest for the project's entire history until bwa-mem3-bench#50, so every
+      prior golden has a hole where the ARM concordance axis should be.
+
+      Truth-based holodeck accuracy is identical to four decimal places on all
+      ten sim arms — placement, MD concordance and per-CpG methylation Pearson r
+      (e.g. sim-wgs-place 95.17% / 94.62%, sim-meth-place r 0.9456, sim-meth-vars
+      r 0.9803), matching v0.8.0 exactly. Non-primary axes are clean: 153,134
+      supplementaries matched per ALT cell with 0 content diffs, 0 unmatched, 0
+      secondary.
+
+      TWO GATE FAILURES ARE ACCEPTED, both measured to be artifacts of the
+      measurement substrate rather than of the binary.
+
+      (1) PERFORMANCE, hic-1M-compat/m7i, reported +13.0% over 8 reps. Disproven
+      by direct control: the v0.8.0 BINARY re-run on 2026-08-06, the same day as
+      this bless, measures 23.05 s against its own recorded 19.41 s (+18.7%), so
+      compared like-for-like the delta is -4.9% — 0.9.0 is FASTER. Same-day deltas on the other m7i compat samples are -11.7%
+      (sbx-1M), -12.7% (wgs-5M), -13.6% (panel-twist-5M), +4.9% (wes-5M). Cause
+      is host-quality bimodality, not scheduling: cpu_time/wall is a constant
+      14.1-14.7 of 16 vCPUs on every rep, so no vCPU is lost, while cpu_seconds
+      rises 20% with wall on slow hosts — the same instructions retiring more
+      slowly under memory/LLC contention. Both binaries appear in both the fast
+      (18.89-20.41 s) and slow (21.84-25.01 s) clusters. The two reps that
+      happened to share one instance agree to 0.36%, so essentially all variance
+      is BETWEEN hosts and none within.
+
+      (2) THREAD SCALING, Gate #3, reported REGRESSION at four rungs (up to
+      9.81 pp against a 3.0 pp tolerance). The v0.8.0 baseline is unusable: its
+      recorded T(1) of 1341.22 s re-measures at 1228.33 s on 2026-08-06, again
+      the same day as this bless (3 reps, 1.3% spread) — 8.4% unrepresentative —
+      and E(n)=T(1)/(n*T(n)) divides by it at every rung. That control is kept
+      beside the v0.8.0 ladder as
+      scaling/4acb0956.../wgs-5M/c8g64/scaling.t1-control-2026-08-06.tsv; the
+      release's own scaling.tsv is untouched. Its recorded efficiencies of 101-104% are superlinear, i.e.
+      physically impossible, which is the same fact stated a second way. Against
+      a corrected T(1), 0.9.0 leads at every rung: 99.2 vs 94.3 (t=8), 98.7 vs
+      95.5 (t=16), 96.6 vs 94.7 (t=32), 91.3 vs 90.1 (t=64). 0.9.0's own T(1)
+      reproduced within 0.7% across two independent runs on different hosts
+      (1243.69, 1234.72), and it is +0.5% SLOWER than v0.8.0 measured on
+      comparable hardware — there is no speedup to explain, and the four code
+      commits contain no SIMD, FMI or Makefile change. bwa-mem3-bench#52 raises
+      every ladder rung to 3 reps so T(1) is no longer a single unreplicated
+      draw; that config reaches the workers only after an image rebuild, so this
+      release's ladder was measured under the old reps:1 anchor.
+
+      Gate #1 also reported four cells "missing vs-baseline" —
+      sim-wgs-place, sim-wgs-vars, sim-meth-place, sim-meth-vars. Truth samples
+      have baseline alignments but never run compare-bams, so the fail-closed
+      check demanded an artifact the workflow is designed never to produce.
+      Fixed in bwa-mem3-bench#51; not an alignment finding.
+
+      Blessed at the release-please #361 head. Its diff vs main (668b21e)
+      touches only version.txt, CHANGELOG.md and .release-please-manifest.json —
+      no src/, ext/ or Makefile — so the aligner is the same binary as main at
+      that point. When #361 squash-merges to the shipped v0.9.0 tag, add the tag
+      SHA as an alias below, same pattern as v0.5.0 (9dd30dd0 / b2fea46),
+      v0.6.0 (48cf0a4 / a887e36) and v0.7.0 (04777b3c / 228a61b).
+    expected_drift_pct: 0.0
