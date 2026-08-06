@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from bwa_mem3_bench.registry import DivergenceEntry
 from bwa_mem3_bench.report.regression import _baseline_budget, check_regression
@@ -294,13 +295,20 @@ def test_gate1_meth_tier_tolerates_higher_drift(tmp_path: Path) -> None:
     assert "PASS" in report
 
 
-def _seed_missing(db: Path, *, new_arch: str, baseline_arch: str, add_vs_baseline: bool) -> None:
+def _seed_missing(
+    db: Path,
+    *,
+    new_arch: str,
+    baseline_arch: str,
+    add_vs_baseline: bool,
+    sample: str = "wgs-5M",
+) -> None:
     conn = connect(db)
     for sha in ("new", "old"):
         upsert_run(conn, fg_labs_sha=sha, status="complete")
     upsert_run(conn, fg_labs_sha="baseline-bwa-mem2-v2.2.1", status="baseline")
     common = dict(
-        sample="wgs-5M",
+        sample=sample,
         rep=1,
         wall_seconds=100.0,
         max_rss_mb=1.0,
@@ -355,4 +363,35 @@ def test_gate1_does_not_false_fail_arm_without_baseline(tmp_path: Path) -> None:
     _seed_missing(db, new_arch="c8g", baseline_arch="c6a", add_vs_baseline=False)
     ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old")
     assert ok is True
+    assert "PASS" in report
+
+
+@pytest.mark.parametrize(
+    "sample", ["sim-wgs-place", "sim-wgs-vars", "sim-meth-place", "sim-meth-vars"]
+)
+def test_gate1_does_not_false_fail_truth_samples(sample: str, tmp_path: Path) -> None:
+    """A `truth: true` sample never runs compare-bams, so it cannot be missing one.
+
+    `sim-*` samples are graded by holodeck against simulated truth, not against
+    upstream: `SWEEP_SAMPLES` excludes them and `_accuracy_targets` requests only
+    `eval/*`, so no rule ever writes their `compare/vs-baseline.json`. They DO
+    have baseline alignments, though, so the fail-closed intersection treats them
+    as owing a comparison that by construction never exists.
+
+    Reachable only from the targets requesting `_accuracy_targets`
+    (`bless_release`, `accuracy`, `accuracy_smoke`, `fast`); `rule all` excludes
+    truth samples via `SWEEP_SAMPLES`. So it never fired on the routine sweep
+    and surfaced first on a release bless — the run where a clean gate matters
+    most, and one whose own cells all passed.
+
+    The four parameters are exactly the cells the v0.9.0 bless reported, spanning
+    both truth families (`sim-wgs-*` DNA on c6a, `sim-meth-*` bisulfite on m7i).
+    Covering all four rather than one keeps a sample-specific fix from passing:
+    the exclusion is driven by each sample's own `truth` flag, so a config entry
+    that lost the flag would fail here rather than at the next release bless.
+    """
+    db = tmp_path / "b.db"
+    _seed_missing(db, new_arch="c6a", baseline_arch="c6a", add_vs_baseline=False, sample=sample)
+    ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old")
+    assert ok is True, report
     assert "PASS" in report

@@ -125,9 +125,23 @@ def _missing_baseline_cells(
 ) -> pd.DataFrame:
     """(sample, arch) cells that should have a vs-baseline comparison but don't.
 
-    "Should" = the cell exists in this run AND has an upstream baseline
-    counterpart (a ``baseline-*`` trial). Intersecting with the baseline run's
-    cells excludes ARM archs, which legitimately have no upstream comparison.
+    "Should" = the cell exists in this run, has an upstream baseline counterpart
+    (a ``baseline-*`` trial), and is a sample that compare-bams actually runs on.
+    Intersecting with the baseline run's cells excludes ARM archs, which
+    legitimately have no upstream comparison.
+
+    ``truth: true`` samples are excluded for a different reason, and it is not
+    interchangeable with the ARM one: they DO have baseline alignments, so the
+    intersection keeps them, but no rule ever writes their vs-baseline JSON.
+    They are graded by holodeck against simulated truth instead — `SWEEP_SAMPLES`
+    excludes them and `_accuracy_targets` requests only `eval/*`. Without this
+    the gate demands an artifact the workflow is designed never to produce.
+
+    Truth samples enter a run only through the targets that request
+    `_accuracy_targets` — `bless_release`, `accuracy`, `accuracy_smoke` and
+    `fast`. `rule all`, the routine cross-SHA regression sweep, excludes them
+    via `SWEEP_SAMPLES`, which is why this never fired there and surfaced first
+    on a release bless.
     """
     empty = pd.DataFrame(columns=["sample", "arch"])
     baseline_cells = query_df(
@@ -136,6 +150,9 @@ def _missing_baseline_cells(
     )
     if baseline_cells.empty:
         return empty  # no baseline data to define expectations against
+    config = load_config(Path(REPO_ROOT) / "config")
+    truth_samples = {name for name, s in config.samples.items() if s.truth}
+    new_df = new_df[~new_df["sample"].isin(truth_samples)]
     new_cells = new_df[["sample", "arch"]].drop_duplicates()
     expected = new_cells.merge(baseline_cells, on=["sample", "arch"])
     present = (
