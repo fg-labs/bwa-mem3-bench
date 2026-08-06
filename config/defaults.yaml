@@ -56,17 +56,35 @@ batch_bases: 160000000
 # physical cores, so the curve has no hyperthreading knee. A 64-vCPU x86 host is
 # 32 physical + SMT and would bend at 32 for reasons unrelated to the aligner.
 #
-# `reps` is deliberately uneven. A 1-thread run is ~16x the wall of a 16-thread
-# run and dominates the ladder's cost, while the high thread counts are what the
-# gate actually reads — so replication is spent where it buys precision.
+# Every rung carries the SAME rep count, and T(1) is the reason.
+#
+# This used to be uneven — t=1 and t=2 at reps:1, t=4/t=8 at 2 — on the argument
+# that a 1-thread run is ~16x the wall of a 16-thread one and "the high thread
+# counts are what the gate actually reads". That argument is backwards.
+# E(n) = T(1) / (n * T(n)) divides by T(1) at EVERY rung, so T(1) is the one
+# measurement the gate reads seven times, and an unreplicated T(1) puts its full
+# noise into all seven efficiencies at once. It was the only value in the ladder
+# with no defence against a single bad host.
+#
+# Measured, one unreplicated T(1) per release: 1506.8 s (394f8f8), 1342.3 s
+# (v0.8.0), 1244.7 s (v0.9.0) — a monotonic 17% decline across two releases
+# whose diffs contain no SIMD, FMI or Makefile change. The 5-rep sweep over the
+# same period is flat, so the ladder is not seeing a real speedup; it is seeing
+# host variance land on the term everything else is divided by. That drift also
+# ratchets the gate: each release's T(1) becomes the next release's bar.
+#
+# Cost of levelling up: ~62 min added per bless (2 extra t=1 at ~21 min, 2 extra
+# t=2 at ~10 min). The whole ladder is one Batch job on one host, so this buys a
+# median at every rung for one instance-hour, and it is cheap next to re-running
+# a bless that a phantom Gate #3 failure blocked.
 thread_scaling:
   sample: wgs-5M
   arch: c8g64
   ladder:
-    - {threads: 1, reps: 1}
-    - {threads: 2, reps: 1}
-    - {threads: 4, reps: 2}
-    - {threads: 8, reps: 2}
+    - {threads: 1, reps: 3}
+    - {threads: 2, reps: 3}
+    - {threads: 4, reps: 3}
+    - {threads: 8, reps: 3}
     - {threads: 16, reps: 3}
     - {threads: 32, reps: 3}
     - {threads: 64, reps: 3}
