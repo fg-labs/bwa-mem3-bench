@@ -219,7 +219,7 @@ def test_every_aggregator_rule_is_a_localrule() -> None:
     assert aggregators <= declared, f"aggregators missing from localrules: {aggregators - declared}"
 
 
-@pytest.mark.parametrize("target", ["compat", "compat_bwa", "compat_alt"])
+@pytest.mark.parametrize("target", ["compat", "compat_bwa", "alt"])
 def test_every_arch_iterating_compat_target_is_a_full_sweep_target(target: str) -> None:
     """`--target <compat arm>` with no `--archs` must expand to every arch.
 
@@ -574,7 +574,7 @@ def test_alt_aware_samples_are_excluded_from_the_regression_sweep() -> None:
       - `bench regression` diffs this run's `all` outputs against the golden's,
         so a new sweep member silently changes what the gate compares.
 
-    Hence the arms are driven by `--target compat_alt` alone, where every
+    Hence the arms are driven by `--target alt` alone, where every
     comparison is `fgumi compare bams` (no allowlist) against an upstream
     computed with the same flag.
     """
@@ -686,3 +686,86 @@ def test_fg_labs_checkout_fetches_the_sha_not_just_branches() -> None:
         "`git fetch --all` cannot reach a commit that is not a branch head; "
         "fetch the SHA directly so deleted release branches stay buildable"
     )
+
+
+def test_rule_alt_covers_all_three_compat_modes() -> None:
+    """ALT-awareness has to be exercised in the DEFAULT path too, not only under
+    `--compat`.
+
+    fg-labs/bwa-mem3#362 was a divergence of the default path from both upstreams
+    (fixed by #363); the two compat arms assert byte-identity, but a default-mode
+    arm is what covers where users actually run. All three modes share one
+    ALT-aware bwa-mem2 baseline, built once for the base sample.
+
+    Mode 1 cannot be a boolean identity gate — default bwa-mem3 differs from
+    bwa-mem2 by construction on HN, MQ and the sidecar-derived @SQ — so it is
+    graded via compare-bams, which post-FLAG-widening can finally see 0x2.
+    """
+    targets = _code_only(_top_level_def(_code_only(SNAKEFILE), "_alt_targets"))
+    assert '/wgs-5M-alt"' in targets, "mode 1 (default, no --compat) must be requested"
+    assert "vs-baseline.json" in targets, "mode 1 is graded, not a boolean gate"
+    assert "vs-x86.json" in targets, "ARM has no upstream bwa-mem2 and needs the transitive route"
+    assert "wgs-5M-alt-compat/" in targets and "compat-identity.txt" in targets
+    assert "wgs-5M-alt-compat-bwa-mem/" in targets and "bwa-identity.txt" in targets
+    # The rule itself must actually request them.
+    body = _code_only(SNAKEFILE.split("rule alt:")[1].split("\nrule ")[0])
+    assert "_alt_targets()" in body
+
+
+def test_alt_arms_are_in_bless_release_but_not_rule_all() -> None:
+    """`rule all` is Gate #1's cross-SHA anchor and its target set must stay
+    byte-stable, so ALT joins the release matrix only.
+
+    Without the `bless_release` entry the arms exist but nothing routine ever
+    requests them, and the regression lock on the fg-labs/bwa-mem3#362 / #365
+    fixes never fires.
+    """
+    bless = _code_only(SNAKEFILE.split("rule bless_release:")[1].split("\nrule ")[0])
+    assert "_alt_targets(" in bless
+    all_rule = _code_only(SNAKEFILE.split("rule all:")[1].split("\nrule ")[0])
+    assert "alt" not in all_rule.replace("_all", "").replace("baseline_all", "")
+
+
+def test_alt_smoke_covers_all_three_modes_on_one_baseline_arch() -> None:
+    """The smoke must exercise the same three modes as `rule alt`, on an x86 arch.
+
+    Deriving its targets from `_alt_targets` rather than restating the paths is
+    the point: a smoke that drifts from the rule it screens proves nothing about
+    it. The arch must be one upstream bwa-mem2 builds on, or mode 1 -- the arm's
+    only graded mode -- cannot be requested at all.
+    """
+    body = _code_only(SNAKEFILE.split("rule alt_smoke:")[1].split("\nrule ")[0])
+    assert "_alt_targets(" in body, "the smoke must derive its targets from the rule's"
+    arches = re.findall(r'_alt_targets\(\["([^"]+)"\]\)', body)
+    assert arches, "the smoke must pin an explicit arch list"
+    cfg = load_config(CONFIG_DIR)
+    for arch in arches:
+        assert cfg.archs[arch].platform == "linux/amd64", (
+            f"{arch} has no upstream bwa-mem2 build, so the graded mode-1 cell "
+            f"cannot be produced there"
+        )
+
+
+def test_alt_targets_routes_on_platform_not_on_the_selected_arch_list() -> None:
+    """`_alt_targets` must ask `_has_upstream_baseline`, never `BASELINE_ARCHS`.
+
+    `BASELINE_ARCHS` is derived from ARCHS, the user's selection, which defaults
+    to `core_arch` alone -- an ARM arch. `rule alt_smoke` names c6a literally, so
+    a membership test against that list would find it absent and route the cell
+    to `vs-x86.json`: a target no rule can produce for an x86 arch, and a silent
+    one, because the mode-1 path would simply disappear from the smoke.
+    """
+    source = _code_only(_top_level_def(_code_only(SNAKEFILE), "_alt_targets"))
+    assert "_has_upstream_baseline(" in source
+    assert "BASELINE_ARCHS" not in source, (
+        "BASELINE_ARCHS is scoped to the run's arch selection and misroutes an "
+        "arch named literally by a smoke target"
+    )
+
+
+def test_alt_base_sample_stays_out_of_the_regression_sweep() -> None:
+    """`wgs-5M-alt` must not join SWEEP_SAMPLES: `rule all`'s target set is the
+    cross-SHA regression anchor, and a new member silently changes what Gate #1
+    compares against the golden."""
+    sweep = _code_only(SNAKEFILE.split("SWEEP_SAMPLES = [")[1].split("\n]")[0])
+    assert "_is_alt_sample(s)" in sweep

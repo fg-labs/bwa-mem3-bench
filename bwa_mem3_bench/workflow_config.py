@@ -107,6 +107,27 @@ def compat_sample_suffix(sample_name: str) -> str | None:
 # to catch.
 METH_EXTRA_TAGS = frozenset({"XM", "XG", "XR", "YD", "YC", "RG"})
 
+# Tags that appear only under ALT-aware alignment. `pa:f:` is the ratio of a
+# region's score to that of the ALT region shadowing it, emitted by bwa
+# (bwamem.c), bwa-mem2 (bwamem.cpp) and bwa-mem3 alike off the same
+# `score/alt_sc` and untouched by `--compat` -- `compat_target_t` shapes only
+# @HD, the sidecar, MQ and HN.
+#
+# Conditional on the sidecar, not merely rare: `alt_sc` is set for a NON-ALT
+# region whose better overlapping hit is on an ALT contig, and with no `.alt`
+# staged nothing is ever marked ALT, so the tag cannot be emitted at all. That
+# is why 323M records of prior compat testing never saw one.
+#
+# Allowlisted (`expect_tags`) and never ignored. All three aligners compute it
+# identically, so a difference is a real finding -- and scoping it to ALT
+# samples keeps a `pa` on a non-ALT cell, which would mean a sidecar leaked into
+# a run that should not have one, failing the guard by name.
+#
+# Derived from `alt_aware` rather than declared per sample, for the same reason
+# METH_EXTRA_TAGS is derived from `is_meth`: several samples x several kinds is
+# that many places for one fact to drift.
+ALT_EXTRA_TAGS = frozenset({"pa"})
+
 # Tags not comparable between `bwa-mem3 --meth` and bwameth, excluded from the
 # score on the `vs_baseline` kind only (the other three are meth-vs-meth, where
 # every tag is comparable).
@@ -488,16 +509,20 @@ class WorkflowConfig:
         what lets one per-kind list serve samples whose tag sets legitimately
         differ without needing a per-sample subtraction.
 
-        Methylation samples get `METH_EXTRA_TAGS` added automatically -- see that
-        constant for why it is derived rather than declared.
+        Methylation samples get `METH_EXTRA_TAGS` added automatically, and
+        ALT-aware samples `ALT_EXTRA_TAGS` -- see those constants for why both
+        are derived rather than declared.
 
         :param sample_name: sample being compared.
         :param kind: comparison kind, one of `COMPARE_KINDS`.
         :return: sorted, de-duplicated tag names.
         """
         tags = self._resolve_tags(sample_name, kind, "expect_tags")
-        if self.samples[sample_name].is_meth:
+        sample = self.samples[sample_name]
+        if sample.is_meth:
             tags |= METH_EXTRA_TAGS
+        if sample.alt_aware:
+            tags |= ALT_EXTRA_TAGS
         return sorted(tags)
 
     def absent_ok_tags(self, sample_name: str, kind: str) -> list[str]:
