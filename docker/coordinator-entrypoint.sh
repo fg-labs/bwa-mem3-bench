@@ -45,22 +45,27 @@ if [[ -n "${BUILD_VARIANT:-}" ]]; then
     : "${IMAGE_TAG:=${FG_LABS_SHA}}"
 fi
 
-CONFIG_ARGS="fg_labs_sha=${FG_LABS_SHA}"
-[[ -n "${ARCHS:-}" ]]      && CONFIG_ARGS="${CONFIG_ARGS} archs=${ARCHS}"
-[[ -n "${REPS:-}" ]]       && CONFIG_ARGS="${CONFIG_ARGS} reps=${REPS}"
-[[ -n "${SAMPLES:-}" ]]    && CONFIG_ARGS="${CONFIG_ARGS} samples=${SAMPLES}"
-[[ -n "${GOLDEN_REF_SHA:-}" ]] && CONFIG_ARGS="${CONFIG_ARGS} golden_ref_sha=${GOLDEN_REF_SHA}"
+# An array, not a space-separated string: every value here arrives from a Batch
+# env override, and an unquoted expansion at the call site would both re-split
+# them on whitespace and glob any `*` against the coordinator's working
+# directory. The FORCERUN list below is exposed to the same thing and guards it
+# the same way.
+CONFIG_ARGS=("fg_labs_sha=${FG_LABS_SHA}")
+[[ -n "${ARCHS:-}" ]]      && CONFIG_ARGS+=("archs=${ARCHS}")
+[[ -n "${REPS:-}" ]]       && CONFIG_ARGS+=("reps=${REPS}")
+[[ -n "${SAMPLES:-}" ]]    && CONFIG_ARGS+=("samples=${SAMPLES}")
+[[ -n "${GOLDEN_REF_SHA:-}" ]] && CONFIG_ARGS+=("golden_ref_sha=${GOLDEN_REF_SHA}")
 # Ad-hoc thread-scaling ladder, e.g. LADDER="16:3,32:3,64:3" to probe only
 # the high thread counts. Omitting the 1-thread rung means no efficiency is
 # computable, so Gate #3 no-ops for that run by design.
-[[ -n "${LADDER:-}" ]]     && CONFIG_ARGS="${CONFIG_ARGS} ladder=${LADDER}"
-[[ -n "${IMAGE_TAG:-}" ]]  && CONFIG_ARGS="${CONFIG_ARGS} image_tag=${IMAGE_TAG}"
+[[ -n "${LADDER:-}" ]]     && CONFIG_ARGS+=("ladder=${LADDER}")
+[[ -n "${IMAGE_TAG:-}" ]]  && CONFIG_ARGS+=("image_tag=${IMAGE_TAG}")
 # Thread the bucket through snakemake config so worker jobs resolve it too.
 # Workers re-parse the Snakefile but their job definitions don't carry this
 # env, so without this the golden listing (golden_backed_samples) falls back to
 # a wrong default bucket and a golden-gated run aborts. `--config` propagates to
 # workers (the job-def env does not), so this is the reliable channel.
-[[ -n "${BWA_MEM3_BENCH_S3_BUCKET:-}" ]] && CONFIG_ARGS="${CONFIG_ARGS} s3_bucket=${BWA_MEM3_BENCH_S3_BUCKET}"
+[[ -n "${BWA_MEM3_BENCH_S3_BUCKET:-}" ]] && CONFIG_ARGS+=("s3_bucket=${BWA_MEM3_BENCH_S3_BUCKET}")
 
 # Render the Snakemake AWS Batch profile from its template using the
 # BWA_MEM3_BENCH_{ECR_REPO,S3_BUCKET} env vars baked into the coordinator
@@ -86,9 +91,38 @@ python -m bwa_mem3_bench.cli render-profile \
 # worker concurrency is capped by `jobs:` in the profile. It must exceed the
 # largest `threads:` any rule declares (currently 64, the thread-scaling
 # ladder), so pick a value well clear of that.
+# Optional `--forcerun <rules>`. Snakemake skips a rule whose outputs already
+# exist, and its rerun-triggers watch the rule's own definition -- not the
+# BINARIES inside the image. So re-deriving artifacts for a SHA that is already
+# aligned (e.g. after a compare-bams change) needs the rules named explicitly,
+# or the coordinator runs and does nothing.
+#
+# Deliberately a space-separated rule list rather than a boolean: a bare
+# `--forcerun` means "force EVERYTHING", which on an aligned SHA would re-run
+# the whole alignment sweep. Unset adds no flag at all.
+#
+# Split with `read -ra` rather than an unquoted expansion. Both split on IFS,
+# but only the unquoted form also does pathname expansion, and the coordinator's
+# working directory is not empty -- a rule list containing `*` would arrive at
+# snakemake as filenames. `read -ra` also collapses a whitespace-only value to
+# zero words, so the `-n` guard alone is not enough: it is true for a string of
+# spaces, which would then emit the bare `--forcerun` this list exists to avoid.
+#
+# Newlines are folded to spaces first because `read` stops at the first one,
+# which would silently drop every rule after it -- the unquoted form split on
+# newlines too (they are in the default IFS), so this keeps that behavior.
+FORCERUN_ARGS=()
+if [[ -n "${FORCERUN:-}" ]]; then
+    read -ra forcerun_rules <<<"${FORCERUN//$'\n'/ }"
+    if ((${#forcerun_rules[@]} > 0)); then
+        FORCERUN_ARGS=(--forcerun "${forcerun_rules[@]}")
+    fi
+fi
+
 exec snakemake \
     -s /opt/workflow/Snakefile \
     --profile /opt/workflow/profiles/aws-batch \
     --cores 256 \
-    --config ${CONFIG_ARGS} \
+    --config "${CONFIG_ARGS[@]}" \
+    "${FORCERUN_ARGS[@]}" \
     -- "${TARGET}"

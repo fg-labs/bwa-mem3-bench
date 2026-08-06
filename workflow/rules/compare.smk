@@ -161,10 +161,11 @@ rule compare_compat_identity:
 
     This is the assertion the compat arm exists to make, and `compare-bams`
     cannot make it. `compare-bams` compares placement (ref / pos / CIGAR / MAPQ),
-    four FLAG bits, and aux tags — it never reads QNAME, SEQ, QUAL, TLEN,
-    RNEXT/PNEXT, the other twelve FLAG bits, or the header. So a compat arm
-    scored only by compare-bams can report 100% while SEQ, TLEN, the proper-pair
-    flag or the @SQ dictionary all differ.
+    the whole FLAG, and aux tags — it never reads QNAME, SEQ, QUAL, TLEN,
+    RNEXT/PNEXT, or the header. So a compat arm scored only by compare-bams can
+    report 100% while SEQ, TLEN or the @SQ dictionary differ. (It reads the
+    proper-pair bit now; before the FLAG mask was widened it did not, which is
+    how fg-labs/bwa-mem3#362 went unseen on the graded arm.)
 
     `fgumi compare bams` compares all eleven core SAM fields plus tags
     (order-independent, so BAM tag ordering is not a false difference) and
@@ -221,8 +222,21 @@ rule compare_compat_identity:
         # Write to a temp file and move on success: a DIFFER exit must not leave
         # a satisfied output behind, or the next run would treat the failure as
         # already-done and skip it.
+        #
+        # `| tee ... >&2` rather than `> file 2>&1`: on a DIFFER the `mv` never
+        # runs, the .tmp is not a declared output so snakemake/Batch never upload
+        # it, and the worker is torn down -- so capturing stderr into that file
+        # threw away the ONLY copy of the diagnosis and left CloudWatch empty too.
+        # `--max-diffs 20` computed the first twenty differing records and
+        # discarded them; the cell could then only be diagnosed by re-downloading
+        # both BAMs. Teeing keeps the report and puts the detail in the worker
+        # log, which is the escape hatch report.rs documents.
+        #
+        # NOTE: `tee` exits 0, so the `set -o pipefail` above is load-bearing
+        # here -- without it a DIFFER would be reported as success.
         fgumi compare bams {input.query} {input.baseline} \
-            --threads {threads} --max-diffs 20 > {output.report}.tmp 2>&1
+            --threads {threads} --max-diffs 20 2>&1 \
+          | tee {output.report}.tmp >&2
         mv {output.report}.tmp {output.report}
         """
 
@@ -283,8 +297,11 @@ rule compare_bwa_identity:
         # Write to a temp file and move on success: a DIFFER exit must not leave
         # a satisfied output behind, or the next run would treat the failure as
         # already-done and skip it.
+        # Teed to stderr for the same reason as compare_compat_identity -- see
+        # the note there, including why `pipefail` is load-bearing under `tee`.
         fgumi compare bams {input.query} {input.bwa} \
-            --threads {threads} --max-diffs 20 > {output.report}.tmp 2>&1
+            --threads {threads} --max-diffs 20 2>&1 \
+          | tee {output.report}.tmp >&2
         mv {output.report}.tmp {output.report}
         """
 
@@ -347,15 +364,24 @@ rule compat_thread_invariance:
                 --compat=bwa-mem2 --bam=0 -o "$(dirname {output.report})/t$T.bam" \
                 "$REF" {input.fastqs} 2> "$(dirname {output.report})/t$T.stderr"
             if [ "$(samtools view -c "$(dirname {output.report})/t$T.bam")" -eq 0 ]; then
-                echo "ERROR: t=$T produced 0 records (crash/OOM?)" >&2; exit 1
+                # Same contract as the fgumi gates below: the aligner's stderr is
+                # captured to a file that is not a declared output, so on a crash
+                # it dies with the worker and CloudWatch shows only this line.
+                # Replay it before exiting, or the diagnosis is unreachable.
+                echo "ERROR: t=$T produced 0 records (crash/OOM?); aligner stderr follows:" >&2
+                cat "$(dirname {output.report})/t$T.stderr" >&2 || true
+                exit 1
             fi
         done
         # Written to .tmp and moved on success: fgumi exits 1 on a difference, and a
         # complete output file left behind would let the next run skip the failure.
+        # Teed to stderr for the same reason as compare_compat_identity -- see
+        # the note there, including why `pipefail` is load-bearing under `tee`.
         fgumi compare bams \
             "$(dirname {output.report})/t{params.lo}.bam" \
             "$(dirname {output.report})/t{params.hi}.bam" \
-            --threads 8 --max-diffs 20 > {output.report}.tmp 2>&1
+            --threads 8 --max-diffs 20 2>&1 \
+          | tee {output.report}.tmp >&2
         mv {output.report}.tmp {output.report}
         rm -f "$(dirname {output.report})"/t*.bam
         """

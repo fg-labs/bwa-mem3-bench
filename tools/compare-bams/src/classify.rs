@@ -36,7 +36,6 @@ pub enum Discordance {
         query: u16,
         baseline: u16,
     },
-    SecondarySetDiff,
     /// Both records carry `tag`, but with different values.
     TagValueDiff {
         tag: String,
@@ -212,7 +211,7 @@ impl Classification {
 /// Returns every field on which they differ. The result is concordant when
 /// [`Classification::diffs`] is empty.
 /// Placement is compared via reference id, alignment start, CIGAR, MAPQ (within
-/// `opts.mapq_tolerance`) and the flag bits that affect placement; aux tags are
+/// `opts.mapq_tolerance`) and the whole FLAG word; aux tags are
 /// compared per [`all_tag_diffs`], split by `opts.ignore_tags`.
 ///
 /// When the two disagree on whether the read mapped at all, that single
@@ -232,7 +231,18 @@ pub fn classify(query: &RecordBuf, baseline: &RecordBuf, opts: &CompareOptions) 
     match (q_mapped, b_mapped) {
         (true, false) => return Classification::only_diff(Discordance::MappedOnlyQuery),
         (false, true) => return Classification::only_diff(Discordance::MappedOnlyBaseline),
-        (false, false) => return split_tag_diffs(Vec::new(), query, baseline, opts),
+        // Both unmapped: no placement to compare, but FLAG and tags still carry
+        // information. `0x8` in particular moves when mate rescue behaves
+        // differently, and this is the population it lives in — returning early
+        // without comparing FLAG exempted exactly the reads that matter most.
+        (false, false) => {
+            return split_tag_diffs(
+                flag_diff(query, baseline).into_iter().collect(),
+                query,
+                baseline,
+                opts,
+            )
+        }
         (true, true) => {}
     }
 
@@ -268,17 +278,49 @@ pub fn classify(query: &RecordBuf, baseline: &RecordBuf, opts: &CompareOptions) 
         });
     }
 
-    let placement_mask = 0x10 | 0x20 | 0x40 | 0x80; // strand + mate strand + r1 + r2
-    let q_flags = query.flags().bits() & placement_mask;
-    let b_flags = baseline.flags().bits() & placement_mask;
-    if q_flags != b_flags {
-        diffs.push(Discordance::FlagDiff {
-            query: q_flags,
-            baseline: b_flags,
-        });
-    }
+    diffs.extend(flag_diff(query, baseline));
 
     split_tag_diffs(diffs, query, baseline, opts)
+}
+
+/// The whole-FLAG difference between two records, or `None` when they agree.
+///
+/// Compares all sixteen bits, not a placement mask. The mask this replaced
+/// (`0x10|0x20|0x40|0x80`) left `0x2` and `0x8` — the two bits carrying aligner
+/// *judgement* rather than input properties or routing — compared by nothing at
+/// all, in this crate or anywhere else in the bench. fg-labs/bwa-mem3#362 lives
+/// in `0x2`: 147 differing records in a measured 400,000-record ALT-aware cell,
+/// every one of which the mask scored as concordant.
+///
+/// Comparing the full word is safe for the bits the mask happened to cover:
+/// `0x4` never reaches here as a difference (the caller's mapped/unmapped match
+/// routes a disagreement to `MappedOnly*` first), and `0x100`/`0x800` are equal
+/// within any compared pair because records are routed to their counterpart *by*
+/// class before classification.
+///
+/// Two bits the mask also excluded now become scored, and only one of them can
+/// fire in this workload:
+///
+/// * `0x200` (QC-fail) is set on the **methylation** arm only, by bwa-mem3's
+///   hand-ported copy of bwameth.py's chimera heuristic (`meth_bam.cpp:488`)
+///   and by `--set-as-failed`. A meth `vs_baseline` therefore compares two
+///   independent implementations of the same heuristic, so this widening can
+///   surface a new divergence class there — quantify it before re-deriving that
+///   sample's drift budget. Neither side sets it on any non-meth cell: measured
+///   zero occurrences across 800,000 records of a real ALT-aware pair.
+/// * `0x400` (duplicate) is never set by an aligner; no read marks duplicates.
+///
+/// Bits above `0x800` are undefined in `SAMv1` and are compared rather than
+/// ignored. That is deliberate: `noodles` preserves unknown bits, nothing in
+/// this pipeline sets them, and a record that suddenly carries one is a finding
+/// rather than something to silently normalize away.
+fn flag_diff(query: &RecordBuf, baseline: &RecordBuf) -> Option<Discordance> {
+    let q = query.flags().bits();
+    let b = baseline.flags().bits();
+    (q != b).then_some(Discordance::FlagDiff {
+        query: q,
+        baseline: b,
+    })
 }
 
 /// Attach the pair's tag differences to `core_diffs`, routing each to the scored

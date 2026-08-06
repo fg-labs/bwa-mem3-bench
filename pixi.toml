@@ -8,7 +8,11 @@ version = "0.1.0"
 [dependencies]
 python = ">=3.12,<3.13"
 samtools = ">=1.22.1,<2"
-# Rust toolchain pinned via rust-toolchain.toml; rustup is installed here for dev parity
+# Rust toolchain pinned via rust-toolchain.toml; rustup is installed here for dev parity.
+# NOTE: `>=1.85` is the workspace's own floor, but `install-fgumi` needs >= 1.93
+# (fgumi's `rust-version`), which it checks at run time rather than raising this
+# bound — the bound governs what builds `compare-bams`, and pinning it to fgumi's
+# requirement would couple this repo's toolchain to a third-party dependency.
 rust = ">=1.85"
 pytest = ">=7.0"
 pytest-cov = ">=4.0"
@@ -66,6 +70,16 @@ py-fmt       = "ruff format bwa_mem3_bench tests"
 py-lint      = "ruff check bwa_mem3_bench tests"
 py-type      = "mypy --strict bwa_mem3_bench"
 py-test      = "pytest -v"
+
+# fgumi, for `tests/test_fgumi_non_primary.py`. Not a conda/pypi dependency:
+# `compare` is feature-gated off in a default build, so it has to come from the
+# same pinned git ref the runtime image uses. The script sources that pin rather
+# than repeating it, so the dev binary and the image binary cannot drift.
+#
+# Must run through pixi: fgumi needs rustc >= 1.93 and this environment's conda
+# `rust` is 1.94, where a bare shell gets rustup honouring rust-toolchain.toml's
+# 1.85 pin. The script checks and says so rather than failing obscurely.
+install-fgumi = "bash scripts/install-fgumi.sh"
 
 # Combined
 check = { depends-on = ["cargo-fmt-check", "cargo-clippy", "cargo-test", "py-fmt-check", "py-lint", "py-type", "py-test"] }

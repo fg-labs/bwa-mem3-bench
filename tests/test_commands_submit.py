@@ -251,3 +251,34 @@ def test_bless_baseline_runs_in_given_image_sha_with_valid_job_name() -> None:
     assert _captured_env(mock_run.call_args_list, "FG_LABS_SHA") == "a887e36cabc"
     assert _captured_env(mock_run.call_args_list, "TARGET") == "baseline_all"
     assert _captured_env(mock_run.call_args_list, "REPS") == "5"
+
+
+def test_forcerun_reaches_the_coordinator_env() -> None:
+    """`--forcerun` must arrive as a FORCERUN container env override.
+
+    Without it a re-run against an already-aligned SHA is a no-op: every output
+    already exists in S3, and snakemake's rerun-triggers watch a rule's own
+    definition rather than the binaries inside the image — so a compare-bams
+    change alone triggers nothing.
+    """
+    with patch.object(submit_module, "run_cmd") as mock_run:
+        submit_module.submit(
+            fg_labs_sha="deadbeef",
+            target="all",
+            forcerun="compare_vs_baseline compare_vs_golden",
+        )
+
+    assert (
+        _captured_env(mock_run.call_args_list, "FORCERUN")
+        == "compare_vs_baseline compare_vs_golden"
+    )
+
+
+def test_forcerun_omitted_sets_no_env() -> None:
+    """An absent FORCERUN must not reach the entrypoint at all — an empty value
+    there would expand to a bare `--forcerun`, which forces every rule and
+    re-runs the whole alignment sweep."""
+    with patch.object(submit_module, "run_cmd") as mock_run:
+        submit_module.submit(fg_labs_sha="deadbeef", target="all")
+
+    assert _captured_env(mock_run.call_args_list, "FORCERUN") is None

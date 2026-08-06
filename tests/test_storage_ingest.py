@@ -1,11 +1,13 @@
 """Tests for ingest.walk_run → SQLite."""
 
 import json
+import re
 from pathlib import Path
 
 import pytest
 
 from bwa_mem3_bench.storage.ingest import (
+    _SUPP_KEYS,
     _parse_bwa_stderr,
     _parse_eval_txt,
     _parse_meth_tsv,
@@ -135,6 +137,66 @@ def test_supp_json_extracts_only_supp_keys() -> None:
 
 def test_supp_json_none_when_absent() -> None:
     assert _supp_json({"concordance_pct": 100.0, "by_class": {}}) is None
+
+
+def test_supp_json_carries_every_non_primary_metric_compare_bams_emits() -> None:
+    """`_SUPP_KEYS` is a hand-maintained mirror of compare-bams' non-primary
+    fields, and it is a WHITELIST — a field the comparator emits but this tuple
+    omits is dropped at ingest and never reaches `benchmark.db` or any report.
+
+    That failure is silent and expensive: the numbers still land in S3, so the
+    loss is invisible until someone tries to read them out of the DB, by which
+    point re-collecting means re-running the benchmark. Both the secondary axis
+    and the supplementary CONTENT-diff axis were dropped this way.
+    """
+    comp = {
+        "concordance_pct": 100.0,
+        "by_class": {},
+        "total_templates": 10,
+        "supp_query_total": 4,
+        "supp_baseline_total": 4,
+        "supp_count_mismatch_templates": 0,
+        "supp_count_mismatch_pct": 0.0,
+        "supp_unmatched": 0,
+        "supp_unmatched_pct": 0.0,
+        "supp_matched": 4,
+        "supp_content_diffs": 2,
+        "sec_query_total": 1,
+        "sec_baseline_total": 1,
+        "sec_count_mismatch_templates": 0,
+        "sec_count_mismatch_pct": 0.0,
+        "sec_unmatched": 0,
+        "sec_unmatched_pct": 0.0,
+        "sec_matched": 1,
+        "sec_content_diffs": 1,
+    }
+    out = _supp_json(comp)
+    assert out is not None
+    kept = json.loads(out)
+    dropped = {k for k in comp if k not in ("concordance_pct", "by_class")} - kept.keys()
+    assert not dropped, f"non-primary metrics silently dropped at ingest: {sorted(dropped)}"
+
+
+def test_supp_keys_mirror_the_report_struct() -> None:
+    """The whitelist above is a hand-maintained copy of the Rust report struct.
+
+    Derived from the source rather than restated, so adding a `supp_*`/`sec_*`
+    field to `ConcordanceReport` without widening `_SUPP_KEYS` fails here instead
+    of silently dropping that field for every future run. Scoped to the
+    non-primary prefixes: the primary-axis fields (`concordance_pct`,
+    `by_class`, ...) have their own columns and deliberately do not live in the
+    blob.
+    """
+    report_rs = (
+        Path(__file__).resolve().parent.parent / "tools" / "compare-bams" / "src" / "report.rs"
+    ).read_text()
+    emitted = set(re.findall(r"^\s*pub ((?:supp|sec)_[a-z_]+):", report_rs, re.MULTILINE))
+    assert emitted, "found no non-primary fields in report.rs — did the struct move?"
+    missing = emitted - set(_SUPP_KEYS)
+    assert not missing, (
+        f"compare-bams emits {sorted(missing)} but `_SUPP_KEYS` does not carry them, "
+        f"so they will be dropped at ingest and never reach benchmark.db"
+    )
 
 
 def test_parse_bwa_stderr_extracts_process_and_index_read(tmp_path: Path) -> None:

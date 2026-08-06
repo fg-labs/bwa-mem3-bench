@@ -114,3 +114,63 @@ fn different_flag_bits_is_flag_diff() {
         [Discordance::FlagDiff { .. }]
     ));
 }
+
+/// The proper-pair bit is aligner judgement, not a derived convenience, so a
+/// disagreement on it is a finding. fg-labs/bwa-mem3#362 is exactly this bit
+/// under ALT-aware alignment, and the old `0x10|0x20|0x40|0x80` placement mask
+/// could not see it: 147 differing records in a measured 400,000-record ALT
+/// cell scored as fully concordant.
+#[test]
+fn proper_pair_bit_difference_is_flag_diff() {
+    // 0x63 = PAIRED|PROPER|MATE_REVERSE|R1, 0x61 = the same without PROPER.
+    let a = record("r1", 0x63, Some(0), Some(100), 60);
+    let b = record("r1", 0x61, Some(0), Some(100), 60);
+    let opts = CompareOptions::default();
+    match classify(&a, &b, &opts).diffs.as_slice() {
+        [Discordance::FlagDiff { query, baseline }] => {
+            assert_eq!(
+                query ^ baseline,
+                0x2,
+                "only the proper-pair bit should differ"
+            );
+        }
+        other => panic!("expected a single FlagDiff on 0x2, got {other:?}"),
+    }
+}
+
+/// Mate-unmapped is the other bit carrying aligner judgement that the old mask
+/// dropped — it moves when mate rescue behaves differently.
+#[test]
+fn mate_unmapped_bit_difference_is_flag_diff() {
+    // 0x69 = PAIRED|MATE_UNMAPPED|MATE_REVERSE|R1, 0x61 = same without 0x8.
+    let a = record("r1", 0x69, Some(0), Some(100), 60);
+    let b = record("r1", 0x61, Some(0), Some(100), 60);
+    let opts = CompareOptions::default();
+    match classify(&a, &b, &opts).diffs.as_slice() {
+        [Discordance::FlagDiff { query, baseline }] => {
+            assert_eq!(
+                query ^ baseline,
+                0x8,
+                "only the mate-unmapped bit should differ"
+            );
+        }
+        other => panic!("expected a single FlagDiff on 0x8, got {other:?}"),
+    }
+}
+
+/// Both-unmapped pairs used to return before the flag comparison was reached,
+/// so every FLAG bit was exempt on exactly the population where mate-rescue
+/// disagreement lives. Tags were still compared there; FLAG must be too.
+#[test]
+fn both_unmapped_records_still_compare_flags() {
+    // 0x4D = PAIRED|UNMAPPED|MATE_UNMAPPED|R1, 0x45 = the same without 0x8.
+    let a = record("r1", 0x4D, None, None, 0);
+    let b = record("r1", 0x45, None, None, 0);
+    let opts = CompareOptions::default();
+    match classify(&a, &b, &opts).diffs.as_slice() {
+        [Discordance::FlagDiff { query, baseline }] => {
+            assert_eq!(query ^ baseline, 0x8);
+        }
+        other => panic!("expected a single FlagDiff on 0x8, got {other:?}"),
+    }
+}

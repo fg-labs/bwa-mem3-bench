@@ -55,9 +55,15 @@ CREATE TABLE IF NOT EXISTS comparisons (
     total            INTEGER,
     concordance_pct  REAL,
     by_class_json    TEXT,
-    -- JSON blob of compare-bams supplementary-disagreement metrics
-    -- (supp_count_mismatch_pct, supp_unmatched_pct, totals, total_templates).
-    -- NULL for older rows / comparisons produced before compare-bams emitted them.
+    -- JSON blob of compare-bams NON-PRIMARY divergence metrics: the
+    -- supplementary axis (supp_*) and the secondary axis (sec_*), each carrying
+    -- totals, count-mismatch templates, unmatched, matched, and content_diffs,
+    -- plus total_templates. NULL for older rows / comparisons produced before
+    -- compare-bams emitted them; the sec_*/matched/content_diffs members are
+    -- likewise absent from rows written before those axes existed.
+    -- NOTE: supp_unmatched's DEFINITION changed when the pairing key gained the
+    -- read end, so values are not comparable across that boundary -- see
+    -- NonPrimaryTally::unmatched in tools/compare-bams/src/report.rs.
     supp_json        TEXT,
     UNIQUE (trial_id, kind)
 );

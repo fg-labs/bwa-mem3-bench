@@ -111,6 +111,65 @@ def test_fgumi_identity_output_is_not_left_behind_on_a_difference() -> None:
     assert "mv {output.report}.tmp {output.report}" in rule
 
 
+def test_fgumi_diff_detail_survives_a_failing_gate() -> None:
+    """A DIFFER exit must leave its diagnosis somewhere an operator can read.
+
+    `> {output}.tmp 2>&1` captures BOTH streams into a file that a failing run
+    then never `mv`s, that is not a declared output so Batch never uploads it,
+    and that dies with the worker. Because stderr was captured too, CloudWatch
+    gets nothing either — so `--max-diffs 20` computes the first twenty differing
+    records and throws them away, and the cell can only be diagnosed by
+    re-downloading both BAMs (measured cost: 2 GB).
+
+    `report.rs` documents CloudWatch stderr as the escape hatch for exactly this
+    case. Piping through `tee ... >&2` keeps the report file AND puts the detail
+    in the worker log.
+
+    Read through `_code_only`, not raw source. The comments in these rules
+    necessarily QUOTE the constructs asserted on here (`| tee`, `>&2`) to explain
+    why they are there, so a raw-text match is satisfied by the prose and passes
+    even when the shell command has lost them. Mutation-checked: dropping `>&2`
+    from `compare_compat_identity`'s command passes the raw form and fails this
+    one.
+    """
+    for rule_name in (
+        "compare_compat_identity",
+        "compare_bwa_identity",
+        "compat_thread_invariance",
+    ):
+        rule = _code_only(COMPARE_SMK.split(f"rule {rule_name}:")[1].split("\nrule ")[0])
+        assert "| tee" in rule, f"{rule_name} must tee the fgumi output"
+        assert ">&2" in rule, f"{rule_name} must send the diff detail to stderr"
+        # The regression is specifically "captured stderr into the report file",
+        # i.e. a `2>&1` whose target is the redirect rather than the tee pipe.
+        assert "> {output.report}.tmp 2>&1" not in rule, (
+            f"{rule_name} still redirects stderr into the report file, which is "
+            f"what strands the diagnosis on a failing worker"
+        )
+
+
+def test_fgumi_gates_depend_on_pipefail_to_see_a_failure() -> None:
+    """`tee` exits 0, so the gate's exit status is the pipeline's last command
+    unless `pipefail` is set — without it a DIFFER would be reported as success.
+
+    snakemake happens to prepend `set -euo pipefail` today, but only while
+    nothing calls `shell.prefix()`, which replaces that prefix wholesale. These
+    rules set it explicitly for that reason, and the `tee` form makes the
+    dependency load-bearing rather than belt-and-braces.
+
+    Read through `_code_only` for the same reason as the test above: the rules'
+    own comments explain the `pipefail` dependency by naming it, so a raw match
+    passes even with the real directive deleted.
+    """
+    for rule_name in (
+        "compare_compat_identity",
+        "compare_bwa_identity",
+        "compat_thread_invariance",
+    ):
+        rule = _code_only(COMPARE_SMK.split(f"rule {rule_name}:")[1].split("\nrule ")[0])
+        assert "set -euo pipefail" in rule, f"{rule_name} must set pipefail explicitly"
+
+
 def test_fgumi_is_pinned_and_built_with_the_compare_feature() -> None:
     """`compare` is feature-gated off in a default fgumi build, and the pin is
     part of a release's evidence, so both must be explicit."""
@@ -602,3 +661,28 @@ def test_alt_aware_is_a_baseline_input_for_sibling_validation() -> None:
     }
     with pytest.raises(ValueError, match="alt_aware"):
         _validate_compat_siblings(samples)
+
+
+def test_fg_labs_checkout_fetches_the_sha_not_just_branches() -> None:
+    """The image must be buildable at a SHA that is no longer on any branch.
+
+    `git fetch --all` walks configured refspecs — branches and tags — so it can
+    only reach a commit that currently heads one. Every blessed golden in this
+    project is a release-please branch head (docs/release-allowances.yaml records
+    the pattern for v0.5.0 through v0.8.0), and those branches are deleted on
+    squash-merge. Rebuilding the v0.8.0 golden 4acb0956 failed with
+    `fatal: reference is not a tree` for exactly that reason, which makes every
+    historical golden unrebuildable — including for a bisect or a re-bless.
+
+    Asserted against non-comment lines only. The comment above that RUN step has
+    to name `git fetch --all` to explain why it is wrong, so a whole-file match
+    is satisfied by the prose — the same way the fgumi-gate guards were, before
+    they were moved onto `_code_only`.
+    """
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
+    code = "\n".join(line for line in dockerfile.splitlines() if not line.lstrip().startswith("#"))
+    assert "git fetch --quiet origin ${FG_LABS_SHA}" in code
+    assert "git fetch --all" not in code, (
+        "`git fetch --all` cannot reach a commit that is not a branch head; "
+        "fetch the SHA directly so deleted release branches stay buildable"
+    )

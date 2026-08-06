@@ -38,6 +38,10 @@ benchmark.db
 benchmark.db-wal
 benchmark.db-shm
 
+# fgumi built from its pinned git ref by `pixi run install-fgumi`, for the
+# non-primary comparison test. A build artifact, not source.
+.fgumi/
+
 # Internal session notes / plans (kept out of public repo).
 docs/superpowers/
 
