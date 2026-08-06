@@ -867,6 +867,11 @@ def test_as_positive_int_rejects_anything_int_like(value: object) -> None:
         _as_positive_int("ladder entry", "threads", value)
 
 
+# Three is the smallest count whose median rejects a single outlier rep, which
+# is the failure the ladder actually sees (one host stall in one rung).
+_MIN_LADDER_REPS = 3
+
+
 def _thread_scaling_yaml(**overrides: object) -> dict[str, object]:
     """A minimal valid `thread_scaling` block, with keys overridable per test."""
     return {
@@ -889,6 +894,36 @@ def test_thread_scaling_accepts_a_well_formed_ladder() -> None:
     scaling = _thread_scaling()
     assert [(step.threads, step.reps) for step in scaling.ladder] == [(1, 1), (16, 3)]
     assert scaling.max_threads == EXPECTED_THREADS
+
+
+def test_shipped_ladder_replicates_t1_no_less_than_any_other_rung() -> None:
+    """T(1) must never be the least-replicated rung in the SHIPPED ladder.
+
+    `E(n) = T(1) / (n * T(n))` divides by T(1) at every rung, so T(1) is read
+    once per efficiency value and its noise lands in all of them at once. An
+    unreplicated T(1) is therefore the worst possible place to save ladder time,
+    which is exactly where the ladder used to save it.
+
+    Not hypothetical: with reps:1 at t=1, the measured value fell monotonically
+    1506.8 -> 1342.3 -> 1244.7 s over three releases whose diffs contain no SIMD,
+    FMI or Makefile change, while the 5-rep sweep stayed flat. That drift both
+    manufactured a Gate #3 failure on the v0.9.0 bless and ratchets the bar for
+    the next release.
+
+    Asserted against `load_config`, not the YAML text, so it holds however the
+    ladder is spelled -- and stated as a relation to the other rungs rather than
+    a hardcoded 3, so retuning the ladder's depth cannot quietly re-strand T(1).
+    """
+    ladder = load_config(CONFIG_DIR).thread_scaling.ladder
+    reps = {step.threads: step.reps for step in ladder}
+    assert 1 in reps, "the ladder must have a T(1) rung; efficiency is undefined without it"
+    assert reps[1] >= max(reps.values()), (
+        f"T(1) is replicated {reps[1]}x but some rung has more ({max(reps.values())}x); "
+        "T(1) is the divisor for every efficiency value and must be the best-measured rung"
+    )
+    assert min(reps.values()) >= _MIN_LADDER_REPS, (
+        f"every rung needs >= {_MIN_LADDER_REPS} reps for a meaningful median; got {reps}"
+    )
 
 
 @pytest.mark.parametrize(
