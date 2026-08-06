@@ -8,7 +8,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from bwa_mem3_bench.storage import VS_BASELINE, VS_DEFAULT, VS_GOLDEN
+from bwa_mem3_bench.storage import VS_BASELINE, VS_DEFAULT, VS_GOLDEN, VS_X86
 from bwa_mem3_bench.storage.sqlite import (
     upsert_accuracy,
     upsert_comparison,
@@ -18,6 +18,19 @@ from bwa_mem3_bench.storage.sqlite import (
 )
 
 _MIN_TSV_LINES = 2  # header + at least one data row (timing, meth, etc.)
+
+# The comparison kinds that produce a compare-bams JSON report, and so have
+# something to ingest. A SUBSET of `workflow_config.COMPARE_KINDS`: `vs_bwa` is
+# gated by `fgumi compare bams` and emits `bwa-identity.txt`, a pass/fail text
+# report with no metrics.
+#
+# Ordered as the concordance chain reads: against upstream, against the previous
+# release, ARM against x86, then the `--fast` preset against its own default.
+# `test_ingest_covers_every_compare_json_the_workflow_produces` derives the same
+# set from the rule outputs and fails if the two drift — a kind missing here is
+# computed, paid for, and written to S3, then silently dropped on the way to the
+# DB, which is how `vs-x86` went unrecorded for the project's whole history.
+INGESTED_COMPARE_KINDS = (VS_BASELINE, VS_GOLDEN, VS_X86, VS_DEFAULT)
 
 # compare-bams NON-PRIMARY divergence fields, stored as a JSON blob in
 # comparisons.supp_json. Absent on older comparison JSON (pre-supp-metrics), and
@@ -173,10 +186,17 @@ def ingest_run(
                 meta: dict[str, Any] = _parse_json_file(meta_path) if meta_path.exists() else {}
                 process_seconds, index_read_seconds = _parse_bwa_stderr(bwa_stderr_path)
 
+                # Read count comes from whichever comparison the cell actually
+                # ran. ARM cells have no `vs-baseline` (no upstream ARM build),
+                # so keying on it alone left `reads_processed` at 0 for every
+                # ARM trial. Ordered by preference: `vs-baseline` first so an
+                # x86 cell keeps reporting the count it always has.
                 reads_processed = 0
-                vs_baseline_path = rep_dir / "compare" / "vs-baseline.json"
-                if vs_baseline_path.exists():
-                    reads_processed = int(_parse_json_file(vs_baseline_path).get("total_reads", 0))
+                for kind in INGESTED_COMPARE_KINDS:
+                    path = rep_dir / "compare" / f"{kind}.json"
+                    if path.exists():
+                        reads_processed = int(_parse_json_file(path).get("total_reads", 0))
+                        break
 
                 trial_id = upsert_trial(
                     conn,
@@ -206,7 +226,7 @@ def ingest_run(
                     commit=False,
                 )
 
-                for kind in (VS_BASELINE, VS_GOLDEN, VS_DEFAULT):
+                for kind in INGESTED_COMPARE_KINDS:
                     path = rep_dir / "compare" / f"{kind}.json"
                     if not path.exists():
                         continue

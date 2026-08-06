@@ -8,6 +8,7 @@ import pytest
 
 from bwa_mem3_bench.storage.ingest import (
     _SUPP_KEYS,
+    INGESTED_COMPARE_KINDS,
     _parse_bwa_stderr,
     _parse_eval_txt,
     _parse_meth_tsv,
@@ -114,6 +115,71 @@ def test_ingest_vs_default_comparison(db_path: Path, tmp_path: Path) -> None:
     ).fetchone()
     assert comp == ("vs-default", 99.35, 2003, 1990)
     conn.close()
+
+
+def test_ingest_vs_x86_comparison(db_path: Path, tmp_path: Path) -> None:
+    """An ARM cell's `compare/vs-x86.json` ingests, and supplies `reads_processed`.
+
+    ARM has no upstream bwa-mem2 build, so `rule all` sends those cells to
+    `vs-x86` instead of `vs-baseline` — the ARM-vs-x86 half of the concordance
+    chain. Both facts here were broken together for the project's whole history
+    because ingest knew only `vs-baseline`: the comparison row was dropped
+    outright, and `reads_processed` fell back to 0 on every ARM trial (821 of
+    856 c7g and 950 of 986 c8g trials in the shipped DB). The numbers were in S3
+    the whole time, so nothing failed — they simply never arrived.
+    """
+    sha = "aa11bb22"
+    rep_dir = tmp_path / sha / "wgs-5M-alt" / "c8g" / "rep-1"
+    (rep_dir / "benchmarks").mkdir(parents=True)
+    (rep_dir / "compare").mkdir(parents=True)
+    (rep_dir / "benchmarks" / "timing.tsv").write_text(
+        _TIMING_HEADER + "\n"
+        "9.100\t0:00:09\t1024.50\t2048.00\t900.00\t950.00\t200.75\t50.25\t380.00\t40.10\n"
+    )
+    (rep_dir / "compare" / "vs-x86.json").write_text(
+        json.dumps(
+            {
+                "total_reads": 2003,
+                "concordant": 2003,
+                "concordance_pct": 100.0,
+                "by_class": {},
+            }
+        )
+    )
+
+    conn = connect(db_path)
+    assert ingest_run(conn, runs_root=tmp_path, fg_labs_sha=sha) == 1
+    comp = conn.execute(
+        "SELECT kind, concordance_pct, total, concordant FROM comparisons"
+    ).fetchone()
+    assert comp == ("vs-x86", 100.0, 2003, 2003)
+    # Asserted separately from the comparison row: an ingest that recorded the
+    # row but still read reads_processed only from vs-baseline would leave this
+    # at 0, which is exactly the shape of the original defect.
+    assert conn.execute("SELECT reads_processed FROM trials").fetchone() == (2003,)
+    conn.close()
+
+
+def test_ingest_covers_every_compare_json_the_workflow_produces() -> None:
+    """The ingested kinds must match the `compare/*.json` outputs rules declare.
+
+    `INGESTED_COMPARE_KINDS` is a hand-written list and the rules are the source
+    of truth, so the two can drift — and when they do, the loss is silent in the
+    worst direction: the comparison still runs, still costs a worker, still
+    lands in S3, and is simply absent from `benchmark.db`. That is how `vs-x86`
+    went missing for the project's entire history without a single failure.
+
+    Derived from the rule outputs rather than from `COMPARE_KINDS`, which is a
+    superset: `vs_bwa` is gated by `fgumi compare bams` and emits
+    `bwa-identity.txt`, not compare-bams JSON, so it has nothing to ingest.
+    """
+    smk = (Path(__file__).parents[1] / "workflow" / "rules" / "compare.smk").read_text()
+    produced = set(re.findall(r'compare/([a-z0-9-]+)\.json"', smk))
+    assert produced, "no compare/*.json rule outputs found — has compare.smk moved?"
+    assert produced == set(INGESTED_COMPARE_KINDS), (
+        "ingest and the workflow disagree about which comparisons produce JSON; "
+        f"rules emit {sorted(produced)}, ingest reads {sorted(INGESTED_COMPARE_KINDS)}"
+    )
 
 
 def test_supp_json_extracts_only_supp_keys() -> None:
