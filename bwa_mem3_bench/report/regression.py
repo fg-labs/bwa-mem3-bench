@@ -52,6 +52,32 @@ DRIFT_MARGIN_PCT = 0.001
 # instead of NaN so the markdown table stays tidy.
 _MIN_REPS_FOR_CV = 2
 
+# Gate #3: the efficiency a perfectly-scaling run achieves, and how far past it
+# a BASELINE may read before the gate refuses to use it as a bar.
+#
+# E(n) = T(1) / (n * T(n)) above 100% claims the run got more than n-fold faster
+# on n threads. Superlinear speedup is real in workloads whose per-thread
+# working set shrinks into cache; this is not one of those — the FMI index is
+# shared and multi-gigabyte — so an excess here means T(1) is inconsistent with
+# the T(n) beside it, not that the aligner beat physics.
+#
+# The tolerance exists because efficiency divides two measured timings, so a
+# hair over 100% is ordinary noise. The effective rejection boundary is therefore
+# 100 + 2 = 102%, and only a baseline reading STRICTLY above that is refused.
+# Beyond it, the ladder's T(1) is not a fact worth dividing by, and REJECTING the
+# baseline is the honest response: gating
+# against an inflated bar demands the new release also scale superlinearly,
+# which no release can do.
+#
+# Not hypothetical. The v0.8.0 golden recorded 101-104% at five rungs off a
+# single unreplicated T(1); re-measured it came back 8.4% faster (1341.22 ->
+# 1228.33 s, 3 reps, 1.3% spread). Against that bar a v0.9.0 that was faster at
+# every rung in absolute terms reported a 9.81 pp REGRESSION. bwa-mem3-bench#52
+# replicates every rung so T(1) is no longer a single draw; this is the second
+# half of that fix, for baselines already recorded under the old ladder.
+_PERFECT_EFFICIENCY_PCT = 100.0
+_SUPERLINEAR_TOLERANCE_PP = 2.0
+
 
 def _cv_pct(series: pd.Series) -> float:
     if len(series) < _MIN_REPS_FOR_CV:
@@ -279,6 +305,30 @@ def _scaling_efficiency(db_path: Path, sha: str) -> pd.DataFrame:
     return pd.DataFrame(out)
 
 
+def _unusable_baselines(prev: pd.DataFrame) -> set[tuple[str, str]]:
+    """(sample, arch) ladders whose efficiency is too high to divide by.
+
+    Rejection is per LADDER rather than per rung, because `T(1)` is the divisor
+    at every rung: the rung that reads superlinear is the symptom, and every
+    other rung of that same ladder carries the identical inflated divisor. v0.8.0
+    is the worked example — its t=64 read 98.4%, under 100 only because real
+    scaling loss at 64 threads ate the inflation, so gating against that rung
+    would have been exactly as wrong as gating against its visibly-superlinear
+    t=16.
+
+    Derived from the COMPLETE previous ladder, deliberately not from the
+    new-vs-prev join. The join keeps only thread counts both releases measured,
+    so judging on it would make the rejection depend on which rungs happen to
+    overlap — and a trimmed or retuned new ladder (`--ladder` is configurable)
+    would then hide the evidence while leaving the bad `T(1)` in play.
+    """
+    return {
+        key
+        for key, grp in prev.groupby(["sample", "arch"])
+        if grp["efficiency_pct"].max() > _PERFECT_EFFICIENCY_PCT + _SUPERLINEAR_TOLERANCE_PP
+    }
+
+
 def _scaling_gate(db_path: Path, new_sha: str, prev_sha: str, max_drop_pp: float) -> pd.DataFrame:
     """Gate #3: thread-scaling efficiency must not regress vs the last release.
 
@@ -289,6 +339,10 @@ def _scaling_gate(db_path: Path, new_sha: str, prev_sha: str, max_drop_pp: float
     Returns an empty frame when either run lacks a ladder — notably the FIRST
     run after this gate is introduced, which has no predecessor to compare
     against and must not fail closed for that reason alone.
+
+    A baseline whose efficiency exceeds 100% by more than
+    `_SUPERLINEAR_TOLERANCE_PP` — i.e. reads above 102% — is REJECTED rather than
+    used as a bar, and the whole ladder goes with it. See `_unusable_baselines`.
     """
     new = _scaling_efficiency(db_path, new_sha)
     prev = _scaling_efficiency(db_path, prev_sha)
@@ -298,7 +352,15 @@ def _scaling_gate(db_path: Path, new_sha: str, prev_sha: str, max_drop_pp: float
     if merged.empty:
         return merged
     merged["drop_pp"] = merged["efficiency_pct_prev"] - merged["efficiency_pct_new"]
-    merged["verdict"] = ["REGRESSION" if d > max_drop_pp else "ok" for d in merged["drop_pp"]]
+    unusable = _unusable_baselines(prev)
+    merged["verdict"] = [
+        "unusable_baseline"
+        if (sample, arch) in unusable
+        else ("REGRESSION" if drop > max_drop_pp else "ok")
+        for sample, arch, drop in zip(
+            merged["sample"], merged["arch"], merged["drop_pp"], strict=True
+        )
+    ]
     return merged.sort_values(["sample", "arch", "threads"]).reset_index(drop=True)
 
 
@@ -306,6 +368,26 @@ def _scaling_section(scaling: pd.DataFrame) -> list[str]:
     """Markdown for Gate #3, or nothing when neither run carried a ladder."""
     if scaling.empty:
         return []
+    rejected = sorted(
+        {
+            f"{s}/{a}"
+            for s, a, v in zip(scaling["sample"], scaling["arch"], scaling["verdict"], strict=True)
+            if v == "unusable_baseline"
+        }
+    )
+    note = (
+        [
+            "",
+            f"> **Baseline rejected for {', '.join(rejected)}.** The previous release's "
+            f"ladder reads above {_PERFECT_EFFICIENCY_PCT + _SUPERLINEAR_TOLERANCE_PP:.0f}% "
+            "efficiency, i.e. more than n-fold faster on n threads. That means its T(1) is "
+            "inconsistent with the T(n) beside it, and since T(1) is the divisor at every "
+            "rung it inflates the whole ladder — so these rungs are reported, not gated. "
+            "Compare the absolute per-rung times instead, or re-measure the baseline's T(1).",
+        ]
+        if rejected
+        else []
+    )
     return [
         "## Gate #3 — thread-scaling efficiency vs last release",
         "",
@@ -326,6 +408,7 @@ def _scaling_section(scaling: pd.DataFrame) -> list[str]:
             .tolist(),
             float_fmt="{:.2f}",
         ),
+        *note,
         "",
     ]
 
