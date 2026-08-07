@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,7 @@ from bwa_mem3_bench.storage import VS_BASELINE, VS_DEFAULT, VS_GOLDEN, VS_X86
 from bwa_mem3_bench.storage.sqlite import (
     upsert_accuracy,
     upsert_comparison,
+    upsert_host_probe,
     upsert_run,
     upsert_scaling,
     upsert_trial,
@@ -95,6 +98,16 @@ BASELINE_SHA_PREFIX = "baseline-bwa-mem2-"
 # (older ladders simply have NULL phases rather than being rejected).
 _SCALING_COLUMNS = 6
 _SCALING_COLUMNS_FULL = 10
+
+# tachyon reports its working set in bytes; `host_probes` stores MB.
+_BYTES_PER_MB = 1024 * 1024
+
+# Bounds for validating probe-record numbers before they reach SQLite. A JSON
+# integer has no width limit, so both of these are reachable from a corrupt
+# producer and both raise rather than storing something wrong.
+_FLOAT_MAX = sys.float_info.max
+_SQLITE_INT_MIN = -(2**63)
+_SQLITE_INT_MAX = 2**63 - 1
 
 
 def _maybe_float(cell: str) -> float | None:
@@ -628,6 +641,152 @@ def ingest_accuracy(
     return count
 
 
+# The sentinel `emit-host-meta` writes when it cannot reach IMDS. Mapped to NULL
+# rather than stored verbatim, because this column exists to be JOINed on: two
+# unattributed cells both carrying the string "unknown" would MATCH each other and
+# claim they shared a machine, which is the opposite of the truth. NULL never
+# equals NULL in SQL, so an unattributed row correctly fails to join instead.
+#
+# NOTE this diverges from `trials.instance_id`, which stores the sentinel
+# verbatim (see `ingest_run`). Left alone here deliberately — changing it would
+# rewrite the semantics of existing rows and belongs in its own change — so a
+# trials-to-trials join on instance_id can still produce that false match.
+_UNKNOWN_HOST = "unknown"
+
+
+def _host_instance_id(meta_path: Path) -> str | None:
+    """The EC2 instance id from a ``meta.json``, or None if unavailable.
+
+    None covers all three ways it can be missing: no file at all (a ladder
+    collected before the rule emitted one), no key, and the ``unknown`` sentinel
+    a worker writes when IMDS is unreachable.
+    """
+    if not meta_path.exists():
+        return None
+    value = _parse_json_file(meta_path).get("instance_id")
+    if not value or value == _UNKNOWN_HOST:
+        return None
+    return str(value)
+
+
+def _probe_text(record: dict[str, Any], key: str) -> str | None:
+    """A string field of a probe record, or None if it is not a string.
+
+    Type-checked rather than coerced with ``str()``: stringifying a stray dict
+    would persist ``"{}"`` as though the probe had reported it.
+    """
+    value = record.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _probe_number(record: dict[str, Any], key: str) -> float | None:
+    """A finite numeric field of a probe record, or None.
+
+    Rejects four things that all reach SQLite as something other than a usable
+    measurement: non-numeric types (a dict raises on parameter binding), bools
+    (``True`` is an int in Python and would store as 1), non-finite floats —
+    `json.loads` accepts the ``NaN`` / ``Infinity`` literals by default, and
+    SQLite silently stores NaN as NULL while keeping inf as inf, so neither
+    survives as the number it claimed to be — and integers too large to convert.
+
+    That last one is the non-obvious case: a JSON integer is UNBOUNDED, so both
+    ``float()`` and ``math.isfinite()`` raise ``OverflowError`` on one that
+    exceeds a double. The magnitude check has to come first, and it compares
+    against a float without converting, because Python's int/float comparison is
+    exact and cannot overflow. A `float` operand needs no such check —
+    `json.loads` already maps an over-large literal to ``inf``, which the
+    finiteness test rejects.
+    """
+    value = record.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, int) and not -_FLOAT_MAX <= value <= _FLOAT_MAX:
+        return None
+    return float(value) if math.isfinite(value) else None
+
+
+def _probe_int(record: dict[str, Any], key: str) -> int | None:
+    """An integer field of a probe record, or None.
+
+    Bools are not integers here (``True`` would store as 1, indistinguishable
+    from a real single-threaded reading), and neither is an integer outside
+    SQLite's signed 64-bit INTEGER range — binding one raises ``OverflowError``,
+    which would abort the whole ingest over a diagnostic field.
+    """
+    value = record.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    return value if _SQLITE_INT_MIN <= value <= _SQLITE_INT_MAX else None
+
+
+def _ingest_host_probes(  # noqa: PLR0913
+    conn: sqlite3.Connection,
+    *,
+    probe_path: Path,
+    fg_labs_sha: str,
+    sample: str,
+    arch: str,
+    instance_id: str | None,
+) -> None:
+    """Ingest tachyon readings from a ``host-probe.jsonl``.
+
+    One JSON record per line, as appended by `emit-host-probe`. A record whose
+    probe could not run carries ``status: unavailable`` with null measurements;
+    it is still stored, because "we tried and could not measure" is a different
+    fact from "we never looked" and only the row distinguishes them.
+
+    Nothing here may be fatal: these readings are diagnostic, and one malformed
+    record must not cost the ladder its rungs. That takes more than catching a
+    JSON decode error — a *well-formed* record whose field holds an object or list
+    (``{"threads": {}}``) raises on SQLite parameter binding, which aborts the
+    whole `ingest_scaling` call and persists ZERO rungs of a ~45-minute ladder.
+    Measured, not theorised. So every field is type-checked before the upsert, and
+    a field that fails becomes NULL — the same shape an `unavailable` reading
+    already produces, which is a state every consumer must already handle.
+
+    A record is skipped outright only when ``phase`` is unusable, because that is
+    the row's identity and its column is NOT NULL.
+    """
+    if not probe_path.exists():
+        return
+    for line in probe_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        phase = _probe_text(record, "phase")
+        if not phase:
+            continue
+        working_set = _probe_number(record, "working_set_bytes_per_thread")
+        upsert_host_probe(
+            conn,
+            fg_labs_sha=fg_labs_sha,
+            sample=sample,
+            arch=arch,
+            phase=phase,
+            instance_id=instance_id,
+            probe_version=_probe_text(record, "probe_version"),
+            rustc=_probe_text(record, "rustc"),
+            m_accesses_per_sec=_probe_number(record, "million_accesses_per_sec"),
+            ns_per_access=_probe_number(record, "ns_per_access"),
+            threads=_probe_int(record, "threads"),
+            # Stored in MB because that is the unit the probe's own docs reason
+            # in ("64 MB per thread clears the LLC of every instance type this
+            # project benchmarks"), and comparing a recorded working set to that
+            # guidance should not require dividing by 2^20 first.
+            working_set_mb_per_thread=(
+                working_set / _BYTES_PER_MB if working_set is not None else None
+            ),
+            seconds=_probe_number(record, "seconds"),
+            status=_probe_text(record, "status"),
+            commit=False,
+        )
+
+
 def ingest_scaling(
     conn: sqlite3.Connection,
     *,
@@ -643,10 +802,17 @@ def ingest_scaling(
     were added later, so a six-column row from an older ladder still loads, with
     NULL phases (see `_SCALING_COLUMNS`).
 
+    Two sibling artifacts are read when present, and skipped without complaint
+    when not — ladders collected before they existed still ingest:
+    ``meta.json`` (the host the whole ladder ran on) and ``host-probe.jsonl``
+    (tachyon contention readings, one JSON record per line).
+
     :param conn: open benchmark DB connection.
     :param scaling_root: local mirror of the ``scaling/`` prefix.
     :param fg_labs_sha: run whose ladders should be ingested.
-    :return: number of rows ingested (0 when the run has no ladder).
+    :return: number of rows ingested (0 when the run has no ladder). Counts
+        ladder rungs only; host probes are attached to the cell, not rungs, and
+        are not benchmark measurements.
     """
     run_dir = scaling_root / fg_labs_sha
     if not run_dir.is_dir():
@@ -662,6 +828,17 @@ def ingest_scaling(
     for tsv in sorted(run_dir.glob("*/*/scaling.tsv")):
         sample = tsv.parent.parent.name
         arch = tsv.parent.name
+        # One host for the whole ladder, by construction (see the rule docstring),
+        # so one lookup serves every rung below.
+        instance_id = _host_instance_id(tsv.parent / "meta.json")
+        _ingest_host_probes(
+            conn,
+            probe_path=tsv.parent / "host-probe.jsonl",
+            fg_labs_sha=fg_labs_sha,
+            sample=sample,
+            arch=arch,
+            instance_id=instance_id,
+        )
         for line in tsv.read_text().splitlines()[1:]:  # skip header
             fields = line.split("\t")
             if len(fields) < _SCALING_COLUMNS:
@@ -687,6 +864,7 @@ def ingest_scaling(
                 read_io_seconds=_maybe_float(readio),
                 sam_io_seconds=_maybe_float(samio),
                 kernel_seconds=_maybe_float(kernel),
+                instance_id=instance_id,
                 commit=False,
             )
             ingested += 1

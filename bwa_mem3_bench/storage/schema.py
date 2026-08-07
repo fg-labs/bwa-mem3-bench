@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 # Increment this whenever the schema changes in a backward-incompatible way.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # `user_version` is INTERPOLATED from SCHEMA_VERSION, never written literally.
 # It used to be hardcoded, so bumping SCHEMA_VERSION without editing the PRAGMA
@@ -148,11 +148,81 @@ CREATE TABLE IF NOT EXISTS scaling (
     read_io_seconds  REAL,
     sam_io_seconds   REAL,
     kernel_seconds   REAL,
+    -- The EC2 instance the whole ladder ran on. Constant across every row of a
+    -- given (sha, sample, arch) by construction, and denormalised onto each row
+    -- so a rung can be joined to `host_probes` without a second lookup.
+    --
+    -- The ladder had no host attribution at all before this column, which is why
+    -- the v0.9.0 T(1) anomaly needed a same-day control run to settle: T(1) fell
+    -- 17% across three releases whose diffs contain no SIMD, FMI or Makefile
+    -- change, and nothing on record could say whether the three anchors were even
+    -- comparable machines. NULL for ladders ingested before the rule emitted
+    -- meta.json.
+    instance_id      TEXT,
     UNIQUE (fg_labs_sha, sample, arch, threads, rep)
+);
+
+-- tachyon host-contention readings, one row per (run, sample, arch, phase).
+--
+-- WHY A SEPARATE TABLE. The reading describes the HOST, not the trial: many
+-- trials (every rung of a ladder) share one instance and therefore one reading.
+-- Denormalising it onto `trials`/`scaling` would repeat the same measurement
+-- across rows and imply a per-row precision it does not have. Keyed by the cell
+-- that produced it, with `instance_id` recorded as the join column to whatever
+-- else ran on that machine.
+--
+-- WHAT THE SCORE IS FOR. `instance_id` says two runs used different hosts; it
+-- cannot say one was starved of memory bandwidth by a co-tenant. That is the
+-- mechanism actually observed on the v0.9.0 bless: cpu_seconds rose ~20% for
+-- byte-identical work while all 16 vCPUs stayed present and mean_load stayed
+-- flat, so no vCPU was lost — each core simply retired instructions more slowly.
+--
+-- USE IT TO FILTER, NEVER AS A DIVISOR. Normalising a wall time by this score
+-- assumes probe and workload degrade proportionally, which is plausible and
+-- unverified; and the probe is not purely a memory probe (per its own docs, 8
+-- CPU-only spinners with no memory traffic still cost ~18% of the score).
+-- Filtering only assumes a bad score means a bad host. See
+-- fg-labs/bwa-mem3-bench#56.
+CREATE TABLE IF NOT EXISTS host_probes (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    fg_labs_sha         TEXT NOT NULL REFERENCES runs(fg_labs_sha),
+    sample              TEXT NOT NULL,
+    arch                TEXT NOT NULL,
+    -- 'pre' / 'post' — the probe runs either side of the timed work. A pair that
+    -- agrees is evidence the work ran under stable conditions; a pair that
+    -- diverges says the measurements it brackets are not comparable to each
+    -- other, which no amount of within-run replication can detect.
+    phase               TEXT NOT NULL,
+    instance_id         TEXT,
+    -- Provenance, because a score is only comparable to another score taken with
+    -- the same probe. `probe_version` is what tachyon REPORTED (authoritative)
+    -- rather than the version the image meant to install; `rustc` is captured at
+    -- image build time because the runtime image has no Rust toolchain and
+    -- `cargo +stable install` floats the compiler between rebuilds.
+    probe_version       TEXT,
+    rustc               TEXT,
+    -- NULL when the probe could not run (`status` = 'unavailable'), which reads
+    -- as "not measured" rather than as a fast host.
+    m_accesses_per_sec  REAL,
+    ns_per_access       REAL,
+    threads             INTEGER,
+    working_set_mb_per_thread REAL,
+    seconds             REAL,
+    status              TEXT,
+    UNIQUE (fg_labs_sha, sample, arch, phase)
 );
 
 CREATE INDEX IF NOT EXISTS idx_trials_run ON trials(fg_labs_sha);
 CREATE INDEX IF NOT EXISTS idx_trials_sample_arch ON trials(sample, arch);
 CREATE INDEX IF NOT EXISTS idx_accuracy_run ON accuracy(fg_labs_sha);
 CREATE INDEX IF NOT EXISTS idx_scaling_run ON scaling(fg_labs_sha);
+-- On instance_id, for the CROSS-CELL question: "what else ran on that machine, and
+-- how contended was it", which is a join across runs. The within-cell question --
+-- "what were this ladder's own readings" -- joins on
+-- (fg_labs_sha, sample, arch) instead, served by the UNIQUE constraint above.
+--
+-- Keep the two apart. One instance can run more than one ladder, so joining a
+-- ladder to its probes on instance_id ALONE cross-joins: measured on a
+-- two-cell fixture it returned 8 rows where 4 are correct.
+CREATE INDEX IF NOT EXISTS idx_host_probes_instance ON host_probes(instance_id);
 """

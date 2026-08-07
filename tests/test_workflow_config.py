@@ -953,6 +953,32 @@ def test_thread_scaling_rejects_a_non_numeric_tolerance(drop: object) -> None:
         _thread_scaling(max_efficiency_drop_pp=drop)
 
 
+@pytest.mark.parametrize("seconds", [True, "10", 0, -1.0, float("nan"), float("inf")])
+def test_thread_scaling_rejects_a_bad_host_probe_budget(seconds: object) -> None:
+    """The value is pasted into the ladder's shell body, so it must fail at load.
+
+    A malformed one reaches `emit-host-probe` as a literal argument its numeric
+    guard rejects with a usage error, which would abort a ~45-minute Batch job over
+    a diagnostic. Zero is rejected too: a zero-second probe measures nothing.
+    """
+    with pytest.raises(ValueError, match="host_probe_seconds"):
+        _thread_scaling(host_probe_seconds=seconds)
+
+
+def test_host_probe_budget_is_optional_and_defaults() -> None:
+    """A diagnostic probe's duration is not a decision a config must make.
+
+    `_thread_scaling_yaml` omits the key entirely, so this also pins that an older
+    config (or a `--configfile` override that predates the probe) still loads.
+    """
+    assert _thread_scaling().host_probe_seconds > 0
+
+
+def test_shipped_config_sets_a_host_probe_budget() -> None:
+    """The shipped ladder must actually probe; the default is a fallback, not a plan."""
+    assert load_config(CONFIG_DIR).thread_scaling.host_probe_seconds > 0
+
+
 def test_parse_ladder_override_parses_and_sorts_rungs() -> None:
     steps = parse_ladder_override("64:3, 16:3,32:3")
     assert [(step.threads, step.reps) for step in steps] == [(16, 3), (32, 3), (64, 3)]
