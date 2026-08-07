@@ -9,7 +9,9 @@ would still succeed and still report a number, just not the number claimed.
 """
 
 import ast
+import importlib
 import re
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -769,3 +771,118 @@ def test_alt_base_sample_stays_out_of_the_regression_sweep() -> None:
     compares against the golden."""
     sweep = _code_only(SNAKEFILE.split("SWEEP_SAMPLES = [")[1].split("\n]")[0])
     assert "_is_alt_sample(s)" in sweep
+
+
+def test_tachyon_is_pinned_to_an_exact_version() -> None:
+    """The probe's version is what makes its readings comparable across releases.
+
+    tachyon measures the HOST -- memory access rate under current contention -- so
+    its scores get recorded beside timings and compared weeks later. A change to
+    WHAT it measures silently invalidates every earlier score, with no error to
+    notice, which makes a floating pin worse here than for a tool whose output is
+    a pass/fail verdict.
+
+    So an EXACT `x.y.z`, never a range and never a caret: `0.1` or `^0.1.0` would
+    let an image rebuild months later install a different probe and quietly
+    change what the numbers mean.
+    """
+    env = (REPO_ROOT / "docker" / "build-arg-defaults.env").read_text()
+    assert "TACHYON_VERSION=" in env
+    version = next(
+        line.split("=", 1)[1].strip()
+        for line in env.splitlines()
+        if line.startswith("TACHYON_VERSION=")
+    )
+    assert re.fullmatch(r"\d+\.\d+\.\d+", version), (
+        f"TACHYON_VERSION must be an exact x.y.z, got {version!r}"
+    )
+    # `--locked` matters as much as the version: without it cargo may resolve
+    # dependencies differently from what the crate was published with.
+    #
+    # Shell continuations are joined first -- the install is written across two
+    # lines, so a per-line search finds `cargo` and `tachyon` in different lines
+    # and matches neither.
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text().replace("\\\n", " ")
+    install = next(
+        line for line in dockerfile.splitlines() if "tachyon" in line and "cargo" in line
+    )
+    assert "--locked" in install, install
+    assert '--version "${TACHYON_VERSION}"' in install, (
+        f"the install must consume the pinned ARG, not a literal: {install}"
+    )
+
+
+def test_every_defaultless_dockerfile_arg_reaches_the_generated_build_command() -> None:
+    """An `ARG` with no default that `cli build` never passes is a silent empty string.
+
+    BuildKit exports an unset `ARG` to the RUN shell as a set-but-EMPTY variable,
+    so a forgotten `--build-arg` does not fail the build -- it produces
+    `--rev ""`, or falls through to whatever the tool's own default is. This repo
+    has already shipped months of sse41-baselined binaries on AVX2 hosts through
+    exactly that hole (the pre-#6 `BASELINE_ARCH` bug).
+
+    Asserted against the COMMAND `build()` actually generates, captured by
+    monkeypatching `run_cmd`, rather than by grepping build.py's source. A raw
+    text search is satisfied by a comment, a docstring or a dead branch -- the
+    same trap `_code_only` exists for elsewhere in this file -- and would pass
+    while the flag never reached buildx.
+
+    Scoped to DEFAULTLESS args on purpose. `ARG LLVM_VERSION=19` and
+    `ARG TRICORD_VERSION=0.1.2` are safe unpassed because the in-Dockerfile
+    default applies, so requiring them would be noise that trains people to
+    weaken the test. BuildKit's own `TARGET*`/`BUILD*` built-ins are excluded for
+    the same reason.
+
+    Derived from the Dockerfile, so adding a pin and forgetting to wire it up
+    fails here instead of at runtime.
+    """
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
+    buildkit_builtins = {
+        "TARGETPLATFORM",
+        "TARGETOS",
+        "TARGETARCH",
+        "TARGETVARIANT",
+        "BUILDPLATFORM",
+        "BUILDOS",
+        "BUILDARCH",
+        "BUILDVARIANT",
+    }
+    defaultless = {
+        arg
+        for arg in re.findall(r"^ARG ([A-Z][A-Z0-9_]*)\s*$", dockerfile, re.MULTILINE)
+        if arg not in buildkit_builtins
+    }
+    assert defaultless, "no defaultless ARGs found -- has the Dockerfile moved?"
+
+    # `bwa_mem3_bench.commands.build` the ATTRIBUTE is the re-exported function,
+    # not the module, so `import ... as` binds the wrong object. Fetch the module
+    # itself.
+    build_module = importlib.import_module("bwa_mem3_bench.commands.build")
+
+    captured: list[list[str]] = []
+
+    def _capture(cmd: list[str], *, dry_run: bool, cwd: Path | None = None) -> None:  # noqa: ARG001
+        captured.append(cmd)
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(build_module, "run_cmd", _capture)
+        build_module.build(fg_labs_sha="0" * 40, image_name="test", dry_run=True)
+    finally:
+        monkeypatch.undo()
+
+    buildx = next((c for c in captured if "buildx" in c), None)
+    assert buildx is not None, f"no buildx command generated; captured {captured}"
+    # Read the NAME half of each --build-arg pair, so a coincidental match
+    # elsewhere in the command line cannot satisfy the assertion.
+    passed = {
+        arg.split("=", 1)[0]
+        for flag, arg in pairwise(buildx)
+        if flag == "--build-arg" and "=" in arg
+    }
+    missing = sorted(defaultless - passed)
+    assert not missing, (
+        f"Dockerfile declares defaultless ARG(s) the generated buildx command "
+        f"never passes: {missing}. BuildKit exports those as set-but-empty, which "
+        "does not fail the build -- it silently builds the wrong thing."
+    )
