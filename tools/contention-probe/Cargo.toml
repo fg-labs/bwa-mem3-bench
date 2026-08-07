@@ -1,0 +1,20 @@
+[package]
+name = "contention-probe"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Measure a host's memory-latency capability, to separate host quality from code change"
+
+[[bin]]
+name = "contention-probe"
+path = "src/main.rs"
+
+[lib]
+name = "contention_probe"
+path = "src/lib.rs"
+
+[lints]
+workspace = true

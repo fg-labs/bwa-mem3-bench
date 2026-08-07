@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["tools/compare-bams"]
+members = ["tools/compare-bams", "tools/contention-probe"]
 
 [workspace.package]
 edition = "2021"
