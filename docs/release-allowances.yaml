@@ -446,3 +446,9 @@ allowances:
       SHA as an alias below, same pattern as v0.5.0 (9dd30dd0 / b2fea46),
       v0.6.0 (48cf0a4 / a887e36) and v0.7.0 (04777b3c / 228a61b).
     expected_drift_pct: 0.0
+    # tree-identical: 4d341b7 and 375dfa9 share tree 92bb1754, so the squash-merge
+    # of #361 to the shipped v0.9.0 tag cannot produce different output and needs
+    # no re-measurement (case 1 in `ReleaseAllowance.aliases`). Aliased so a
+    # vs-golden run pinned to the tag resolves to this golden with no BAM re-copy.
+    aliases:
+      - 375dfa9a7b948da890bf7d8b255ac44d98dd0d17   # v0.9.0 release tag (squash-merge of #361, tree-identical to 4d341b7)
