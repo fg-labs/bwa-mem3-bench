@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 # Increment this whenever the schema changes in a backward-incompatible way.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # `user_version` is INTERPOLATED from SCHEMA_VERSION, never written literally.
 # It used to be hardcoded, so bumping SCHEMA_VERSION without editing the PRAGMA
@@ -35,6 +35,14 @@ CREATE TABLE IF NOT EXISTS trials (
     -- NULL for trials predating the IMDSv2 fix, whose meta.json has no host at
     -- all. See fg-labs/bwa-mem3-bench#56.
     instance_id         TEXT,
+    -- UTC ISO-8601 stamp of WHEN the worker measured this cell, from meta.json.
+    -- A run's S3 prefix is not proof that everything under it belongs to that
+    -- run: re-running one sample against an old SHA (a control, a bisect, a
+    -- reproduction) writes into that SHA's tree, and ingest then folds those
+    -- measurements into the release's medians. The v0.8.0 golden carries 23 such
+    -- cells, benched three days after the release. NULL for trials predating the
+    -- stamp -- `late_cells` falls back to artifact mtime for those.
+    measured_at         TEXT,
     spot_price          REAL,
     wall_seconds        REAL,
     max_rss_mb          REAL,

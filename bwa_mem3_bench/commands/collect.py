@@ -8,11 +8,14 @@ from pathlib import Path
 from bwa_mem3_bench import DB_PATH, LOCAL_MIRROR_ROOT, REPO_ROOT, aws_config
 from bwa_mem3_bench.commands._run import run_cmd
 from bwa_mem3_bench.storage.ingest import (
+    LATE_CELL_THRESHOLD_HOURS,
+    LateCell,
     ingest_accuracy,
     ingest_baseline,
     ingest_minibwa,
     ingest_run,
     ingest_scaling,
+    late_cells,
 )
 from bwa_mem3_bench.storage.sqlite import connect
 from bwa_mem3_bench.workflow_config import load_config
@@ -38,11 +41,47 @@ def _sync_prefix(remote: str, local: str, *, dry_run: bool) -> None:
     run_cmd(cmd, dry_run=dry_run)
 
 
+def _report_late_cells(cells: list[LateCell], *, ingesting: bool) -> None:
+    """Print the late-cell warning. Loud by design — it is the whole mechanism."""
+    verb = "INGESTING" if ingesting else "SKIPPING"
+    print(
+        f"\n!! {len(cells)} cell(s) were measured more than "
+        f"{LATE_CELL_THRESHOLD_HOURS:g}h from this run's median time — {verb} them.",
+        file=sys.stderr,
+    )
+    for cell in cells:
+        print(
+            f"     {cell.sample}/{cell.arch}/rep-{cell.rep}  "
+            f"{cell.measured_at}  ({cell.hours_late:+.1f}h)",
+            file=sys.stderr,
+        )
+    if ingesting:
+        print(
+            "   These are folded into the run's record because --ingest-late-cells\n"
+            "   was passed. If they are from a control or reproduction run, they will\n"
+            "   shift the medians every future perf gate compares against.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "   A run's S3 prefix is not proof that everything under it belongs to\n"
+            "   that run: re-running one sample against an old SHA writes into that\n"
+            "   SHA's tree. Pass --ingest-late-cells if they really are part of it.\n"
+            "   NOTE this skips the WRITE only. Both ingests upsert, so rows an\n"
+            "   earlier collect already wrote for these cells are still in the DB\n"
+            "   and every report still reads them. Clear them once, by key:\n"
+            "     DELETE FROM trials   WHERE fg_labs_sha=? AND sample=? AND arch=? AND rep=?;\n"
+            "     DELETE FROM accuracy WHERE fg_labs_sha=? AND sample=? AND arch=? AND rep=?;",
+            file=sys.stderr,
+        )
+
+
 def collect(
     *,
     fg_labs_sha: str,
     bucket: str = _DEFAULT_BUCKET,
     ingest: bool = True,
+    ingest_late_cells: bool = False,
     dry_run: bool = False,
 ) -> None:
     """Pull S3 artifacts (benchmarks, compare, meta) for a completed run.
@@ -51,10 +90,18 @@ def collect(
     (same layout as S3, override via ``BWA_MEM3_BENCH_LOCAL_MIRROR``), excluding
     large BAM files. Then populates ``benchmark.db``.
 
+    Cells measured far outside the run's own time window are reported and
+    SKIPPED by default — see `late_cells`. The v0.8.0 golden's tree holds 23 such
+    cells from a control run taken three days later, and ingesting them shifts
+    the medians every future perf gate reads.
+
     :param fg_labs_sha: fg-labs SHA.
     :param bucket: source bucket. Default from `cdk/outputs.json` /
         `BWA_MEM3_BENCH_S3_BUCKET`.
     :param ingest: after sync, populate SQLite from the pulled artifacts.
+    :param ingest_late_cells: also ingest cells measured outside the run's
+        window. Use when a run legitimately spans days (e.g. resumed after a
+        failure), NOT to silence the warning on a control run.
     :param dry_run: print commands only.
     """
     runs_root = LOCAL_MIRROR_ROOT / "runs"
@@ -88,15 +135,22 @@ def collect(
     )
 
     if ingest:
+        # Resolved from the freshly-synced tree, before anything is written to
+        # the DB, so the operator sees the warning even if ingest later fails.
+        late = late_cells(runs_root=runs_root, fg_labs_sha=fg_labs_sha)
+        if late:
+            _report_late_cells(late, ingesting=ingest_late_cells)
+        exclude = frozenset() if ingest_late_cells else frozenset(c.key for c in late)
+
         conn = connect(DB_PATH)
         try:
-            n = ingest_run(conn, runs_root=runs_root, fg_labs_sha=fg_labs_sha)
+            n = ingest_run(conn, runs_root=runs_root, fg_labs_sha=fg_labs_sha, exclude=exclude)
             print(f"ingested {n} trials into {DB_PATH}", file=sys.stderr)
 
             # Truth-based accuracy rows (holodeck eval) live alongside the timing
             # trees under runs/<sha>/.../eval/; only present for sim samples run
             # via the `accuracy` / `accuracy_smoke` targets.
-            a = ingest_accuracy(conn, runs_root=runs_root, fg_labs_sha=fg_labs_sha)
+            a = ingest_accuracy(conn, runs_root=runs_root, fg_labs_sha=fg_labs_sha, exclude=exclude)
             if a:
                 print(f"ingested {a} accuracy rows into {DB_PATH}", file=sys.stderr)
 

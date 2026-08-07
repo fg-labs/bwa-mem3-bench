@@ -371,6 +371,35 @@ def test_v4_db_migrates_to_v8_without_altering_a_fresh_scaling_table(db_path: Pa
     conn.close()
 
 
+def test_v8_db_migrates_to_v9_adding_measured_at(db_path: Path) -> None:
+    """A v8 DB owns a `trials` without `measured_at`, so the v9 ALTER must run.
+
+    Unlike the v8 step there is no lower bound to get right: `trials` exists in
+    every schema this code has ever written, so no version gets it freshly
+    CREATEd by the executescript and then ALTERed twice.
+    """
+    raw = sqlite3.connect(db_path)
+    raw.executescript(_V7_SCHEMA.replace("PRAGMA user_version = 7;", "PRAGMA user_version = 8;"))
+    raw.execute("INSERT INTO runs(fg_labs_sha, status) VALUES ('old', 'complete')")
+    raw.execute(
+        "INSERT INTO trials(fg_labs_sha, sample, arch, rep, wall_seconds) "
+        "VALUES ('old', 'wgs-5M', 'm7i', 1, 19.41)"
+    )
+    raw.commit()
+    raw.close()
+
+    conn = connect(db_path)
+    assert "measured_at" in _columns(conn, "trials")
+    (ver,) = conn.execute("PRAGMA user_version").fetchone()
+    assert ver == EXPECTED_SCHEMA_VERSION
+    # The pre-existing trial survives; NULL is the honest value for a cell
+    # measured before anything recorded when it ran.
+    assert conn.execute(
+        "SELECT wall_seconds, measured_at FROM trials WHERE fg_labs_sha = 'old'"
+    ).fetchone() == (19.41, None)
+    conn.close()
+
+
 def test_upsert_host_probe_is_keyed_on_phase(db_path: Path) -> None:
     """Two phases coexist; re-recording one phase updates it in place."""
     conn = connect(db_path)
