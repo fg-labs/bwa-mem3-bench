@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 # Increment this whenever the schema changes in a backward-incompatible way.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # `user_version` is INTERPOLATED from SCHEMA_VERSION, never written literally.
 # It used to be hardcoded, so bumping SCHEMA_VERSION without editing the PRAGMA
@@ -28,6 +28,13 @@ CREATE TABLE IF NOT EXISTS trials (
     rep                 INTEGER NOT NULL,
     instance_type       TEXT,
     availability_zone   TEXT,
+    -- The specific EC2 instance, not just its type. `instance_type` cannot
+    -- identify a host -- every m7i trial shares `m7i.4xlarge` -- and the host is
+    -- what varies: the same binary measured 18.89-25.01 s across reps on one
+    -- (sample, arch), while two reps that shared an instance agreed to 0.36%.
+    -- NULL for trials predating the IMDSv2 fix, whose meta.json has no host at
+    -- all. See fg-labs/bwa-mem3-bench#56.
+    instance_id         TEXT,
     spot_price          REAL,
     wall_seconds        REAL,
     max_rss_mb          REAL,
