@@ -2,6 +2,7 @@
 
 import json
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -43,6 +44,45 @@ def _write_minibwa_trial(root: Path, sha: str, cell: tuple[str, str, int], wall:
 
 FIXTURE = Path(__file__).parent / "fixtures" / "synthetic_run"
 BASELINE_FIXTURE = Path(__file__).parent / "fixtures" / "synthetic_baseline"
+
+# What a re-collection of a fixture tree reports. Idempotency tests need the
+# second pass to carry CHANGED values: re-ingesting identical input passes under
+# a conflict clause that overwrites nothing, so it proves only that no row was
+# appended. See fg-labs/bwa-mem3-bench#62.
+_RECOLLECTED_WALL_SECONDS = 99.125
+_RECOLLECTED_CONCORDANCE_PCT = 98.5
+
+
+def _recollected(source: Path, dest: Path) -> Path:
+    """Copy a fixture run/baseline tree with every measurement moved.
+
+    The fixtures are checked in and shared, so they are copied rather than
+    edited in place. Rewrites the wall-seconds column of every ``timing*.tsv``
+    and the concordance of every compare JSON — the two values the ingest tests
+    below assert on.
+
+    Every data row is rewritten and the row COUNT is preserved. Every fixture
+    holds exactly one measurement today, but reading only the first row would
+    silently truncate one that grows a second — leaving the re-collected tree
+    differing from its source in shape as well as in values, which is the
+    confound this helper exists to remove.
+    """
+    shutil.copytree(source, dest)
+    for tsv in dest.rglob("timing*.tsv"):
+        header, *rows = tsv.read_text().splitlines()
+        moved = []
+        for row in rows:
+            fields = row.split("\t")
+            fields[0] = f"{_RECOLLECTED_WALL_SECONDS:.3f}"
+            moved.append("\t".join(fields))
+        tsv.write_text("\n".join([header, *moved]) + "\n")
+    for js in dest.rglob("compare/*.json"):
+        payload = json.loads(js.read_text())
+        payload["concordance_pct"] = _RECOLLECTED_CONCORDANCE_PCT
+        payload["concordant"] = payload["total_reads"] - 1
+        js.write_text(json.dumps(payload))
+    return dest
+
 
 # Values matched against the synthetic bwa.stderr.log fixture under
 # tests/fixtures/synthetic_run/abc1234/smoke-1M/c7g/rep-1/benchmarks/.
@@ -300,15 +340,29 @@ def test_parse_bwa_stderr_truncated_log_returns_partial(tmp_path: Path) -> None:
 
 
 def test_ingest_is_idempotent(db_path: Path) -> None:
+    """Re-collecting must update trials and comparisons in place, not duplicate.
+
+    The second pass reads a tree whose measurements MOVED. Re-ingesting the
+    identical fixture twice, which this test used to do, passes under a conflict
+    clause that overwrites nothing — it proves only that no row was appended. See
+    fg-labs/bwa-mem3-bench#62; `tests/test_upsert_conflict_updates.py` pins the
+    same property one layer down, at each upsert.
+    """
     conn = connect(db_path)
     ingest_run(conn, runs_root=FIXTURE, fg_labs_sha="abc1234")
-    n = ingest_run(conn, runs_root=FIXTURE, fg_labs_sha="abc1234")
+    n = ingest_run(
+        conn, runs_root=_recollected(FIXTURE, db_path.parent / "recollected"), fg_labs_sha="abc1234"
+    )
     assert n == 1
 
     trials = conn.execute("SELECT COUNT(*) FROM trials").fetchone()
     assert trials == (1,)
     comparisons = conn.execute("SELECT COUNT(*) FROM comparisons").fetchone()
     assert comparisons == (1,)
+    (wall,) = conn.execute("SELECT wall_seconds FROM trials").fetchone()
+    assert wall == _RECOLLECTED_WALL_SECONDS
+    (pct,) = conn.execute("SELECT concordance_pct FROM comparisons").fetchone()
+    assert pct == _RECOLLECTED_CONCORDANCE_PCT
     conn.close()
 
 
@@ -359,15 +413,25 @@ def test_ingest_baseline_inserts_synthetic_sha_trials(db_path: Path) -> None:
 
 
 def test_ingest_baseline_idempotent(db_path: Path) -> None:
+    """Re-collecting the baseline cache must update its trials, not duplicate them."""
     conn = connect(db_path)
     ingest_baseline(conn, baseline_root=BASELINE_FIXTURE, tool_version="v2.2.1")
-    n = ingest_baseline(conn, baseline_root=BASELINE_FIXTURE, tool_version="v2.2.1")
+    n = ingest_baseline(
+        conn,
+        baseline_root=_recollected(BASELINE_FIXTURE, db_path.parent / "recollected-baseline"),
+        tool_version="v2.2.1",
+    )
     assert n == EXPECTED_BASELINE_TRIALS
     total = conn.execute(
         "SELECT COUNT(*) FROM trials WHERE fg_labs_sha = ?",
         (baseline_sha_for("v2.2.1"),),
     ).fetchone()
     assert total == (EXPECTED_BASELINE_TRIALS,)
+    walls = conn.execute(
+        "SELECT DISTINCT wall_seconds FROM trials WHERE fg_labs_sha = ?",
+        (baseline_sha_for("v2.2.1"),),
+    ).fetchall()
+    assert walls == [(_RECOLLECTED_WALL_SECONDS,)]
     conn.close()
 
 
@@ -431,17 +495,22 @@ def test_ingest_minibwa_inserts_synthetic_sha_trials(db_path: Path, tmp_path: Pa
 
 
 def test_ingest_minibwa_idempotent(db_path: Path, tmp_path: Path) -> None:
+    """Re-collecting a minibwa cell must update its trial, not duplicate it."""
     minibwa_root = tmp_path / "minibwa"
     _write_minibwa_trial(minibwa_root, _MINIBWA_SHA, ("smoke-1M", "c8g", 1), 5.0)
 
     conn = connect(db_path)
     ingest_minibwa(conn, minibwa_root=minibwa_root, minibwa_sha=_MINIBWA_SHA)
+    # Same cell, re-measured: `_write_minibwa_trial` overwrites the timing in place.
+    _write_minibwa_trial(
+        minibwa_root, _MINIBWA_SHA, ("smoke-1M", "c8g", 1), _RECOLLECTED_WALL_SECONDS
+    )
     ingest_minibwa(conn, minibwa_root=minibwa_root, minibwa_sha=_MINIBWA_SHA)
-    total = conn.execute(
-        "SELECT COUNT(*) FROM trials WHERE fg_labs_sha = ?",
+    rows = conn.execute(
+        "SELECT wall_seconds FROM trials WHERE fg_labs_sha = ?",
         (minibwa_sha_for(_MINIBWA_SHA),),
-    ).fetchone()
-    assert total == (1,)
+    ).fetchall()
+    assert rows == [(_RECOLLECTED_WALL_SECONDS,)]
     conn.close()
 
 
@@ -472,6 +541,22 @@ _VARIANTS_TSV = (
 )
 _METH_TSV = "n_cpg\tpearson_r\trmse\n500\t0.9700\t0.0400\n"
 
+# The same cell re-evaluated with a better placement rate, for the idempotency
+# test: an ALL row is what `_parse_eval_txt` surfaces into accuracy.
+_RECOLLECTED_CORRECT_PCT = 99.40
+_RECOLLECTED_EVAL_TXT = (
+    "mapq_bin\ttotal\tcorrect\tmismapped\tunmapped\tpct_correct\tpct_mismapped\tpct_unmapped\n"
+    "0\t10\t6\t4\t0\t60.00\t40.00\t0.00\n"
+    "60+\t990\t988\t1\t1\t99.80\t0.10\t0.10\n"
+    f"ALL\t1000\t994\t5\t1\t{_RECOLLECTED_CORRECT_PCT:.2f}\t0.50\t0.10\n"
+)
+
+
+def _eval_dir(runs_root: Path, sha: str, cell: tuple[str, str, int]) -> Path:
+    """The `runs/<sha>/<sample>/<arch>/rep-<n>/eval/` a holodeck eval writes into."""
+    sample, arch, rep = cell
+    return runs_root / sha / sample / arch / f"rep-{rep}" / "eval"
+
 
 def _write_eval_cell(
     runs_root: Path,
@@ -484,10 +569,11 @@ def _write_eval_cell(
     """Create a synthetic `runs/<sha>/<sample>/<arch>/rep-<n>/eval/<tool>.*` tree.
 
     Writes the three holodeck eval outputs; `meth=False` writes the empty
-    `.meth.tsv` placeholder the eval rule creates for non-meth samples.
+    `.meth.tsv` placeholder the eval rule creates for non-meth samples. To
+    re-write a cell with CHANGED numbers, overwrite the `.eval.txt` afterwards
+    via `_eval_dir` rather than threading a sixth parameter through here.
     """
-    sample, arch, rep = cell
-    eval_dir = runs_root / sha / sample / arch / f"rep-{rep}" / "eval"
+    eval_dir = _eval_dir(runs_root, sha, cell)
     eval_dir.mkdir(parents=True, exist_ok=True)
     (eval_dir / f"{tool}.eval.txt").write_text(_EVAL_TXT)
     (eval_dir / f"{tool}.variants.tsv").write_text(_VARIANTS_TSV)
@@ -600,14 +686,19 @@ def test_ingest_accuracy_inserts_arms(db_path: Path, tmp_path: Path) -> None:
 
 
 def test_ingest_accuracy_idempotent(db_path: Path, tmp_path: Path) -> None:
+    """Re-evaluating a cell must update its accuracy row, not duplicate it."""
     runs_root = tmp_path / "runs"
     sha = "abc1234"
-    _write_eval_cell(runs_root, sha, ("sim-wgs-vars", "c6a", 1), "fg-labs", meth=False)
+    cell = ("sim-wgs-vars", "c6a", 1)
+    _write_eval_cell(runs_root, sha, cell, "fg-labs", meth=False)
 
     conn = connect(db_path)
     ingest_accuracy(conn, runs_root=runs_root, fg_labs_sha=sha)
+    # The same cell re-evaluated against a newer aligner: same key, better score.
+    (_eval_dir(runs_root, sha, cell) / "fg-labs.eval.txt").write_text(_RECOLLECTED_EVAL_TXT)
     ingest_accuracy(conn, runs_root=runs_root, fg_labs_sha=sha)
-    assert conn.execute("SELECT COUNT(*) FROM accuracy").fetchone() == (1,)
+    rows = conn.execute("SELECT placement_correct_pct FROM accuracy").fetchall()
+    assert rows == [(_RECOLLECTED_CORRECT_PCT,)]
     conn.close()
 
 

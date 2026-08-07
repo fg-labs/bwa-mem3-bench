@@ -135,11 +135,23 @@ def test_connect_creates_tables(db_path: Path) -> None:
 
 
 def test_upsert_run_is_idempotent(db_path: Path) -> None:
+    """A second upsert updates the row rather than inserting a second one.
+
+    The second call carries a CHANGED tag and status. Repeating the identical
+    call, which this test used to do, passes under a conflict clause that
+    overwrites nothing — it shows only that no row was appended. The full
+    column-by-column contract, and `upsert_run`'s COALESCE asymmetry, live in
+    `tests/test_upsert_conflict_updates.py` (fg-labs/bwa-mem3-bench#62).
+    """
     conn = connect(db_path)
-    upsert_run(conn, fg_labs_sha="abc1234", upstream_tag="v2.2.1", status="complete")
-    upsert_run(conn, fg_labs_sha="abc1234", upstream_tag="v2.2.1", status="complete")
+    upsert_run(conn, fg_labs_sha="abc1234", upstream_tag="v2.2.1", status="running")
+    upsert_run(conn, fg_labs_sha="abc1234", upstream_tag="v2.3.0", status="complete")
     cur = conn.execute("SELECT COUNT(*) FROM runs WHERE fg_labs_sha = ?", ("abc1234",))
     assert cur.fetchone()[0] == 1
+    row = conn.execute(
+        "SELECT upstream_tag, status FROM runs WHERE fg_labs_sha = ?", ("abc1234",)
+    ).fetchone()
+    assert row == ("v2.3.0", "complete")
     conn.close()
 
 
