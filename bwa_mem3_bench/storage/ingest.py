@@ -219,6 +219,7 @@ def ingest_run(
                         if meta.get("availability_zone")
                         else None
                     ),
+                    instance_id=(str(meta.get("instance_id")) if meta.get("instance_id") else None),
                     spot_price=None,
                     status="ok",
                     process_seconds=process_seconds,
@@ -324,6 +325,7 @@ def ingest_baseline(
                         if meta.get("availability_zone")
                         else None
                     ),
+                    instance_id=(str(meta.get("instance_id")) if meta.get("instance_id") else None),
                     spot_price=None,
                     status="ok",
                     process_seconds=process_seconds,

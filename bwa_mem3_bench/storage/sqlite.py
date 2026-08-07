@@ -19,6 +19,8 @@ EXPECTED_SCHEMA_VERSION = SCHEMA_VERSION
 #            table, so no ALTER is needed; executescript creates it in place.
 #   v4 → v5: added the `scaling` table (thread-scaling ladder) — likewise a new
 #            table, created in place by executescript, no ALTER needed.
+#   v6 → v7: added trials.instance_id — `instance_type` cannot identify a
+#            HOST, and the host is the dominant source of wall-time variance.
 #   v5 → v6: added scaling.{main_mem,read_io,sam_io,kernel}_seconds — the phase
 #            breakdown from the aligner's runtime profile. Column additions, so
 #            these DO need ALTER for a DB already carrying v5 scaling rows.
@@ -79,6 +81,8 @@ def connect(db_path: Path) -> sqlite3.Connection:
             "kernel_seconds",
         ):
             conn.execute(f"ALTER TABLE scaling ADD COLUMN {column} REAL")
+    if existing_version < 7:  # noqa: PLR2004 — schema version, not a magic number
+        conn.execute("ALTER TABLE trials ADD COLUMN instance_id TEXT")
     if existing_version < EXPECTED_SCHEMA_VERSION:
         conn.execute(f"PRAGMA user_version = {EXPECTED_SCHEMA_VERSION}")
         conn.commit()
@@ -126,6 +130,7 @@ def upsert_trial(  # noqa: PLR0913
     instance_type: str | None,
     availability_zone: str | None,
     spot_price: float | None,
+    instance_id: str | None = None,
     status: str,
     process_seconds: float | None = None,
     index_read_seconds: float | None = None,
@@ -136,14 +141,15 @@ def upsert_trial(  # noqa: PLR0913
         """
         INSERT INTO trials (
             fg_labs_sha, sample, arch, rep, instance_type, availability_zone,
-            spot_price, wall_seconds, max_rss_mb, cpu_time, io_read_mb,
-            io_write_mb, mean_load, reads_processed, status,
+            instance_id, spot_price, wall_seconds, max_rss_mb, cpu_time,
+            io_read_mb, io_write_mb, mean_load, reads_processed, status,
             process_seconds, index_read_seconds
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(fg_labs_sha, sample, arch, rep) DO UPDATE SET
             instance_type = excluded.instance_type,
             availability_zone = excluded.availability_zone,
+            instance_id = excluded.instance_id,
             spot_price = excluded.spot_price,
             wall_seconds = excluded.wall_seconds,
             max_rss_mb = excluded.max_rss_mb,
@@ -164,6 +170,7 @@ def upsert_trial(  # noqa: PLR0913
             rep,
             instance_type,
             availability_zone,
+            instance_id,
             spot_price,
             wall_seconds,
             max_rss_mb,

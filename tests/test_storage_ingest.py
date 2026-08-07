@@ -644,3 +644,62 @@ def test_ingest_accuracy_missing_meth_tsv_raises(db_path: Path, tmp_path: Path) 
     with pytest.raises(FileNotFoundError, match="meth output"):
         ingest_accuracy(conn, runs_root=runs_root, fg_labs_sha=sha)
     conn.close()
+
+
+def test_ingest_records_the_instance_id(db_path: Path, tmp_path: Path) -> None:
+    """`instance_id` reaches the DB, so host effects are queryable.
+
+    `instance_type` and `availability_zone` cannot identify a HOST — every m7i
+    trial shares `m7i.4xlarge`/`us-east-1b` — and the host is what actually
+    varies. Measured 2026-08-06: the same binary on the same sample and arch
+    ranged 18.89-25.01 s across reps, while the two reps that happened to land
+    on ONE instance agreed to 0.36%. Attributing that needed `instance_id`, and
+    it was only reachable by pulling `meta.json` out of S3 by hand.
+
+    `emit-host-meta` has written the field since the IMDSv2 fix; ingest simply
+    dropped it. See fg-labs/bwa-mem3-bench#56.
+    """
+    sha = "cc33dd44"
+    rep_dir = tmp_path / sha / "wgs-5M" / "m7i" / "rep-1"
+    (rep_dir / "benchmarks").mkdir(parents=True)
+    (rep_dir / "benchmarks" / "timing.tsv").write_text(
+        _TIMING_HEADER + "\n"
+        "9.100\t0:00:09\t1024.50\t2048.00\t900.00\t950.00\t200.75\t50.25\t380.00\t40.10\n"
+    )
+    (rep_dir / "benchmarks" / "meta.json").write_text(
+        json.dumps(
+            {
+                "instance_type": "m7i.4xlarge",
+                "availability_zone": "us-east-1b",
+                "instance_id": "i-0daff762f42bb1767",
+            }
+        )
+    )
+
+    conn = connect(db_path)
+    assert ingest_run(conn, runs_root=tmp_path, fg_labs_sha=sha) == 1
+    assert conn.execute("SELECT instance_id FROM trials").fetchone() == ("i-0daff762f42bb1767",)
+    conn.close()
+
+
+def test_ingest_tolerates_meta_without_an_instance_id(db_path: Path, tmp_path: Path) -> None:
+    """A pre-IMDSv2 meta.json must still ingest, with NULL rather than a crash.
+
+    Every meta.json written before 2026-07-24 has empty host fields (the old
+    emit_meta issued a tokenless IMDSv1 GET and `curl -s` masked the failure),
+    and those runs are still re-collected for backfills. A missing key must read
+    as "unknown host", not as an ingest error.
+    """
+    sha = "ee55ff66"
+    rep_dir = tmp_path / sha / "wgs-5M" / "c6a" / "rep-1"
+    (rep_dir / "benchmarks").mkdir(parents=True)
+    (rep_dir / "benchmarks" / "timing.tsv").write_text(
+        _TIMING_HEADER + "\n"
+        "9.100\t0:00:09\t1024.50\t2048.00\t900.00\t950.00\t200.75\t50.25\t380.00\t40.10\n"
+    )
+    (rep_dir / "benchmarks" / "meta.json").write_text(json.dumps({"instance_type": ""}))
+
+    conn = connect(db_path)
+    assert ingest_run(conn, runs_root=tmp_path, fg_labs_sha=sha) == 1
+    assert conn.execute("SELECT instance_id FROM trials").fetchone() == (None,)
+    conn.close()
