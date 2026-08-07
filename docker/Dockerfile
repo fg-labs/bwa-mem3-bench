@@ -216,6 +216,39 @@ ARG FGUMI_REF
 RUN cargo +stable install --locked --git "${FGUMI_REPO}" --rev "${FGUMI_REF}" \
     --features compare --root /out fgumi
 
+# tachyon measures the HOST, not the aligner: a dependent-load pointer chase over
+# a working set past last-level cache, reporting how fast memory is right now.
+#
+# Installed because wall times on this fleet are not comparable across runs.
+# Repeating a rep on the same EC2 instance reproduces within 2.03%; a fresh
+# instance per rep spreads 9.40%. The v0.9.0 bless failed a perf gate on
+# hic-1M-compat/m7i at +13.0%, and re-running the PREVIOUS release's binary the
+# same day measured it 18.7% slower than its own recorded number -- the host had
+# changed, not the code. cpu_time/wall held at 14.1-14.7 of 16 vCPUs throughout,
+# so no vCPU was lost; identical work simply burned ~20% more CPU-seconds waiting
+# on memory that co-tenants were consuming.
+#
+# Nothing calls it yet -- this makes the binary available and PINS it, so wiring
+# it into a rule is a one-line change rather than an image rebuild plus a pin
+# decision. Where to run it is a cost question (10 s default against a 20 s
+# hic-1M alignment is +50%, against the ~45 min thread-scaling ladder it is
+# nothing), tracked in fg-labs/bwa-mem3-bench#56.
+#
+# Installed from crates.io by VERSION, matching the tricord precedent above
+# rather than the git-ref pattern holodeck and fgumi use -- those track
+# unreleased commits out of necessity, whereas tachyon is a published crate, and
+# `0.1.0` says more to a future reader of this pin than a 40-char SHA does. It
+# also drops a git clone from the build.
+#
+# Built with +stable (already installed for tricord) rather than the stage's 1.85
+# default. 1.85 does satisfy tachyon's MSRV today, but a crates.io install does
+# not honour the package's own rust-toolchain.toml the way a git checkout would,
+# so an MSRV bump upstream would break this layer with a confusing edition error
+# instead of being absorbed.
+ARG TACHYON_VERSION
+RUN cargo +stable install --locked --root /out \
+    --version "${TACHYON_VERSION}" tachyon
+
 # Build fg-labs bwa-mem3 — intentionally the LAST builder step (see the NOTE
 # above the compare-bams build for the layer-cache rationale).
 #

@@ -87,3 +87,20 @@ def fgumi_repo() -> str:
     stay resolved from a single source rather than a hardcoded URL.
     """
     return _build_arg_default("FGUMI_REPO")
+
+
+def tachyon_version() -> str:
+    """Return the pinned nh13/tachyon crates.io version from ``build-arg-defaults.env``.
+
+    Single source of truth for the tachyon release the Docker image installs. It
+    measures the HOST -- memory access rate under current contention -- rather
+    than the aligner, so host quality can be told apart from a code change.
+
+    An EXACT version, never a range, and the reason is sharper than for the other
+    pinned tools: a change to what the probe MEASURES silently invalidates every
+    score recorded against an earlier version, with no error to notice. Comparing
+    readings across releases is the entire point, so this pin is what makes them
+    comparable -- which is also why it is worth recording next to a score rather
+    than only in the image.
+    """
+    return _build_arg_default("TACHYON_VERSION")

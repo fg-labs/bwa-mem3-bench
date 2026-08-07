@@ -10,6 +10,7 @@ from bwa_mem3_bench import fgumi_repo as _pinned_fgumi_repo
 from bwa_mem3_bench import holodeck_ref as _pinned_holodeck_ref
 from bwa_mem3_bench import holodeck_repo as _pinned_holodeck_repo
 from bwa_mem3_bench import minibwa_sha as _pinned_minibwa_sha
+from bwa_mem3_bench import tachyon_version as _pinned_tachyon_version
 from bwa_mem3_bench.commands._run import run_cmd
 
 
@@ -119,6 +120,7 @@ def build(  # noqa: PLR0913
     # deliberately via build-arg-defaults.env rather than per invocation.
     resolved_fgumi_ref = _pinned_fgumi_ref()
     resolved_fgumi_repo = _pinned_fgumi_repo()
+    resolved_tachyon_version = _pinned_tachyon_version()
 
     # minibwa is vendored as a git submodule (private repo, can't clone in
     # the Dockerfile). Confirm it has been populated before invoking buildx.
@@ -184,6 +186,8 @@ def build(  # noqa: PLR0913
         f"FGUMI_REPO={resolved_fgumi_repo}",
         "--build-arg",
         f"FGUMI_REF={resolved_fgumi_ref}",
+        "--build-arg",
+        f"TACHYON_VERSION={resolved_tachyon_version}",
         "--tag",
         f"{image_name}:{sha_tag}",
     ]
