@@ -40,12 +40,35 @@ fi
 
 # The last-resort record: every host field unknown, run identity intact. Used
 # when the environment cannot be interrogated at all (see CONTRACT above).
+#
+# `measured_at` is the one field NOT hardcoded, because it is the one this
+# function can still know. It is assigned below before the ERR trap is armed and
+# before the JSON writer runs -- the only two paths that reach here -- whereas
+# the four host fields may genuinely be unset if the trap fires early. Emitting
+# the sentinel anyway would discard a good stamp and push `late_cells` onto the
+# artifact-mtime fallback. `:-` guards the read regardless, under `set -u`.
 emit_fallback() {
     printf '{"fg_labs_sha": "%s", "sample": "%s", "arch": "%s", "rep": %s, ' \
         "$SHA" "$SAMPLE" "$ARCH" "$REP"
     printf '"instance_type": "unknown", "availability_zone": "unknown", '
-    printf '"instance_id": "unknown", "kernel": "unknown"}'
+    printf '"instance_id": "unknown", "kernel": "unknown", '
+    printf '"measured_at": "%s"}' "${MEASURED_AT:-unknown}"
 }
+
+# WHEN this cell was measured, in UTC. Not a nicety: artifacts from more than one
+# occasion can share a run prefix, and until this existed nothing in the record
+# could tell them apart. The v0.8.0 golden's S3 tree holds 23 cells from a control
+# run taken THREE DAYS after the release was benched; collecting that SHA folds
+# them into the release's medians, which is what every future perf gate compares
+# against. Separating them took a manual S3-timestamp audit.
+#
+# `date -u` and not the shell's own clock, because the reader compares this across
+# hosts in different regions. Seconds resolution is ample for a question measured
+# in hours. If `date` is unavailable only this field degrades, to the `unknown`
+# sentinel: the `|| echo` keeps the substitution successful, and in any case this
+# runs before the ERR trap below is armed, so the rest of the record still stands
+# either way. The reader then falls back to the artifact's mtime.
+MEASURED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)
 
 # Backstop for anything the individual guards below do not cover, so the CONTRACT
 # holds even for a failure mode nobody anticipated. Armed only AFTER argument
@@ -89,7 +112,7 @@ KERNEL=$(uname -r 2>/dev/null || echo unknown)
 
 # Buffered, so a writer that dies mid-record cannot emit half a JSON object
 # followed by the fallback's whole one.
-export SHA SAMPLE ARCH REP INSTANCE_TYPE AZ INSTANCE_ID KERNEL
+export SHA SAMPLE ARCH REP INSTANCE_TYPE AZ INSTANCE_ID KERNEL MEASURED_AT
 if PAYLOAD=$(python3 -c '
 import json, os, sys
 json.dump({
@@ -101,6 +124,7 @@ json.dump({
     "availability_zone": os.environ["AZ"],
     "instance_id": os.environ["INSTANCE_ID"],
     "kernel": os.environ["KERNEL"],
+    "measured_at": os.environ["MEASURED_AT"],
 }, sys.stdout)
 '); then
     printf '%s' "$PAYLOAD"

@@ -23,8 +23,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -37,6 +39,11 @@ FIXTURE_REP = 3
 
 # Exit code the script uses for a malformed argument list.
 USAGE_EXIT = 2
+
+# How far `measured_at` may sit from the test's own clock. Generous: the check is
+# "this is a real timestamp of now", not a latency measurement, and a loaded CI
+# runner can take seconds to get through the IMDS timeouts above it.
+_STAMP_TOLERANCE_S = 300
 
 # A deterministically dead IMDS endpoint: port 1 refuses immediately, so the
 # degraded path is exercised in milliseconds and does not depend on whether the
@@ -214,6 +221,86 @@ def test_script_cannot_abort_the_alignment() -> None:
     assert payload["rep"] == FIXTURE_REP
     for key in ("instance_type", "availability_zone", "instance_id", "kernel"):
         assert payload[key] == "unknown", f"{key} should degrade to 'unknown'"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="bash script")
+def test_script_stamps_when_the_cell_was_measured() -> None:
+    """`measured_at` is what tells a release's cells from a control's.
+
+    A run's S3 prefix is not proof of membership: re-running one sample against
+    an old SHA writes into that SHA's tree, and `collect` then folds those
+    measurements into the release's medians. The v0.8.0 golden carries 23 such
+    cells, benched three days later. Without a stamp the only way to separate
+    them is an object-by-object audit of S3 timestamps, which is how it was
+    actually done.
+    """
+    out = subprocess.run(
+        [str(SCRIPT), "deadbeef", "wgs-5M", "m7i", str(FIXTURE_REP)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+        env={**os.environ, **DEAD_IMDS_ENV},
+    )
+    stamp = json.loads(out.stdout)["measured_at"]
+    # UTC, seconds resolution — the reader compares this across regions.
+    parsed = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    delta = abs((datetime.now(tz=UTC) - parsed).total_seconds())
+    assert delta < _STAMP_TOLERANCE_S, f"{stamp} is not close to now ({delta:.0f}s off)"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="bash script")
+def test_the_fallback_record_keeps_a_stamp_it_already_captured(tmp_path: Path) -> None:
+    """The fallback degrades the HOST fields, not the clock reading.
+
+    `MEASURED_AT` is assigned before the ERR trap is armed and before the JSON
+    writer runs, so it is always populated by the time either path reaches
+    `emit_fallback`. Emitting the sentinel there anyway would throw away a good
+    stamp and push `late_cells` onto the artifact-mtime fallback — the very path
+    `test_the_stamp_wins_over_mtime` exists to show is second-best.
+
+    `date` alone on PATH is what makes this deterministic: the JSON writer cannot
+    find `python3` and degrades, while the stamp is still readable.
+    """
+    only_date = tmp_path / "bin"
+    only_date.mkdir()
+    date_bin = shutil.which("date")
+    assert date_bin, "no `date` on PATH to build the partial environment from"
+    (only_date / "date").symlink_to(date_bin)
+
+    out = subprocess.run(
+        [str(SCRIPT), "deadbeef", "wgs-5M", "m7i", str(FIXTURE_REP)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+        env={"PATH": str(only_date), **DEAD_IMDS_ENV},
+    )
+    payload = json.loads(out.stdout)
+    assert payload["instance_type"] == "unknown", "the host fields must still degrade"
+    stamp = payload["measured_at"]
+    assert stamp != "unknown", "the stamp was captured before the failure; keep it"
+    parsed = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    delta = abs((datetime.now(tz=UTC) - parsed).total_seconds())
+    assert delta < _STAMP_TOLERANCE_S, f"{stamp} is not close to now ({delta:.0f}s off)"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="bash script")
+def test_degraded_record_still_carries_a_measured_at_key() -> None:
+    """Same shape either way, so a consumer never branches on which it got.
+
+    The value degrades to the `unknown` sentinel rather than being omitted;
+    ingest maps that to NULL.
+    """
+    out = subprocess.run(
+        [str(SCRIPT), "deadbeef", "wgs-5M", "m7i", str(FIXTURE_REP)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+        env={"PATH": "/nonexistent", **DEAD_IMDS_ENV},
+    )
+    assert json.loads(out.stdout)["measured_at"] == "unknown"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="bash script")

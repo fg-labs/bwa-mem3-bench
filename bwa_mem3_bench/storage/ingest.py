@@ -7,8 +7,10 @@ import math
 import re
 import sqlite3
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from statistics import median
+from typing import Any, NamedTuple
 
 from bwa_mem3_bench.storage import VS_BASELINE, VS_DEFAULT, VS_GOLDEN, VS_X86
 from bwa_mem3_bench.storage.sqlite import (
@@ -102,6 +104,44 @@ _SCALING_COLUMNS_FULL = 10
 # tachyon reports its working set in bytes; `host_probes` stores MB.
 _BYTES_PER_MB = 1024 * 1024
 
+_SECONDS_PER_HOUR = 3600.0
+
+# The one sentinel `emit-host-meta` degrades ANY field to. Two fields map it to
+# NULL, for two different reasons — the string is shared, the rationale is not,
+# so do not collapse them. Only the first COMPARES against this constant.
+#
+# `_host_instance_id` (host attribution, written when IMDS is unreachable): mapped
+# to NULL rather than stored verbatim, because that column exists to be JOINed on.
+# Two unattributed cells both carrying the string "unknown" would MATCH each other
+# and claim they shared a machine, which is the opposite of the truth. NULL never
+# equals NULL in SQL, so an unattributed row correctly fails to join instead.
+#
+# `_meta_measured_at` (the measurement stamp, written when `date` or the JSON
+# writer fails): never joined on, but NULL is still the honest value. The column
+# is an audit field that gets ordered and compared as a date; the literal string
+# would sort among real stamps and be indistinguishable from one. That is true of
+# ANY non-date text, so it does not test for this constant — `_parse_stamp`
+# rejects the sentinel and a corrupt stamp alike. Note this is only about what
+# reaches `trials` — `late_cells` does not read the column at all, it re-reads
+# `meta.json` via `_measured_at` and falls back to artifact mtime there.
+#
+# NOTE the instance_id case diverges from `trials.instance_id`, which stores the
+# sentinel verbatim (see `ingest_run`). Left alone deliberately — changing it would
+# rewrite the semantics of existing rows and belongs in its own change — so a
+# trials-to-trials join on instance_id can still produce that false match.
+_UNKNOWN_HOST = "unknown"
+
+# How far a cell's measurement time may sit from its run's median before
+# `late_cells` reports it. Sized against the real extremes: the v0.9.0
+# `bless_release` coordinator ran 298 minutes end to end, so a whole release
+# bench fits inside a quarter of this window and cannot trip it; the v0.8.0
+# control that motivated the check sits 3 DAYS out, so it clears the threshold by
+# two orders of magnitude. A resumed run that genuinely straddles a day boundary
+# will trip it -- and should, since its cells were measured on other hosts on
+# another day, which is precisely the comparability question this exists to
+# raise. The operator then re-runs with the override.
+LATE_CELL_THRESHOLD_HOURS = 24.0
+
 # Bounds for validating probe-record numbers before they reach SQLite. A JSON
 # integer has no width limit, so both of these are reachable from a corrupt
 # producer and both raise rather than storing something wrong.
@@ -167,13 +207,189 @@ def _parse_bwa_stderr(path: Path) -> tuple[float | None, float | None]:
     return (process, index_read)
 
 
+def _parse_stamp(value: str) -> datetime | None:
+    """A `measured_at` stamp as an aware UTC datetime, or None if it is not one.
+
+    Shared by this field's two readers — `_meta_measured_at`, which persists it,
+    and `_measured_at`, which dates a cell by it — so that what reaches
+    `trials.measured_at` cannot be text the lateness check itself refuses to
+    read. The `unknown` sentinel fails here like any other non-date.
+    """
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    # `fromisoformat` accepts an offset-less stamp, and `.timestamp()` would then
+    # read it in the READER's local zone -- so the same artifact would date
+    # differently on two laptops, shifting a cell by the UTC offset across the
+    # lateness threshold. The stamp is UTC by contract (`date -u` in
+    # `emit-host-meta`), so say so.
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _meta_measured_at(meta: dict[str, Any]) -> str | None:
+    """`meta.json`'s `measured_at`, or None when absent or not a readable date.
+
+    Stored verbatim rather than normalised: it is already UTC ISO-8601 from the
+    worker, and reparsing to re-render it would only add a way to be wrong. It is
+    still PARSED first, though — a truncated or hand-edited value would otherwise
+    land in a column that gets ordered and compared as a date, indistinguishable
+    from a real stamp, while `_measured_at` had already rejected it and dated the
+    cell from mtime instead. The `unknown` sentinel is one such value; see the
+    note above `_UNKNOWN_HOST` for why NULL is the honest answer for all of them.
+    """
+    value = meta.get("measured_at")
+    if not isinstance(value, str) or _parse_stamp(value) is None:
+        return None
+    return value
+
+
+class LateCell(NamedTuple):
+    """A cell whose artifacts were written far outside the run's own window."""
+
+    sample: str
+    arch: str
+    rep: int
+    measured_at: str
+    hours_late: float
+
+    @property
+    def key(self) -> tuple[str, str, int]:
+        """The `(sample, arch, rep)` identity `ingest_run`'s `exclude` set uses."""
+        return (self.sample, self.arch, self.rep)
+
+    @property
+    def is_early(self) -> bool:
+        """Whether the cell PRECEDES the run's median rather than following it.
+
+        Load-bearing rather than descriptive: `collect` reports both directions
+        but skips only the forward one. The reference is a MEDIAN, so if the
+        foreign cells are ever the majority the median sits inside the FOREIGN
+        group and it is the run's own cells that read as far from it — in this
+        direction. Skipping those would drop the release's real measurements and
+        keep the control's, which is worse than having no guard at all.
+
+        Detection stays symmetric because an early outlier is real evidence: the
+        v0.8.0 golden holds six cells dated the day BEFORE it was blessed. But
+        which side of a split is the foreign one is genuinely ambiguous, so this
+        direction is the operator's call, not an automatic exclusion.
+        """
+        return self.hours_late < 0
+
+
+def _measured_at(rep_dir: Path) -> tuple[str, float] | None:
+    """When a cell was measured, as ``(display, epoch_seconds)``, or None.
+
+    Prefers ``meta.json``'s ``measured_at``, which the worker stamps in its own
+    shell and is therefore authoritative. Falls back to the mtime of
+    ``timing.tsv`` for cells written before that field existed — which is every
+    historical artifact, so the fallback is the common path today, not an edge
+    case. It is trustworthy here because `aws s3 sync` sets the local mtime from
+    S3's LastModified: spot-checked against the S3 listing for three cells of the
+    v0.8.0 golden, all three matched to the second.
+    """
+    meta_path = rep_dir / "benchmarks" / "meta.json"
+    # Guarded, not assumed: `_parse_json_file` raises on a missing or malformed
+    # file, and the cells this function most needs to date are exactly the old
+    # ones that predate `meta.json` entirely.
+    meta: dict[str, Any] = {}
+    if meta_path.exists():
+        try:
+            meta = _parse_json_file(meta_path)
+        except (OSError, ValueError):
+            meta = {}
+    stamped = meta.get("measured_at")
+    if isinstance(stamped, str):
+        parsed = _parse_stamp(stamped)
+        # None for the `unknown` sentinel or a corrupt stamp; fall through to mtime.
+        if parsed is not None:
+            return stamped, parsed.timestamp()
+    timing = rep_dir / "benchmarks" / "timing.tsv"
+    if not timing.exists():
+        return None
+    mtime = timing.stat().st_mtime
+    return datetime.fromtimestamp(mtime, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ"), mtime
+
+
+def late_cells(
+    *,
+    runs_root: Path,
+    fg_labs_sha: str,
+    threshold_hours: float = LATE_CELL_THRESHOLD_HOURS,
+) -> list[LateCell]:
+    """Cells measured more than ``threshold_hours`` from the run's median time.
+
+    WHY. A run's S3 prefix is not proof that everything under it belongs to that
+    run. Re-running one sample against an old SHA — a control, a bisect, a
+    one-off reproduction — writes into `runs/<that-sha>/`, and `collect` then
+    folds those measurements into the release's record, shifting the medians
+    every future perf gate compares against. This is not hypothetical: the v0.8.0
+    golden's tree holds 23 such cells from a control run taken three days later,
+    on that day's hosts, where the same binary measured 18.7% slower than its own
+    recorded number.
+
+    Compared against the MEDIAN rather than the earliest or latest cell, so a
+    handful of late arrivals cannot drag the reference with them, and so the
+    check still works if the contamination is the majority (the smaller group is
+    flagged either way — which is the useful outcome, since it names a group to
+    look at rather than silently picking one).
+
+    That is why cells on BOTH sides of the reference are returned, and why
+    `hours_late` is signed. Reporting is symmetric; the automatic exclusion in
+    `collect` is not, because in the majority case the flagged group is the
+    run's own — see `LateCell.is_early`.
+
+    Cells whose time cannot be determined at all are NOT reported: absent
+    evidence is not evidence of contamination, and flagging them would train the
+    reader to ignore this list.
+    """
+    sha_dir = runs_root / fg_labs_sha
+    if not sha_dir.is_dir():
+        return []
+
+    stamped: list[tuple[str, str, int, str, float]] = []
+    for sample_dir in sorted(d for d in sha_dir.iterdir() if d.is_dir()):
+        for arch_dir in sorted(d for d in sample_dir.iterdir() if d.is_dir()):
+            for rep_dir in sorted(d for d in arch_dir.iterdir() if d.is_dir()):
+                if not rep_dir.name.startswith("rep-"):
+                    continue
+                when = _measured_at(rep_dir)
+                if when is None:
+                    continue
+                display, epoch = when
+                rep = int(rep_dir.name.split("-", 1)[1])
+                stamped.append((sample_dir.name, arch_dir.name, rep, display, epoch))
+
+    if not stamped:
+        return []
+    reference = median(epoch for *_, epoch in stamped)
+    threshold_seconds = threshold_hours * _SECONDS_PER_HOUR
+    return sorted(
+        (
+            LateCell(sample, arch, rep, display, (epoch - reference) / _SECONDS_PER_HOUR)
+            for sample, arch, rep, display, epoch in stamped
+            if abs(epoch - reference) > threshold_seconds
+        ),
+        key=lambda cell: (cell.sample, cell.arch, cell.rep),
+    )
+
+
 def ingest_run(
     conn: sqlite3.Connection,
     *,
     runs_root: Path,
     fg_labs_sha: str,
+    exclude: frozenset[tuple[str, str, int]] = frozenset(),
 ) -> int:
-    """Walk `runs_root/<fg_labs_sha>/<sample>/<arch>/rep-<n>/` and populate DB."""
+    """Walk `runs_root/<fg_labs_sha>/<sample>/<arch>/rep-<n>/` and populate DB.
+
+    :param exclude: `(sample, arch, rep)` cells to skip — used by `collect` to
+        keep cells measured AFTER the run's window out of the release record.
+        The forward-only subset of `late_cells`, not all of it: an early cell is
+        reported but ingested, since the median can sit inside a contaminating
+        group (see `LateCell.is_early`). Empty by default, so every other caller
+        is unchanged.
+    """
     sha_dir = runs_root / fg_labs_sha
     if not sha_dir.is_dir():
         raise FileNotFoundError(f"no run tree at {sha_dir}")
@@ -189,6 +405,8 @@ def ingest_run(
                 if not rep_dir.name.startswith("rep-"):
                     continue
                 rep = int(rep_dir.name.split("-", 1)[1])
+                if (sample, arch, rep) in exclude:
+                    continue
 
                 timing_path = rep_dir / "benchmarks" / "timing.tsv"
                 meta_path = rep_dir / "benchmarks" / "meta.json"
@@ -233,6 +451,7 @@ def ingest_run(
                         else None
                     ),
                     instance_id=(str(meta.get("instance_id")) if meta.get("instance_id") else None),
+                    measured_at=_meta_measured_at(meta),
                     spot_price=None,
                     status="ok",
                     process_seconds=process_seconds,
@@ -339,6 +558,7 @@ def ingest_baseline(
                         else None
                     ),
                     instance_id=(str(meta.get("instance_id")) if meta.get("instance_id") else None),
+                    measured_at=_meta_measured_at(meta),
                     spot_price=None,
                     status="ok",
                     process_seconds=process_seconds,
@@ -432,6 +652,7 @@ def ingest_minibwa(
                         if meta.get("availability_zone")
                         else None
                     ),
+                    measured_at=_meta_measured_at(meta),
                     spot_price=None,
                     status="ok",
                     process_seconds=None,
@@ -560,6 +781,7 @@ def ingest_accuracy(
     *,
     runs_root: Path,
     fg_labs_sha: str,
+    exclude: frozenset[tuple[str, str, int]] = frozenset(),
 ) -> int:
     """Walk `runs_root/<sha>/<sample>/<arch>/rep-<n>/eval/` and populate `accuracy`.
 
@@ -573,6 +795,11 @@ def ingest_accuracy(
     :param conn: SQLite connection.
     :param runs_root: local mirror of the S3 ``runs/`` prefix.
     :param fg_labs_sha: fg-labs SHA whose run tree to ingest.
+    :param exclude: `(sample, arch, rep)` cells to skip, same set `ingest_run`
+        takes. `accuracy` is keyed on its own tuple and does NOT reference
+        `trials.id`, so excluding a cell from `trials` alone would leave its
+        accuracy rows behind, still read by every accuracy report. Two of the
+        v0.8.0 control's samples are truth samples, so this path is live.
     """
     sha_dir = runs_root / fg_labs_sha
     if not sha_dir.is_dir():
@@ -589,6 +816,8 @@ def ingest_accuracy(
                 if not rep_dir.name.startswith("rep-"):
                     continue
                 rep = int(rep_dir.name.split("-", 1)[1])
+                if (sample, arch, rep) in exclude:
+                    continue
                 eval_dir = rep_dir / "eval"
                 if not eval_dir.is_dir():
                     continue
@@ -639,19 +868,6 @@ def ingest_accuracy(
 
     conn.commit()
     return count
-
-
-# The sentinel `emit-host-meta` writes when it cannot reach IMDS. Mapped to NULL
-# rather than stored verbatim, because this column exists to be JOINed on: two
-# unattributed cells both carrying the string "unknown" would MATCH each other and
-# claim they shared a machine, which is the opposite of the truth. NULL never
-# equals NULL in SQL, so an unattributed row correctly fails to join instead.
-#
-# NOTE this diverges from `trials.instance_id`, which stores the sentinel
-# verbatim (see `ingest_run`). Left alone here deliberately — changing it would
-# rewrite the semantics of existing rows and belongs in its own change — so a
-# trials-to-trials join on instance_id can still produce that false match.
-_UNKNOWN_HOST = "unknown"
 
 
 def _host_instance_id(meta_path: Path) -> str | None:

@@ -27,6 +27,9 @@ EXPECTED_SCHEMA_VERSION = SCHEMA_VERSION
 #   v7 → v8: added the `host_probes` table (tachyon contention readings — a new
 #            table, created in place by executescript) AND scaling.instance_id,
 #            which does need an ALTER on a DB that already has a `scaling` table.
+#   v8 → v9: added trials.measured_at — a run's S3 prefix is not proof that
+#            everything under it belongs to that run, and nothing recorded WHEN a
+#            cell was measured.
 # Only versions whose step needs an ALTER get a constant; v4 does not (its step
 # added a whole table).
 _SCHEMA_V1 = 1
@@ -35,6 +38,7 @@ _SCHEMA_V3 = 3
 _SCHEMA_V5 = 5
 _SCHEMA_V7 = 7
 _SCHEMA_V8 = 8
+_SCHEMA_V9 = 9
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -96,6 +100,12 @@ def connect(db_path: Path) -> sqlite3.Connection:
     # new table and executescript creates it in place.
     if _SCHEMA_V5 <= existing_version < _SCHEMA_V8:
         conn.execute("ALTER TABLE scaling ADD COLUMN instance_id TEXT")
+    # v8 -> v9. No lower bound needed, unlike the step above: `trials` exists in
+    # every schema this code has ever written, so there is no version whose
+    # `trials` was freshly CREATEd by the executescript above and would raise
+    # "duplicate column name".
+    if existing_version < _SCHEMA_V9:
+        conn.execute("ALTER TABLE trials ADD COLUMN measured_at TEXT")
     if existing_version < EXPECTED_SCHEMA_VERSION:
         conn.execute(f"PRAGMA user_version = {EXPECTED_SCHEMA_VERSION}")
         conn.commit()
@@ -144,6 +154,7 @@ def upsert_trial(  # noqa: PLR0913
     availability_zone: str | None,
     spot_price: float | None,
     instance_id: str | None = None,
+    measured_at: str | None = None,
     status: str,
     process_seconds: float | None = None,
     index_read_seconds: float | None = None,
@@ -154,15 +165,16 @@ def upsert_trial(  # noqa: PLR0913
         """
         INSERT INTO trials (
             fg_labs_sha, sample, arch, rep, instance_type, availability_zone,
-            instance_id, spot_price, wall_seconds, max_rss_mb, cpu_time,
+            instance_id, measured_at, spot_price, wall_seconds, max_rss_mb, cpu_time,
             io_read_mb, io_write_mb, mean_load, reads_processed, status,
             process_seconds, index_read_seconds
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(fg_labs_sha, sample, arch, rep) DO UPDATE SET
             instance_type = excluded.instance_type,
             availability_zone = excluded.availability_zone,
             instance_id = excluded.instance_id,
+            measured_at = excluded.measured_at,
             spot_price = excluded.spot_price,
             wall_seconds = excluded.wall_seconds,
             max_rss_mb = excluded.max_rss_mb,
@@ -184,6 +196,7 @@ def upsert_trial(  # noqa: PLR0913
             instance_type,
             availability_zone,
             instance_id,
+            measured_at,
             spot_price,
             wall_seconds,
             max_rss_mb,
