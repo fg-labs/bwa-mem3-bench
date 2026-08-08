@@ -82,6 +82,36 @@ rule align_thread_scaling:
         # counts — making the efficiency number itself misleading. Keeping the
         # profile is what distinguishes an aligner limit from an IO limit.
         profile = "scaling/{sha}/{sample}/{arch}/runtime-profiles.tar.gz",
+        # WHICH MACHINE ran this ladder. The ladder had no host attribution at
+        # all until now, which is precisely why the v0.9.0 T(1) anomaly took a
+        # same-day control run to settle: T(1) fell 17% over two releases whose
+        # diffs contain no SIMD, FMI or Makefile change, and nothing on record
+        # could say whether the three anchors were even comparable machines.
+        #
+        # One record for the whole ladder, not one per rung, because the whole
+        # ladder is one Batch job on one instance by construction (see the module
+        # docstring). `emit-host-meta` wants a rep, so the rule passes 0 — it
+        # denotes the JOB, not a rung; rungs carry their own rep in scaling.tsv.
+        meta = "scaling/{sha}/{sample}/{arch}/meta.json",
+        # HOW CONTENDED that machine was, measured either side of the ladder.
+        #
+        # instance_id says two ladders ran on different hosts; it cannot say one
+        # of them was starved of memory bandwidth by a co-tenant, which is the
+        # mechanism actually observed (cpu_seconds rose ~20% for byte-identical
+        # work while every vCPU stayed present). tachyon measures that directly.
+        #
+        # Two readings, not one: a single pre-flight sample cannot distinguish "a
+        # quiet host" from "a host whose neighbour arrived after we started". A
+        # pre/post pair that agrees is evidence the ladder ran under stable
+        # conditions; a pair that diverges invalidates the curve, since the rungs
+        # were not measured under comparable conditions.
+        #
+        # Diagnostic only — annotate and FILTER on it, never divide by it. The
+        # probe is not a pure memory probe (its own docs record that 8 CPU-only
+        # spinners with no memory traffic still cost ~18% of its score), so
+        # normalising a wall time by it would assume a proportionality that has
+        # not been verified. See fg-labs/bwa-mem3-bench#56.
+        host_probe = "scaling/{sha}/{sample}/{arch}/host-probe.jsonl",
     # Reserve the whole instance. Anything less and Batch could co-schedule a
     # second job onto the host, which would corrupt every point on the curve.
     threads: CONFIG.thread_scaling.max_threads
@@ -100,16 +130,33 @@ rule align_thread_scaling:
         ladder = LADDER_SPEC,
         extra = lambda wc: _fg_labs_flags(wc.sample),
         mem_flags = lambda wc: _mem_flags(wc.sample),
+        probe_seconds = CONFIG.thread_scaling.host_probe_seconds,
     shell:
         r"""
         set -euo pipefail
         OUTDIR=$(dirname {output.tsv})
         mkdir -p "$OUTDIR/runs"
 
+        # Host identity, captured in THIS shell so it describes the machine that
+        # runs the ladder rather than whichever instance a separate rule landed
+        # on. rep 0 denotes the job (see the output's comment).
+        emit-host-meta "{wildcards.sha}" "{wildcards.sample}" "{wildcards.arch}" 0 > {output.meta}
+
         # Stage the index once, for the whole ladder — pinned in /dev/shm so no
         # rung pays an index load and the cgroup cannot evict it mid-run.
         bwa-mem2.fg-labs shm {input.ref[0]}
         trap 'bwa-mem2.fg-labs shm -d || true' EXIT
+
+        # Probe AFTER staging and again before release, so both readings see the
+        # same ~17 GB of index resident in /dev/shm. Probing before staging would
+        # make the pre/post pair incomparable: any difference could be the
+        # index's memory footprint rather than a change in host contention, and
+        # telling those apart is the only thing the pair is for.
+        # `>` here and `>>` for the post reading below, deliberately: a spot
+        # interruption can leave a partial output behind, and appending both
+        # readings would then stack a second `pre` onto the survivor. Truncating
+        # on the first write makes a retry produce exactly one pair.
+        emit-host-probe pre {params.probe_seconds} > {output.host_probe}
 
         printf 'threads\trep\twall_s\tcpu_s\tmax_rss_mb\tprocess_s\tmain_mem_s\tread_io_s\tsam_io_s\tkernel_s\n' > {output.tsv}
 
@@ -155,6 +202,13 @@ rule align_thread_scaling:
                 rm -f "$OUTDIR/runs/o.bam"
             done
         done
+
+        # Second reading, still with the index staged. A pre/post pair that
+        # agrees says the whole ladder was measured under stable conditions; one
+        # that diverges says the rungs are not comparable to each other, which no
+        # amount of within-rung replication can detect.
+        emit-host-probe post {params.probe_seconds} >> {output.host_probe}
+
         # Keep every rung's raw stderr + tricorder TSV. Without this the profile
         # is unrecoverable once the worker exits, which is exactly what happened
         # to the first ladder.

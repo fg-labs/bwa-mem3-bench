@@ -95,6 +95,15 @@ thread_scaling:
   # Gate #2 (vs-golden) already works. A point may lose at most this much
   # efficiency before `bench regression` fails the bless.
   max_efficiency_drop_pp: 3.0
+  # Seconds per tachyon host-contention probe. Two run per ladder, one either
+  # side, so this is ~0.7% overhead on a ~45-minute job — the reading is never
+  # worth skipping to save it. It exists because a ladder's T(1) anchor is exactly
+  # the measurement host quality corrupts, and until now nothing recorded what the
+  # host was doing: the 17% T(1) drift across v0.7.0/v0.8.0/v0.9.0 took a same-day
+  # control run to attribute, because there was no probe reading to look at.
+  # Annotate and FILTER on the score; never divide a wall time by it (the probe is
+  # not purely a memory probe). See fg-labs/bwa-mem3-bench#56.
+  host_probe_seconds: 10.0
 
 references:
   hg38:

@@ -24,12 +24,17 @@ EXPECTED_SCHEMA_VERSION = SCHEMA_VERSION
 #   v5 → v6: added scaling.{main_mem,read_io,sam_io,kernel}_seconds — the phase
 #            breakdown from the aligner's runtime profile. Column additions, so
 #            these DO need ALTER for a DB already carrying v5 scaling rows.
+#   v7 → v8: added the `host_probes` table (tachyon contention readings — a new
+#            table, created in place by executescript) AND scaling.instance_id,
+#            which does need an ALTER on a DB that already has a `scaling` table.
 # Only versions whose step needs an ALTER get a constant; v4 does not (its step
 # added a whole table).
 _SCHEMA_V1 = 1
 _SCHEMA_V2 = 2
 _SCHEMA_V3 = 3
 _SCHEMA_V5 = 5
+_SCHEMA_V7 = 7
+_SCHEMA_V8 = 8
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -81,8 +86,16 @@ def connect(db_path: Path) -> sqlite3.Connection:
             "kernel_seconds",
         ):
             conn.execute(f"ALTER TABLE scaling ADD COLUMN {column} REAL")
-    if existing_version < 7:  # noqa: PLR2004 — schema version, not a magic number
+    if existing_version < _SCHEMA_V7:
         conn.execute("ALTER TABLE trials ADD COLUMN instance_id TEXT")
+    # v7 -> v8. Same "the table might not pre-date the column" trap as v5 -> v6,
+    # for the same reason: a DB older than v5 has no `scaling` table of its own, so
+    # the executescript above CREATEd it fresh already carrying instance_id, and
+    # ALTERing it on would raise "duplicate column name". Only a DB whose `scaling`
+    # table predates v8 is missing it. `host_probes` needs no ALTER — it is a whole
+    # new table and executescript creates it in place.
+    if _SCHEMA_V5 <= existing_version < _SCHEMA_V8:
+        conn.execute("ALTER TABLE scaling ADD COLUMN instance_id TEXT")
     if existing_version < EXPECTED_SCHEMA_VERSION:
         conn.execute(f"PRAGMA user_version = {EXPECTED_SCHEMA_VERSION}")
         conn.commit()
@@ -312,6 +325,7 @@ def upsert_scaling(  # noqa: PLR0913
     read_io_seconds: float | None = None,
     sam_io_seconds: float | None = None,
     kernel_seconds: float | None = None,
+    instance_id: str | None = None,
     commit: bool = True,
 ) -> None:
     """Insert or update one rung of a thread-scaling ladder.
@@ -324,8 +338,9 @@ def upsert_scaling(  # noqa: PLR0913
         INSERT INTO scaling
             (fg_labs_sha, sample, arch, threads, rep,
              wall_seconds, cpu_time, max_rss_mb, process_seconds,
-             main_mem_seconds, read_io_seconds, sam_io_seconds, kernel_seconds)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             main_mem_seconds, read_io_seconds, sam_io_seconds, kernel_seconds,
+             instance_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(fg_labs_sha, sample, arch, threads, rep) DO UPDATE SET
             wall_seconds = excluded.wall_seconds,
             cpu_time = excluded.cpu_time,
@@ -334,7 +349,8 @@ def upsert_scaling(  # noqa: PLR0913
             main_mem_seconds = excluded.main_mem_seconds,
             read_io_seconds = excluded.read_io_seconds,
             sam_io_seconds = excluded.sam_io_seconds,
-            kernel_seconds = excluded.kernel_seconds
+            kernel_seconds = excluded.kernel_seconds,
+            instance_id = excluded.instance_id
         """,
         (
             fg_labs_sha,
@@ -350,7 +366,74 @@ def upsert_scaling(  # noqa: PLR0913
             read_io_seconds,
             sam_io_seconds,
             kernel_seconds,
+            instance_id,
         ),
     )
     if commit:
         conn.commit()
+
+
+def upsert_host_probe(  # noqa: PLR0913
+    conn: sqlite3.Connection,
+    *,
+    fg_labs_sha: str,
+    sample: str,
+    arch: str,
+    phase: str,
+    instance_id: str | None,
+    probe_version: str | None,
+    rustc: str | None,
+    m_accesses_per_sec: float | None,
+    ns_per_access: float | None,
+    threads: int | None,
+    working_set_mb_per_thread: float | None,
+    seconds: float | None,
+    status: str | None,
+    commit: bool = True,
+) -> int:
+    """Insert or update one tachyon host-contention reading; returns the row id.
+
+    Keyed on ``(fg_labs_sha, sample, arch, phase)`` so re-ingesting a run is
+    idempotent, matching `upsert_scaling`. A cell emits one reading per phase
+    (``pre`` / ``post``), and the whole cell runs on one host, so that key is
+    sufficient without ``instance_id`` — which is recorded as the JOIN column to
+    other work on the same machine, not as part of the identity.
+    """
+    row = conn.execute(
+        """
+        INSERT INTO host_probes
+            (fg_labs_sha, sample, arch, phase, instance_id, probe_version, rustc,
+             m_accesses_per_sec, ns_per_access, threads,
+             working_set_mb_per_thread, seconds, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(fg_labs_sha, sample, arch, phase) DO UPDATE SET
+            instance_id = excluded.instance_id,
+            probe_version = excluded.probe_version,
+            rustc = excluded.rustc,
+            m_accesses_per_sec = excluded.m_accesses_per_sec,
+            ns_per_access = excluded.ns_per_access,
+            threads = excluded.threads,
+            working_set_mb_per_thread = excluded.working_set_mb_per_thread,
+            seconds = excluded.seconds,
+            status = excluded.status
+        RETURNING id
+        """,
+        (
+            fg_labs_sha,
+            sample,
+            arch,
+            phase,
+            instance_id,
+            probe_version,
+            rustc,
+            m_accesses_per_sec,
+            ns_per_access,
+            threads,
+            working_set_mb_per_thread,
+            seconds,
+            status,
+        ),
+    ).fetchone()
+    if commit:
+        conn.commit()
+    return int(row[0])

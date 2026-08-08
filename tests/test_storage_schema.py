@@ -10,9 +10,15 @@ from bwa_mem3_bench.storage.sqlite import (
     connect,
     upsert_accuracy,
     upsert_comparison,
+    upsert_host_probe,
     upsert_run,
     upsert_trial,
 )
+
+# One reading either side of the timed work.
+_PROBE_PHASES = 2
+# An arbitrary second value for the in-place-update assertion.
+_REVISED_RATE = 30.1
 
 # A pre-supp-metrics (v2) comparisons table — no supp_json column.
 _V2_SCHEMA = """
@@ -96,6 +102,24 @@ _V6_SCALING_COLUMNS = {
     "kernel_seconds",
 }
 
+# A v7 DB: trials has instance_id and `scaling` carries the phase columns, but
+# `scaling` has no instance_id and there is no `host_probes` table — the state
+# every production DB is in before the v8 bump.
+_V7_SCHEMA = (
+    _V5_SCHEMA.replace("PRAGMA user_version = 5;", "PRAGMA user_version = 7;")
+    .replace(
+        "reads_processed INTEGER, process_seconds REAL",
+        "reads_processed INTEGER, instance_id TEXT, process_seconds REAL",
+    )
+    .replace(
+        "cpu_time REAL, max_rss_mb REAL, process_seconds REAL,\n"
+        "    UNIQUE(fg_labs_sha, sample, arch, threads, rep));",
+        "cpu_time REAL, max_rss_mb REAL, process_seconds REAL,\n"
+        "    main_mem_seconds REAL, read_io_seconds REAL, sam_io_seconds REAL,\n"
+        "    kernel_seconds REAL, UNIQUE(fg_labs_sha, sample, arch, threads, rep));",
+    )
+)
+
 
 @pytest.fixture
 def db_path(tmp_path: Path) -> Path:
@@ -106,7 +130,7 @@ def test_connect_creates_tables(db_path: Path) -> None:
     conn = connect(db_path)
     cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
     names = {row[0] for row in cur.fetchall()}
-    assert {"runs", "trials", "comparisons", "accuracy"} <= names
+    assert {"runs", "trials", "comparisons", "accuracy", "scaling", "host_probes"} <= names
     conn.close()
 
 
@@ -294,6 +318,103 @@ def test_v5_db_migrates_to_v6_adding_the_phase_columns(db_path: Path) -> None:
     assert conn.execute(
         "SELECT wall_seconds, kernel_seconds FROM scaling WHERE fg_labs_sha = 'old'"
     ).fetchone() == (92.5, None)
+    conn.close()
+
+
+def test_v7_db_migrates_to_v8_adding_host_attribution(db_path: Path) -> None:
+    """A v7 DB owns an instance_id-less `scaling`, so the v8 ALTER must run.
+
+    This is the state every production DB is in before the bump, including the
+    real 7,130-row one. The pre-existing rung must survive with NULL — which is
+    also the honest value, since nothing recorded the host at the time.
+    """
+    raw = sqlite3.connect(db_path)
+    raw.executescript(_V7_SCHEMA)
+    raw.execute("INSERT INTO runs(fg_labs_sha, status) VALUES ('old', 'complete')")
+    raw.execute(
+        "INSERT INTO scaling(fg_labs_sha, sample, arch, threads, rep, wall_seconds) "
+        "VALUES ('old', 'wgs-5M', 'c8g64', 1, 1, 1342.3)"
+    )
+    raw.commit()
+    raw.close()
+
+    conn = connect(db_path)
+    assert "instance_id" in _columns(conn, "scaling")
+    assert "host_probes" in _tables(conn)
+    (ver,) = conn.execute("PRAGMA user_version").fetchone()
+    assert ver == EXPECTED_SCHEMA_VERSION
+    assert conn.execute(
+        "SELECT wall_seconds, instance_id FROM scaling WHERE fg_labs_sha = 'old'"
+    ).fetchone() == (1342.3, None)
+    conn.close()
+
+
+def test_v4_db_migrates_to_v8_without_altering_a_fresh_scaling_table(db_path: Path) -> None:
+    """A pre-v5 DB gets `scaling` from executescript, already carrying instance_id.
+
+    So the v8 ALTER must NOT run for it — the same trap the v5→v6 step
+    documented. A guard of `existing_version < 8` alone would raise "duplicate
+    column name" on the first connect() after upgrading such a DB.
+    """
+    raw = sqlite3.connect(db_path)
+    raw.executescript(_V4_SCHEMA)
+    raw.execute("INSERT INTO runs(fg_labs_sha, status) VALUES ('old', 'complete')")
+    raw.commit()
+    raw.close()
+
+    conn = connect(db_path)
+    assert "instance_id" in _columns(conn, "scaling")
+    assert "host_probes" in _tables(conn)
+    (ver,) = conn.execute("PRAGMA user_version").fetchone()
+    assert ver == EXPECTED_SCHEMA_VERSION
+    assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+    conn.close()
+
+
+def test_upsert_host_probe_is_keyed_on_phase(db_path: Path) -> None:
+    """Two phases coexist; re-recording one phase updates it in place."""
+    conn = connect(db_path)
+    upsert_run(conn, fg_labs_sha="abc", status="complete")
+    for phase, rate in (("pre", 28.4), ("post", 17.9)):
+        upsert_host_probe(
+            conn,
+            fg_labs_sha="abc",
+            sample="wgs-5M",
+            arch="c8g64",
+            phase=phase,
+            instance_id="i-abc",
+            probe_version="0.1.0",
+            rustc="rustc 1.97.1",
+            m_accesses_per_sec=rate,
+            ns_per_access=126.0,
+            threads=64,
+            working_set_mb_per_thread=64.0,
+            seconds=10.0,
+            status="ok",
+        )
+    assert conn.execute("SELECT COUNT(*) FROM host_probes").fetchone()[0] == _PROBE_PHASES
+
+    upsert_host_probe(
+        conn,
+        fg_labs_sha="abc",
+        sample="wgs-5M",
+        arch="c8g64",
+        phase="pre",
+        instance_id="i-abc",
+        probe_version="0.1.0",
+        rustc="rustc 1.97.1",
+        m_accesses_per_sec=_REVISED_RATE,
+        ns_per_access=140.0,
+        threads=64,
+        working_set_mb_per_thread=64.0,
+        seconds=10.0,
+        status="ok",
+    )
+    assert conn.execute("SELECT COUNT(*) FROM host_probes").fetchone()[0] == _PROBE_PHASES
+    (rate,) = conn.execute(
+        "SELECT m_accesses_per_sec FROM host_probes WHERE phase = 'pre'"
+    ).fetchone()
+    assert rate == _REVISED_RATE
     conn.close()
 
 

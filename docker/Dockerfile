@@ -248,6 +248,28 @@ RUN cargo +stable install --locked --git "${FGUMI_REPO}" --rev "${FGUMI_REF}" \
 ARG TACHYON_VERSION
 RUN cargo +stable install --locked --root /out \
     --version "${TACHYON_VERSION}" tachyon
+# Record WHAT COMPILED the probe, here in the builder, because the runtime stage
+# has no Rust toolchain and so cannot recover it later. `--locked` pins tachyon's
+# dependencies and `TACHYON_VERSION` pins its source, but `+stable` floats: this
+# layer is currently built by rustc 1.97.1 while the stage default is 1.85.0, and
+# a rebuild months from now will use whatever `stable` means then. Codegen is a
+# second-order influence on a probe whose inner loop is one ~100 ns dependent
+# load, so this is very unlikely to matter at the 10-20% resolution we care
+# about — but "unlikely" is not "recorded", and the entire reason the probe
+# exists is that we previously could not tell a host difference from a code
+# difference after the fact. Pinning a dated toolchain was considered and
+# rejected on fg-labs/bwa-mem3-bench#56 (every other Rust tool in this image uses
+# `+stable`; pinning one alone would be inconsistent and need manual bumping
+# forever). Recording provenance is cheaper and strictly more informative: it
+# lets the question be answered later rather than assumed away.
+#
+# Hand-formatted JSON rather than a heredoc through python3: this stage has no
+# python3, and neither field can contain a JSON metacharacter (a semver string
+# and rustc's own version line).
+RUN mkdir -p /out/share/bwa-mem3-bench && \
+    printf '{"tachyon_version": "%s", "rustc": "%s"}\n' \
+        "${TACHYON_VERSION}" "$(rustc +stable --version)" \
+        > /out/share/bwa-mem3-bench/tachyon-provenance.json
 
 # Build fg-labs bwa-mem3 — intentionally the LAST builder step (see the NOTE
 # above the compare-bams build for the layer-cache rationale).
@@ -361,6 +383,10 @@ RUN git clone --depth 1 --branch v${BWAMETH_VERSION} https://github.com/brentp/b
 
 # Binaries from builder stage
 COPY --from=builder /out/bin/ /usr/local/bin/
+# Build-time provenance the runtime stage cannot regenerate — currently the
+# tachyon probe's `rustc` (see the builder step that writes it). Read by
+# `emit-host-probe`, which attaches it to every recorded score.
+COPY --from=builder /out/share/ /usr/local/share/
 
 # bwameth.py internally invokes a bare `bwa-mem2` command (see bwa-meth source).
 # We install the suffixed variants (bwa-mem2.upstream, bwa-mem2.fg-labs) and have
@@ -416,3 +442,9 @@ RUN chmod +x /usr/local/bin/coordinator-entrypoint.sh
 # snakemake rule — see the script header for why that records the wrong machine).
 COPY docker/emit-host-meta.sh /usr/local/bin/emit-host-meta
 RUN chmod +x /usr/local/bin/emit-host-meta
+
+# Host memory-contention probe, invoked from inside the thread-scaling ladder for
+# the same reason emit-host-meta is invoked from inside the align rules: only the
+# working shell is guaranteed to be on the working machine.
+COPY docker/emit-host-probe.sh /usr/local/bin/emit-host-probe
+RUN chmod +x /usr/local/bin/emit-host-probe

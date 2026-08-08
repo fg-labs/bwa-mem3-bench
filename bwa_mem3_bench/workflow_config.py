@@ -373,6 +373,13 @@ class ThreadScalingStep:
     reps: int
 
 
+# Seconds per host-contention probe when `thread_scaling.host_probe_seconds` is
+# absent. tachyon's own default, and 20 s of probing either side of a ~45-minute
+# ladder is ~0.7% overhead — cheap enough that the reading is never worth
+# skipping, long enough that a transient neighbour does not dominate the sample.
+_DEFAULT_HOST_PROBE_SECONDS = 10.0
+
+
 @dataclass(frozen=True)
 class ThreadScaling:
     """Configuration for the thread-scaling ladder (`--target thread_scaling`).
@@ -387,6 +394,10 @@ class ThreadScaling:
     arch: str
     ladder: list[ThreadScalingStep]
     max_efficiency_drop_pp: float
+    # Wall-clock budget for each of the two tachyon host-contention probes that
+    # bracket the ladder. Defaulted rather than required: it is a diagnostic knob,
+    # and a config that omits it should still load.
+    host_probe_seconds: float = _DEFAULT_HOST_PROBE_SECONDS
 
     @property
     def max_threads(self) -> int:
@@ -989,11 +1000,29 @@ def _thread_scaling_from(
         )
     drop = float(raw_drop)
 
+    # Optional, unlike the keys above: a diagnostic probe's duration is not a
+    # decision a config must make. Validated with the same rigour anyway — it is
+    # pasted into the ladder's shell body, so a malformed value would surface as a
+    # failed Batch job rather than a load error. `nan`/`inf` are rejected for the
+    # concrete reason that both reach `emit-host-probe` as a literal argument its
+    # numeric guard rejects, failing the ladder over a diagnostic.
+    raw_probe = raw.get("host_probe_seconds", _DEFAULT_HOST_PROBE_SECONDS)
+    if (
+        isinstance(raw_probe, bool)
+        or not isinstance(raw_probe, (int, float))
+        or not math.isfinite(raw_probe)
+        or raw_probe <= 0
+    ):
+        raise ValueError(
+            f"`thread_scaling.host_probe_seconds` must be a finite number > 0; got {raw_probe!r}"
+        )
+
     return ThreadScaling(
         sample=sample,
         arch=arch,
         ladder=sorted(ladder, key=lambda s: s.threads),
         max_efficiency_drop_pp=drop,
+        host_probe_seconds=float(raw_probe),
     )
 
 
