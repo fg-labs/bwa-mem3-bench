@@ -85,12 +85,41 @@ install-fgumi = "bash scripts/install-fgumi.sh"
 check = { depends-on = ["cargo-fmt-check", "cargo-clippy", "cargo-test", "py-fmt-check", "py-lint", "py-type", "py-test"] }
 
 # Docker
-# Multi-arch Docker build (requires buildx registry for --push). Usage:
-#   pixi run build-docker <fg-labs-sha> [<upstream-tag>]
-build-docker = "bash docker/build.sh"
-# Native-arch Docker build (loads into local docker). Usage:
-#   pixi run build-docker-native <fg-labs-sha> [<upstream-tag>]
-build-docker-native = "bash docker/build-native.sh"
+#
+# Both tasks route through the CLI rather than a shell script. The two scripts
+# that used to live in docker/ passed only 7 of the Dockerfile's 13 defaultless
+# ARGs, and BuildKit turns a missing `--build-arg` into a set-but-EMPTY variable
+# rather than an error -- so they silently built images with no MINIBWA_SHA
+# label and empty HOLODECK_REF / FGUMI_REF / TACHYON_VERSION pins. The CLI path
+# is the one `tests/test_compat_arm.py` audits for exactly that hole.
+#
+# Multi-arch build + push to ECR. Usage:
+#   pixi run build-docker <fg-labs-sha>
+# Add --image-name <ecr-uri>; --push implies the full fleet platform matrix.
+build-docker = "python -m bwa_mem3_bench.cli build --push -f"
+# Native-arch build loaded into the local docker daemon, for smoke tests. Usage:
+#   pixi run build-docker-native <fg-labs-sha>
+build-docker-native = "python -m bwa_mem3_bench.cli build --load -f"
+
+# Create the buildx builder with an explicit BuildKit GC ceiling. Without the
+# --config, BuildKit's default GC threshold scales with the Docker VM disk
+# (provisioned at the full host disk size), so the cache grew to ~95 GB before
+# anything was collected. Re-run after `docker buildx rm`.
+docker-builder-create = """
+docker buildx create --name bwa-mem3-bench-builder --driver docker-container \
+    --config docker/buildkitd.toml --use
+"""
+# Drop all of the project builder's cache, including `type=exec.cachemount`
+# records -- a plain prune leaves those behind and they grow without bound.
+#
+# `docker buildx prune --builder <name>`, NOT `docker builder prune`. Each
+# buildx builder runs its own buildkitd with its own cache: `docker builder
+# prune` targets the daemon's built-in builder, so it would report success while
+# leaving the `docker-container` builder's cache -- the one that reached ~95 GB
+# and the whole reason buildkitd.toml exists -- completely untouched. Confirmed
+# by `docker buildx du --builder <name>` reporting a different total from the
+# default builder's.
+docker-prune = "docker buildx prune --builder bwa-mem3-bench-builder --all --force"
 
 # CDK (run via `python app.py` — no Node CDK CLI needed for synth)
 # cdk-diff and cdk-deploy require `npm install -g aws-cdk` separately.

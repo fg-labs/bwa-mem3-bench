@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import platform
 import subprocess
 
 from bwa_mem3_bench import REPO_ROOT
@@ -12,6 +13,30 @@ from bwa_mem3_bench import holodeck_repo as _pinned_holodeck_repo
 from bwa_mem3_bench import minibwa_sha as _pinned_minibwa_sha
 from bwa_mem3_bench import tachyon_version as _pinned_tachyon_version
 from bwa_mem3_bench.commands._run import run_cmd
+
+#: Platforms an image must carry to run on the whole bench fleet: x86 (c6a/c7i/c7a)
+#: and Graviton (c7g/c8g). Only meaningful for images that get pushed to ECR.
+FLEET_PLATFORMS = "linux/amd64,linux/arm64"
+
+#: `platform.machine()` values mapped onto the OCI architecture names buildx wants.
+_OCI_ARCH_BY_MACHINE = {
+    "x86_64": "amd64",
+    "amd64": "amd64",
+    "aarch64": "arm64",
+    "arm64": "arm64",
+}
+
+
+def _native_platform() -> str:
+    """Return the OCI platform string for the machine running the build.
+
+    Resolved from `platform.machine()` rather than by shelling out to
+    `docker version`, so it stays usable under --dry-run and in tests.
+
+    :return: e.g. `linux/arm64` on Apple Silicon, `linux/amd64` on an x86 host.
+    """
+    machine = platform.machine().lower()
+    return f"linux/{_OCI_ARCH_BY_MACHINE.get(machine, machine)}"
 
 
 def _ecr_login(image_name: str, *, dry_run: bool) -> None:
@@ -36,7 +61,7 @@ def build(  # noqa: PLR0913
     minibwa_sha: str | None = None,
     holodeck_ref: str | None = None,
     upstream_tag: str = "v2.2.1",
-    platforms: str = "linux/amd64,linux/arm64",
+    platforms: str | None = None,
     image_name: str = "bwa-mem3-bench",
     baseline_arch: str = "",
     make_target: str = "",
@@ -58,7 +83,13 @@ def build(  # noqa: PLR0913
         the canonical pin in ``docker/build-arg-defaults.env``. Pass explicitly
         to build against a different holodeck commit.
     :param upstream_tag: upstream bwa-mem2 tag to bake in (default v2.2.1).
-    :param platforms: comma-separated platforms for buildx.
+    :param platforms: comma-separated platforms for buildx. Defaults to the
+        whole fleet (`linux/amd64,linux/arm64`) when ``push`` is set, and to
+        the host's own architecture otherwise. Building both architectures is
+        only useful for an image that will actually be pulled by both x86 and
+        Graviton workers; for a local build it doubles the layers deposited in
+        the build cache and, on Apple Silicon, runs the amd64 half under QEMU
+        emulation for no benefit. Pass explicitly to override either default.
     :param image_name: image name, sans `:<tag>`. Use an ECR URI to tag for
         push, e.g. `<account-id>.dkr.ecr.<region>.amazonaws.com/bwa-mem3-bench`.
     :param baseline_arch: fg-labs/bwa-mem3 ``BASELINE_ARCH`` build-arg
@@ -95,6 +126,27 @@ def build(  # noqa: PLR0913
     """
     if push and load:
         raise ValueError("--push and --load are mutually exclusive")
+
+    # A multi-arch build is only worth its cost when the result is pushed as a
+    # manifest list for the fleet to pull. A local build that is neither pushed
+    # nor loaded leaves its layers in the build cache and nowhere else, so
+    # defaulting to both architectures there is pure cache growth.
+    default_platforms = FLEET_PLATFORMS if push else _native_platform()
+    resolved_platforms = platforms if platforms else default_platforms
+
+    # `--load` exports through the docker exporter, which writes into the local
+    # daemon's image store -- and that store has no concept of a manifest list. A
+    # multi-platform build with --load therefore dies inside buildx with "docker
+    # exporter does not currently support exporting manifest lists", after doing
+    # all the compiling. Checked here so the failure is instant and says what to
+    # do instead. Checked AFTER resolution so an explicit --platforms is caught
+    # too, not just a default.
+    if load and "," in resolved_platforms:
+        raise ValueError(
+            f"--load cannot export multiple platforms ({resolved_platforms}): the local "
+            "docker image store holds no manifest lists. Build a single platform, or "
+            "use --push to publish a manifest list to a registry."
+        )
 
     make_target = make_target.strip()
     _supported_make_targets = {"", "lto-build"}
@@ -154,7 +206,7 @@ def build(  # noqa: PLR0913
         "--file",
         "docker/Dockerfile",
         "--platform",
-        platforms,
+        resolved_platforms,
         # OCI attestation manifests confuse the AWS ECS agent, which then pulls the
         # wrong-arch variant onto Graviton nodes. Plain manifest lists are fine.
         "--provenance=false",
