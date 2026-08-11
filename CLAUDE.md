@@ -59,6 +59,18 @@ All commands are `pixi run python -m bwa_mem3_bench.cli <subcommand>`.
    `docker/buildkitd.toml` binds only to the `docker-container` driver and so
    does not apply there. Measured on an M-series Mac, arm64, `--load` on both:
    base **290 s** (arm64 skips the upstream bwa-mem2 build), per-SHA **92 s**.
+4c. **Or build on AWS Batch instead of your laptop**: `build-remote -f <sha>`
+   (`--base` for the base image). Submits one single-platform build to each
+   arch-native queue — amd64 to `bwa-mem3-bench-c6a`, arm64 to `-c8g` — so
+   neither half is emulated, then joins the two pushes into a manifest list with
+   `docker buildx imagetools create`. The compute environments scale to zero, so
+   this costs nothing between builds, and the ECR push originates in-region.
+   Two Batch jobs cannot be one buildx invocation, hence the per-arch
+   `<sha>-amd64` / `<sha>-arm64` tags and the explicit join. The build job is
+   privileged (it runs dockerd to get a BuildKit builder) and uses a dedicated
+   `-image-build-role` with ECR push and read-only S3 — the shared worker job
+   role is pull-only by design and must stay that way.
+
 5. **Submit coordinator**: `submit --fg-labs-sha <sha> --target smoke|all`.
    The coordinator is itself a Batch job (queue `bwa-mem3-bench-coordinator`,
    instance type `c6a.large`/`c6a.xlarge`); it runs snakemake and submits

@@ -69,6 +69,7 @@ class BatchStack(cdk.Stack):
         *,
         project_name: str,
         job_role: iam.IRole,
+        image_build_role: iam.IRole,
         execution_role: iam.IRole,
         instance_profile: iam.CfnInstanceProfile,
         bucket_name: str,
@@ -285,6 +286,54 @@ class BatchStack(cdk.Stack):
             ),
         )
 
+        # ── Image-build job definition ──────────────────────────────────────
+        # Builds ONE architecture of a bench image, submitted to whichever
+        # arch-specific queue above runs that platform natively (amd64 -> c6a,
+        # arm64 -> c8g). A multi-arch build on an Apple Silicon laptop emulates
+        # its amd64 half under QEMU, which for a C++ compile is far slower than
+        # native; the compute environments already exist and scale to zero, so
+        # using them costs nothing between builds. The submitter joins the two
+        # single-platform pushes into a manifest list afterwards -- two Batch
+        # jobs cannot be one buildx invocation.
+        #
+        # `privileged` is required: this runs dockerd inside the task to get a
+        # BuildKit builder. It is the reason this job gets `image_build_role`
+        # (ECR push, read-only S3) rather than the shared worker `job_role`.
+        #
+        # The image is pulled from the ECR public mirror rather than Docker Hub
+        # to stay clear of anonymous pull rate limits on a fleet that can start
+        # many jobs at once.
+        image_build_job_definition_name = f"{project_name}-image-build"
+        batch.CfnJobDefinition(
+            self,
+            "ImageBuildJobDef",
+            job_definition_name=image_build_job_definition_name,
+            type="container",
+            platform_capabilities=["EC2"],
+            timeout=batch.CfnJobDefinition.TimeoutProperty(
+                # Generous: a base-image build compiles upstream bwa-mem2 plus
+                # four cargo installs. Natively that is well inside an hour, but
+                # a cold spot host pulling the dind image first should not trip
+                # the timeout.
+                attempt_duration_seconds=7200,
+            ),
+            container_properties=batch.CfnJobDefinition.ContainerPropertiesProperty(
+                image="public.ecr.aws/docker/library/docker:27-dind",
+                job_role_arn=image_build_role.role_arn,
+                execution_role_arn=execution_role.role_arn,
+                privileged=True,
+                # Whole-instance reservation: `make -j$(nproc)` inside the build
+                # wants every core, and a half-packed host would let a second
+                # build contend for them. Memory leaves headroom under the
+                # 32 GiB that both c6a.4xlarge and c8g.4xlarge carry.
+                vcpus=16,
+                memory=24576,
+                # Overridden at submit time by `cli build-remote`; a placeholder
+                # is required or CDK rejects the definition.
+                command=["sh", "-c", "echo 'overridden at submit time' && exit 1"],
+            ),
+        )
+
         # ── EventBridge → SNS notifications ─────────────────────────────────
         # Fires when the coordinator job reaches SUCCEEDED or FAILED.
         # Subscribe via: aws sns subscribe --topic-arn <arn> --protocol email ...
@@ -311,6 +360,9 @@ class BatchStack(cdk.Stack):
         # ── CloudFormation outputs ───────────────────────────────────────────
         cdk.CfnOutput(self, "BucketName", value=bucket_name)
         cdk.CfnOutput(self, "CoordinatorQueueName", value=coordinator_queue_name)
+        cdk.CfnOutput(
+            self, "ImageBuildJobDefinitionName", value=image_build_job_definition_name
+        )
         cdk.CfnOutput(
             self,
             "CoordinatorJobDefinitionName",

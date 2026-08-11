@@ -38,6 +38,7 @@ def main() -> None:
         env=env,
         project_name=PROJECT_NAME,
         job_role=storage.job_role,
+        image_build_role=storage.image_build_role,
         execution_role=storage.execution_role,
         instance_profile=storage.instance_profile,
         bucket_name=storage.bucket.bucket_name,

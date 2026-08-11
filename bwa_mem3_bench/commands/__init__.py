@@ -4,6 +4,7 @@ from bwa_mem3_bench.commands import aws, bench
 from bwa_mem3_bench.commands.bless_baseline import bless_baseline
 from bwa_mem3_bench.commands.bless_golden import bless_golden
 from bwa_mem3_bench.commands.build import build, build_base
+from bwa_mem3_bench.commands.build_remote import build_remote
 from bwa_mem3_bench.commands.collect import collect
 from bwa_mem3_bench.commands.submit import submit
 from bwa_mem3_bench.commands.sync_local import sync_local
@@ -17,6 +18,7 @@ __all__ = [
     "bless_golden",
     "build",
     "build_base",
+    "build_remote",
     "collect",
     "submit",
     "sync_local",

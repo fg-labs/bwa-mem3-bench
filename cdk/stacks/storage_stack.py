@@ -86,11 +86,13 @@ class StorageStack(cdk.Stack):
                 ecr.LifecycleRule(
                     rule_priority=2,
                     description=(
-                        "Keep last 30 tagged images (~30 fg-labs SHAs of "
-                        "history including tier-suffixed variants)"
+                        "Keep last 90 tagged images (~30 fg-labs SHAs of history: "
+                        "each SHA can carry the manifest-list tag plus one "
+                        "per-arch tag per platform, since Batch image builds push "
+                        "<sha>-amd64 / <sha>-arm64 before they are joined)"
                     ),
                     tag_status=ecr.TagStatus.ANY,
-                    max_image_count=30,
+                    max_image_count=90,
                 ),
             ],
         )
@@ -212,6 +214,64 @@ class StorageStack(cdk.Stack):
         self.bucket.grant_read_write(self.job_role)
         self.ecr_repo.grant_pull(self.job_role)
 
+        # ── Image-build role ────────────────────────────────────────────────
+        # Batch image-build jobs (docker/batch-image-build.sh) need to PUSH to
+        # ECR. The worker job role above deliberately cannot: its boundary grants
+        # pull only, and every benchmark worker assumes it, so adding push there
+        # would let any rule's shell overwrite a released image. A separate role
+        # with a separate boundary keeps the push capability scoped to the jobs
+        # that build images.
+        #
+        # It needs read-only S3 (fetch the build context) rather than the
+        # read/write the worker role has -- a build job has no reason to write
+        # benchmark outputs.
+        self.image_build_boundary = iam.ManagedPolicy(
+            self,
+            "BenchImageBuildBoundary",
+            managed_policy_name=f"{project_name}-image-build-boundary",
+            statements=[
+                iam.PolicyStatement(
+                    actions=["s3:GetObject", "s3:ListBucket", "s3:GetBucketLocation"],
+                    resources=[self.bucket.bucket_arn, f"{self.bucket.bucket_arn}/*"],
+                ),
+                iam.PolicyStatement(
+                    actions=[
+                        "logs:CreateLogGroup",
+                        "logs:CreateLogStream",
+                        "logs:PutLogEvents",
+                    ],
+                    resources=[
+                        f"arn:aws:logs:{self.region}:{self.account}:log-group:/aws/batch/*"
+                    ],
+                ),
+                iam.PolicyStatement(
+                    actions=[
+                        "ecr:GetAuthorizationToken",
+                        "ecr:BatchCheckLayerAvailability",
+                        "ecr:GetDownloadUrlForLayer",
+                        "ecr:BatchGetImage",
+                        "ecr:InitiateLayerUpload",
+                        "ecr:UploadLayerPart",
+                        "ecr:CompleteLayerUpload",
+                        "ecr:PutImage",
+                    ],
+                    resources=["*"],
+                ),
+            ],
+        )
+
+        self.image_build_role = iam.Role(
+            self,
+            "BenchImageBuildRole",
+            role_name=f"{project_name}-image-build-role",
+            assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
+            description=f"{project_name} Batch image-build task role (ECR push)",
+            permissions_boundary=self.image_build_boundary,
+        )
+        self.bucket.grant_read(self.image_build_role)
+        self.ecr_repo.grant_pull_push(self.image_build_role)
+        self.base_ecr_repo.grant_pull_push(self.image_build_role)
+
         # The coordinator Batch job passes this role to its child jobs. AWS requires
         # an explicit iam:PassRole grant scoped to the role ARN being passed.
         self.job_role.add_to_policy(
@@ -324,6 +384,12 @@ class StorageStack(cdk.Stack):
             "BaseEcrRepositoryUri",
             value=self.base_ecr_repo.repository_uri,
             export_name="BwaMem3BenchBaseEcrUri",
+        )
+        cdk.CfnOutput(
+            self,
+            "ImageBuildRoleArn",
+            value=self.image_build_role.role_arn,
+            export_name="BwaMem3BenchImageBuildRoleArn",
         )
         cdk.CfnOutput(
             self,

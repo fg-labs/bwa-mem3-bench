@@ -101,6 +101,13 @@ check = { depends-on = ["cargo-fmt-check", "cargo-clippy", "cargo-test", "py-fmt
 #   pixi run build-docker-base --image-name <ecr-uri>
 build-docker-base = "python -m bwa_mem3_bench.cli build-base --push"
 
+# Build on AWS Batch, one native job per architecture (amd64 -> c6a queue,
+# arm64 -> c8g). Avoids emulating the amd64 half under QEMU, and the ECR push
+# originates in-region. Requires `cdk deploy` for the image-build job definition.
+#   pixi run build-docker-batch -f <fg-labs-sha>
+#   pixi run build-docker-batch --base          # after a pin bump
+build-docker-batch = "python -m bwa_mem3_bench.cli build-remote"
+
 # Multi-arch build + push to ECR. Usage:
 #   pixi run build-docker <fg-labs-sha>
 # Add --image-name <ecr-uri>; --push implies the full fleet platform matrix.
