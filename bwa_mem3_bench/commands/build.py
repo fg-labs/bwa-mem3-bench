@@ -7,12 +7,8 @@ import subprocess
 import sys
 
 from bwa_mem3_bench import REPO_ROOT
-from bwa_mem3_bench import fgumi_ref as _pinned_fgumi_ref
-from bwa_mem3_bench import fgumi_repo as _pinned_fgumi_repo
-from bwa_mem3_bench import holodeck_ref as _pinned_holodeck_ref
-from bwa_mem3_bench import holodeck_repo as _pinned_holodeck_repo
 from bwa_mem3_bench import minibwa_sha as _pinned_minibwa_sha
-from bwa_mem3_bench import tachyon_version as _pinned_tachyon_version
+from bwa_mem3_bench.base_image import base_image_tag, base_image_uri, base_pins
 from bwa_mem3_bench.commands._run import run_cmd
 
 #: Platforms an image must carry to run on the whole bench fleet: x86 (c6a/c7i/c7a)
@@ -153,8 +149,7 @@ def build(  # noqa: PLR0913
     *,
     fg_labs_sha: str,
     minibwa_sha: str | None = None,
-    holodeck_ref: str | None = None,
-    upstream_tag: str = "v2.2.1",
+    base_image: str | None = None,
     platforms: str | None = None,
     image_name: str = "bwa-mem3-bench",
     baseline_arch: str = "",
@@ -172,11 +167,13 @@ def build(  # noqa: PLR0913
         ``docker/build-arg-defaults.env`` (which must match the vendored
         ``vendor/minibwa`` submodule commit — the real source of truth).
         Pass explicitly only to override the label.
-    :param holodeck_ref: fg-labs/holodeck git ref the image cargo-installs
-        ``holodeck`` from (the truth simulator + ``holodeck eval``). Defaults to
-        the canonical pin in ``docker/build-arg-defaults.env``. Pass explicitly
-        to build against a different holodeck commit.
-    :param upstream_tag: upstream bwa-mem2 tag to bake in (default v2.2.1).
+    :param base_image: full reference of the builder base image to build FROM.
+        Defaults to the sibling ECR repository at the content-addressed tag
+        derived from ``docker/Dockerfile.base`` and the pins in
+        ``docker/build-arg-defaults.env`` (see ``bwa_mem3_bench.base_image``).
+        The base must already exist in the registry -- build and push it with
+        ``cli build-base --push`` after any pin bump or edit to
+        ``Dockerfile.base``, which both change the computed tag.
     :param platforms: comma-separated platforms for buildx. Defaults to the
         whole fleet (`linux/amd64,linux/arm64`) when ``push`` is set, and to
         the host's own architecture otherwise. Building both architectures is
@@ -256,20 +253,12 @@ def build(  # noqa: PLR0913
     # so a plain `build` matches the vendored submodule without an explicit flag.
     resolved_minibwa_sha = minibwa_sha or _pinned_minibwa_sha()
 
-    # Default the holodeck git ref to the canonical pin (build-arg-defaults.env);
-    # the Dockerfile cargo-installs `holodeck` from this ref of the public repo.
-    resolved_holodeck_ref = holodeck_ref or _pinned_holodeck_ref()
-    # The repo URL is always read from the same pin source so a change to
-    # build-arg-defaults.env can't leave build() sending a stale repository.
-    resolved_holodeck_repo = _pinned_holodeck_repo()
-
-    # fgumi supplies `fgumi compare bams` for the --compat identity check. Same
-    # pin-from-one-source treatment as holodeck; no CLI override, because the
-    # comparison tool's version is part of a release's evidence and should move
-    # deliberately via build-arg-defaults.env rather than per invocation.
-    resolved_fgumi_ref = _pinned_fgumi_ref()
-    resolved_fgumi_repo = _pinned_fgumi_repo()
-    resolved_tachyon_version = _pinned_tachyon_version()
+    # The base image carries every build input FG_LABS_SHA does not invalidate.
+    # Its tag is content-addressed over Dockerfile.base plus the pins, so a pin
+    # bump or a recipe edit produces a new tag instead of silently reusing a
+    # stale toolchain -- but that also means the matching base must have been
+    # pushed. `cli build-base --push` does that.
+    resolved_base_image = base_image or base_image_uri(image_name)
 
     # minibwa is vendored as a git submodule (private repo, can't clone in
     # the Dockerfile). Confirm it has been populated before invoking buildx.
@@ -308,9 +297,7 @@ def build(  # noqa: PLR0913
         # wrong-arch variant onto Graviton nodes. Plain manifest lists are fine.
         "--provenance=false",
         "--build-arg",
-        "UPSTREAM_REPO=https://github.com/bwa-mem2/bwa-mem2",
-        "--build-arg",
-        f"UPSTREAM_TAG={upstream_tag}",
+        f"BASE_IMAGE={resolved_base_image}",
         "--build-arg",
         "FG_LABS_REPO=https://github.com/fg-labs/bwa-mem3",
         "--build-arg",
@@ -327,16 +314,6 @@ def build(  # noqa: PLR0913
         "BWAMETH_VERSION=0.2.7",
         "--build-arg",
         f"MINIBWA_SHA={resolved_minibwa_sha}",
-        "--build-arg",
-        f"HOLODECK_REPO={resolved_holodeck_repo}",
-        "--build-arg",
-        f"HOLODECK_REF={resolved_holodeck_ref}",
-        "--build-arg",
-        f"FGUMI_REPO={resolved_fgumi_repo}",
-        "--build-arg",
-        f"FGUMI_REF={resolved_fgumi_ref}",
-        "--build-arg",
-        f"TACHYON_VERSION={resolved_tachyon_version}",
         "--tag",
         f"{image_name}:{sha_tag}",
     ]
@@ -353,4 +330,67 @@ def build(  # noqa: PLR0913
     cmd.append(".")
 
     _warn_if_builder_is_not_gc_bounded(dry_run=dry_run)
+    run_cmd(cmd, dry_run=dry_run, cwd=REPO_ROOT)
+
+
+def build_base(
+    *,
+    platforms: str | None = None,
+    image_name: str = "bwa-mem3-bench",
+    push: bool = False,
+    load: bool = False,
+    dry_run: bool = False,
+) -> None:
+    """Build the builder base image `docker/Dockerfile` starts FROM.
+
+    The base carries the clang-19 toolchain, the Rust toolchains, the upstream
+    bwa-mem2 build and the four cargo-installed pinned tools -- everything
+    ``FG_LABS_SHA`` does not invalidate. Rebuild and push it after bumping any
+    pin in ``docker/build-arg-defaults.env`` or editing ``Dockerfile.base``;
+    both change the content-addressed tag, so the old base stays valid for
+    older builds rather than being overwritten.
+
+    :param platforms: comma-separated platforms for buildx. Same defaults as
+        :func:`build` -- the whole fleet when pushing, the host's own
+        architecture otherwise.
+    :param image_name: benchmark image name, sans `:<tag>`. The base is built
+        for the sibling repository (``<image_name>-base``), which must exist;
+        the CDK storage stack provisions it.
+    :param push: push to ECR after build (mutually exclusive with --load).
+    :param load: load into local docker (single-arch only).
+    :param dry_run: print the command without executing.
+    :raises ValueError: if both ``push`` and ``load`` are set.
+    """
+    if push and load:
+        raise ValueError("--push and --load are mutually exclusive")
+
+    default_platforms = FLEET_PLATFORMS if push else _native_platform()
+    resolved_platforms = platforms if platforms else default_platforms
+
+    target = base_image_uri(image_name, tag=base_image_tag())
+
+    if push:
+        _ecr_login(image_name, dry_run=dry_run)
+
+    cmd = [
+        "docker",
+        "buildx",
+        "build",
+        "--file",
+        "docker/Dockerfile.base",
+        "--platform",
+        resolved_platforms,
+        # Same rationale as the per-SHA build: OCI attestation manifests confuse
+        # the AWS ECS agent into pulling the wrong-arch variant on Graviton.
+        "--provenance=false",
+    ]
+    for name, value in sorted(base_pins().items()):
+        cmd.extend(["--build-arg", f"{name}={value}"])
+    cmd.extend(["--tag", target])
+    if push:
+        cmd.append("--push")
+    if load:
+        cmd.append("--load")
+    cmd.append(".")
+
     run_cmd(cmd, dry_run=dry_run, cwd=REPO_ROOT)

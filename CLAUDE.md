@@ -37,6 +37,17 @@ All commands are `pixi run python -m bwa_mem3_bench.cli <subcommand>`.
 4. **Build + push image**: `build --fg-labs-sha <sha> --image-name <ecr-uri>
    --push`. **Always required** when `workflow/`, `config/`, `docker/`, or the
    `bwa_mem3_bench` package changes — those are `COPY`ed into the image.
+   This builds `FROM` the base image (see below), which must already be pushed.
+4b. **Build + push the BASE image** (`build-base --image-name <ecr-uri> --push`)
+   — only after bumping a pin in `docker/build-arg-defaults.env` or editing
+   `docker/Dockerfile.base`. The base carries the clang toolchain, the Rust
+   toolchains, the upstream bwa-mem2 build and the pinned cargo tools
+   (tricord/holodeck/fgumi/tachyon): everything `FG_LABS_SHA` does not
+   invalidate. Its tag is content-addressed over the recipe plus those pins
+   (`bwa_mem3_bench/base_image.py`), so a bump publishes a NEW tag and leaves
+   older images rebuildable. It lives in its own ECR repo (`<ecr-uri>-base`)
+   because the benchmark repo's lifecycle rule keeps only the last 30 tagged
+   images and would eventually reap a rarely-rebuilt base.
 5. **Submit coordinator**: `submit --fg-labs-sha <sha> --target smoke|all`.
    The coordinator is itself a Batch job (queue `bwa-mem3-bench-coordinator`,
    instance type `c6a.large`/`c6a.xlarge`); it runs snakemake and submits

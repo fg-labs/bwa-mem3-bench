@@ -95,6 +95,49 @@ class StorageStack(cdk.Stack):
             ],
         )
 
+        # Builder base image (docker/Dockerfile.base) — the toolchain, the
+        # upstream bwa-mem2 build and the pinned cargo tools that `docker/
+        # Dockerfile` starts FROM. It lives in its OWN repository rather than
+        # sharing the one above, because that repo's rule 2 keeps only the last
+        # 30 tagged images with `tagStatus: ANY`. A base image is rebuilt only
+        # when a pin moves, so it is always among the oldest tags there and
+        # would be evicted after ~30 SHA pushes — surfacing as `manifest
+        # unknown` on the next cold build rather than at the moment of
+        # deletion, long after the cause.
+        #
+        # Tags are content-addressed (`<upstream-tag>-<digest>`, see
+        # bwa_mem3_bench/base_image.py), so a pin bump publishes a NEW tag and
+        # leaves the old one intact — older SHA images stay rebuildable. That
+        # is why retention here is generous and age-based rather than a tight
+        # count: the whole value of the split is that these layers persist.
+        self.base_ecr_repo = ecr.Repository(
+            self,
+            "BenchBaseEcr",
+            repository_name=f"{ecr_name}-base",
+            # Content-addressed tags never need overwriting; making them
+            # immutable turns an accidental re-push of a changed recipe under
+            # an existing tag into an error instead of a silent swap under
+            # every image that already builds FROM it.
+            image_tag_mutability=ecr.TagMutability.IMMUTABLE,
+            lifecycle_rules=[
+                ecr.LifecycleRule(
+                    rule_priority=1,
+                    description=(
+                        "Expire untagged sub-manifests after 7 days "
+                        "(per-platform pieces of multi-arch lists)"
+                    ),
+                    tag_status=ecr.TagStatus.UNTAGGED,
+                    max_image_age=cdk.Duration.days(7),
+                ),
+                ecr.LifecycleRule(
+                    rule_priority=2,
+                    description="Keep tagged base images for a year",
+                    tag_status=ecr.TagStatus.ANY,
+                    max_image_age=cdk.Duration.days(365),
+                ),
+            ],
+        )
+
         # ── Permission boundary ──────────────────────────────────────────────
         # Scopes the job role to only the permissions it actually needs,
         # preventing privilege escalation even if an inline policy is added.
@@ -275,6 +318,12 @@ class StorageStack(cdk.Stack):
             "EcrRepositoryUri",
             value=self.ecr_repo.repository_uri,
             export_name="BwaMem3BenchEcrUri",
+        )
+        cdk.CfnOutput(
+            self,
+            "BaseEcrRepositoryUri",
+            value=self.base_ecr_repo.repository_uri,
+            export_name="BwaMem3BenchBaseEcrUri",
         )
         cdk.CfnOutput(
             self,
