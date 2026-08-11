@@ -175,7 +175,10 @@ def test_fgumi_gates_depend_on_pipefail_to_see_a_failure() -> None:
 def test_fgumi_is_pinned_and_built_with_the_compare_feature() -> None:
     """`compare` is feature-gated off in a default fgumi build, and the pin is
     part of a release's evidence, so both must be explicit."""
-    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
+    # fgumi is cargo-installed in the BASE image (docker/Dockerfile.base): it is
+    # pinned independently of FG_LABS_SHA, so it lives with the other
+    # SHA-independent tools rather than being rebuilt per benchmarked commit.
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile.base").read_text()
     env = (REPO_ROOT / "docker" / "build-arg-defaults.env").read_text()
     assert "--features compare" in dockerfile
     assert "FGUMI_REF=" in env and "FGUMI_REPO=" in env
@@ -802,9 +805,14 @@ def test_tachyon_is_pinned_to_an_exact_version() -> None:
     # Shell continuations are joined first -- the install is written across two
     # lines, so a per-line search finds `cargo` and `tachyon` in different lines
     # and matches neither.
-    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text().replace("\\\n", " ")
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile.base").read_text().replace("\\\n", " ")
+    # Comment lines are dropped before the search. Dockerfile.base's header prose
+    # names the cargo-installed tools, tachyon among them, so a raw scan matches
+    # the explanation instead of the install and asserts against prose.
     install = next(
-        line for line in dockerfile.splitlines() if "tachyon" in line and "cargo" in line
+        line
+        for line in dockerfile.splitlines()
+        if not line.lstrip().startswith("#") and "tachyon" in line and "cargo" in line
     )
     assert "--locked" in install, install
     assert '--version "${TACHYON_VERSION}"' in install, (

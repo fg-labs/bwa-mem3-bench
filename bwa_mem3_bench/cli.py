@@ -12,6 +12,7 @@ from bwa_mem3_bench.commands import (
     bless_baseline,
     bless_golden,
     build,
+    build_base,
     collect,
     submit,
     sync_local,
@@ -26,6 +27,7 @@ def main(argv: list[str] | None = None) -> None:
     defopt.run(
         {
             "build": build,
+            "build-base": build_base,
             "submit": submit,
             "collect": collect,
             "bless-baseline": bless_baseline,

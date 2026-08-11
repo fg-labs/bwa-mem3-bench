@@ -41,6 +41,7 @@ SCRIPT_REPO_PATH = "docker/emit-host-probe.sh"
 INSTALLED_SCRIPT = "/usr/local/bin/emit-host-probe"
 SCRIPT = Path(REPO_ROOT) / "docker" / "emit-host-probe.sh"
 DOCKERFILE = Path(REPO_ROOT) / "docker" / "Dockerfile"
+BASE_DOCKERFILE = Path(REPO_ROOT) / "docker" / "Dockerfile.base"
 SCALING_SMK = Path(REPO_ROOT) / "workflow" / "rules" / "scaling.smk"
 
 # Every field the ingest reads. Named here so a rename in the script that ingest
@@ -170,13 +171,20 @@ def test_the_runtime_image_receives_the_provenance_the_script_reads() -> None:
     exact failure the probe exists to end.
     """
     text = DOCKERFILE.read_text()
+    # The write happens in the BASE image (docker/Dockerfile.base) -- tachyon is
+    # cargo-installed there, and only that stage has a Rust toolchain to ask for
+    # its version. `docker/Dockerfile`'s builder stage IS that base plus more, so
+    # the runtime `COPY --from=builder /out/share/` below still reaches it. The
+    # coupling now spans three files instead of two, which is precisely why it is
+    # worth asserting.
+    base_text = BASE_DOCKERFILE.read_text()
     installed = _provenance_path()
     assert installed.startswith("/usr/local/share/"), (
         f"expected the provenance under /usr/local/share/, got {installed}"
     )
     built = installed.replace("/usr/local/share/", "/out/share/", 1)
-    assert _in_code(re.escape(built), text), (
-        f"the builder stage never writes {built}, so {installed} will not exist in "
+    assert _in_code(re.escape(built), base_text), (
+        f"the base image never writes {built}, so {installed} will not exist in "
         "the runtime image and every recorded score will have a null `rustc`."
     )
     assert re.search(
@@ -185,8 +193,8 @@ def test_the_runtime_image_receives_the_provenance_the_script_reads() -> None:
         "the runtime stage does not COPY /out/share/ from the builder; the "
         "provenance file would be built and then thrown away."
     )
-    assert _in_code(re.escape("rustc +stable --version"), text), (
-        "the builder must record `rustc +stable --version`: the runtime image has "
+    assert _in_code(re.escape("rustc +stable --version"), base_text), (
+        "the base image must record `rustc +stable --version`: the runtime image has "
         "no Rust toolchain, so this cannot be recovered later, and `cargo +stable "
         "install` floats the compiler between rebuilds."
     )

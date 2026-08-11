@@ -93,9 +93,18 @@ check = { depends-on = ["cargo-fmt-check", "cargo-clippy", "cargo-test", "py-fmt
 # label and empty HOLODECK_REF / FGUMI_REF / TACHYON_VERSION pins. The CLI path
 # is the one `tests/test_compat_arm.py` audits for exactly that hole.
 #
+# Build + push the builder base image (docker/Dockerfile.base): the toolchain,
+# the upstream bwa-mem2 build and the pinned cargo tools that the per-SHA image
+# starts FROM. Rebuild ONLY after bumping a pin in build-arg-defaults.env or
+# editing Dockerfile.base -- both change the content-addressed tag, so the old
+# base survives for older images rather than being overwritten. Usage:
+#   pixi run build-docker-base --image-name <ecr-uri>
+build-docker-base = "python -m bwa_mem3_bench.cli build-base --push"
+
 # Multi-arch build + push to ECR. Usage:
 #   pixi run build-docker <fg-labs-sha>
 # Add --image-name <ecr-uri>; --push implies the full fleet platform matrix.
+# Requires the matching base image to already be pushed (build-docker-base).
 build-docker = "python -m bwa_mem3_bench.cli build --push -f"
 # Native-arch build loaded into the local docker daemon, for smoke tests. Usage:
 #   pixi run build-docker-native <fg-labs-sha>
