@@ -22,7 +22,14 @@
 # `bwa_mem3_bench/base_image.py`), so editing this recipe or bumping a pin
 # produces a new tag and can never silently reuse a stale base.
 
-FROM --platform=$TARGETPLATFORM debian:bookworm AS builder-base
+# Pinned BY DIGEST, not by the `bookworm` tag. The base image's tag is
+# content-addressed over this file plus the pins, and that contract is only
+# worth anything if the inputs it hashes actually determine the contents -- a
+# floating tag lets the same computed tag produce different compilers and
+# packages on different days, which would silently invalidate a benchmark
+# comparison rather than fail a build. Editing this digest changes the file,
+# and therefore the tag, which is exactly the intent.
+FROM --platform=$TARGETPLATFORM debian:bookworm@sha256:813017f3d62be4b5891a7acca6a01bdcd4b8513daa81b1ab99d3a50385b26931 AS builder-base
 
 ARG UPSTREAM_REPO
 ARG UPSTREAM_TAG
@@ -124,8 +131,13 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 # install a separate stable toolchain rather than retraining 1.85 above. We
 # pin to a published crates.io version for reproducibility; bump as needed.
 ARG TRICORD_VERSION=0.1.2
-RUN rustup toolchain install stable --profile minimal --no-self-update && \
-    cargo +stable install --locked --root /out --version "${TRICORD_VERSION}" tricord
+# Pinned rather than `stable`, for the same reason as the digest above: `stable`
+# floats, so the same content-addressed base tag would otherwise be built with
+# whatever compiler happened to be current that day. Bump deliberately.
+ARG RUST_STABLE_VERSION=1.97.1
+RUN rustup toolchain install "${RUST_STABLE_VERSION}" --profile minimal --no-self-update && \
+    cargo "+${RUST_STABLE_VERSION}" install --locked --root /out \
+        --version "${TRICORD_VERSION}" tricord
 
 # Install holodeck (fg-labs/holodeck) for the truth-based accuracy benchmark:
 # it generates the simulated truth datasets and provides `holodeck eval`. The
@@ -136,7 +148,7 @@ RUN rustup toolchain install stable --profile minimal --no-self-update && \
 # hence libgit2-dev in the apt list above (build-only; the binary does not link it).
 ARG HOLODECK_REPO
 ARG HOLODECK_REF
-RUN cargo +stable install --locked --git "${HOLODECK_REPO}" --rev "${HOLODECK_REF}" \
+RUN cargo "+${RUST_STABLE_VERSION}" install --locked --git "${HOLODECK_REPO}" --rev "${HOLODECK_REF}" \
     --root /out holodeck
 
 # Install fgumi for `fgumi compare bams`, the full-content identity check the
@@ -165,7 +177,7 @@ RUN cargo +stable install --locked --git "${HOLODECK_REPO}" --rev "${HOLODECK_RE
 # holodeck above.
 ARG FGUMI_REPO
 ARG FGUMI_REF
-RUN cargo +stable install --locked --git "${FGUMI_REPO}" --rev "${FGUMI_REF}" \
+RUN cargo "+${RUST_STABLE_VERSION}" install --locked --git "${FGUMI_REPO}" --rev "${FGUMI_REF}" \
     --features compare --root /out fgumi
 
 # tachyon measures the HOST, not the aligner: a dependent-load pointer chase over
@@ -192,7 +204,7 @@ RUN cargo +stable install --locked --git "${FGUMI_REPO}" --rev "${FGUMI_REF}" \
 # so an MSRV bump upstream would break this layer with a confusing edition error
 # instead of being absorbed.
 ARG TACHYON_VERSION
-RUN cargo +stable install --locked --root /out \
+RUN cargo "+${RUST_STABLE_VERSION}" install --locked --root /out \
     --version "${TACHYON_VERSION}" tachyon
 # Record WHAT COMPILED the probe, here in the builder, because the runtime stage
 # has no Rust toolchain and so cannot recover it later. `--locked` pins tachyon's

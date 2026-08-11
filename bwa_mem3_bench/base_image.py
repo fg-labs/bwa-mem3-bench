@@ -89,13 +89,36 @@ def base_image_tag(
     the Dockerfile that makes it precise. Any change to either produces a
     different tag, so a stale base can never be silently reused.
 
-    :param pins: build-arg pins to key on. Defaults to :func:`base_pins`.
+    Note the digest covers the Dockerfile's FULL BYTES, comments included, so a
+    comment-only edit also publishes a new tag and forces a rebuild and push of
+    an otherwise byte-identical image. That is deliberate -- the alternative is
+    parsing the recipe to decide which edits are semantic, and being wrong about
+    that reuses a stale toolchain and misattributes a benchmark difference to
+    bwa-mem3. A redundant rebuild is cheap; a wrong result is not.
+
+    :param pins: build-arg pins to key on. Must be exactly
+        :data:`BASE_PIN_NAMES`. Defaults to :func:`base_pins`.
     :param dockerfile: recipe to hash. Defaults to :func:`base_dockerfile`.
     :return: the tag, e.g. ``v2.2.1-9f2c1a4b7e03``.
     :raises FileNotFoundError: if the Dockerfile does not exist.
+    :raises ValueError: if ``pins`` is not exactly :data:`BASE_PIN_NAMES`.
     """
     resolved_pins = dict(pins) if pins is not None else base_pins()
     resolved_dockerfile = dockerfile if dockerfile is not None else base_dockerfile()
+
+    # The whole correctness argument above is that the tag is a function of EVERY
+    # input that can change the image. A caller passing a subset would get a tag
+    # that looks legitimate while keying on fewer inputs -- reintroducing exactly
+    # the silent-stale-base bug this module exists to prevent -- and one missing
+    # `UPSTREAM_TAG` would otherwise die on a bare KeyError below.
+    if set(resolved_pins) != set(BASE_PIN_NAMES):
+        missing = sorted(set(BASE_PIN_NAMES) - set(resolved_pins))
+        unexpected = sorted(set(resolved_pins) - set(BASE_PIN_NAMES))
+        raise ValueError(
+            "base_image_tag requires exactly the BASE_PIN_NAMES pin set; "
+            f"missing={missing}, unexpected={unexpected}. The tag must key on "
+            "every input that can change the base image's contents."
+        )
 
     digest = hashlib.sha256()
     digest.update(resolved_dockerfile.read_bytes())
@@ -112,7 +135,15 @@ def base_image_uri(image_name: str, *, tag: str | None = None) -> str:
     :param image_name: the benchmark image name, sans ``:<tag>``. An ECR URI
         (``<acct>.dkr.ecr.<region>.amazonaws.com/bwa-mem3-bench``) yields the
         sibling repository ``...amazonaws.com/bwa-mem3-bench-base``.
-    :param tag: override the computed tag. Defaults to :func:`base_image_tag`.
+    :param tag: override the computed tag. ``None`` computes it via
+        :func:`base_image_tag`; an empty string is an error rather than a
+        synonym for ``None``.
     :return: e.g. ``<acct>.dkr.ecr.<region>.amazonaws.com/bwa-mem3-bench-base:v2.2.1-9f2c1a4b7e03``.
+    :raises ValueError: if ``tag`` is an empty string.
     """
-    return f"{image_name}{BASE_REPO_SUFFIX}:{tag or base_image_tag()}"
+    # `tag or base_image_tag()` would silently substitute the computed tag for an
+    # empty one, so a bug that produced "" would yield a plausible reference to a
+    # DIFFERENT image instead of failing.
+    if tag is not None and not tag:
+        raise ValueError("tag must be a non-empty string, or None to compute it")
+    return f"{image_name}{BASE_REPO_SUFFIX}:{base_image_tag() if tag is None else tag}"
