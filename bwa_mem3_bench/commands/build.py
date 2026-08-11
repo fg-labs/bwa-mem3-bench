@@ -51,6 +51,58 @@ def _ecr_login(image_name: str, *, dry_run: bool) -> None:
     subprocess.run(["bash", "-c", login_cmd], check=True)
 
 
+def _image_in_local_daemon(image: str) -> bool:
+    """Return whether `image` is present in the local Docker daemon's image store.
+
+    :param image: full image reference.
+    :return: True if `docker image inspect` finds it.
+    """
+    return (
+        subprocess.run(
+            ["docker", "image", "inspect", image],
+            capture_output=True,
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
+def _explain_base_image_failure(base_image: str) -> str:
+    """Return guidance for a build that failed while resolving BASE_IMAGE.
+
+    buildx's own error for this is `pull access denied ... insufficient_scope`,
+    which points at authentication and not at the actual cause. There are two
+    distinct causes and they need opposite fixes, so name which one applies.
+
+    :param base_image: the base image reference the build was given.
+    :return: a message naming the cause and the remedy.
+    """
+    if _image_in_local_daemon(base_image):
+        return (
+            f"\n\nThe build could not resolve BASE_IMAGE={base_image}, but that image "
+            "IS in your local Docker daemon.\n"
+            "The active buildx builder almost certainly uses the `docker-container` "
+            "driver, which runs in its own container with its own image store and so "
+            "cannot see locally-loaded images -- it tries to PULL them instead.\n"
+            "Either:\n"
+            "  - push the base so any builder can fetch it:  "
+            "pixi run build-docker-base --image-name <ecr-uri>\n"
+            "  - or build on a `docker`-driver builder, which shares the daemon's "
+            "store:  BUILDX_BUILDER=desktop-linux pixi run ...\n"
+            "Note the GC ceiling in docker/buildkitd.toml only binds to the "
+            "`docker-container` driver, so the second option trades the cache bound "
+            "for local convenience."
+        )
+    return (
+        f"\n\nThe build could not resolve BASE_IMAGE={base_image}, and it is not in "
+        "your local Docker daemon either.\n"
+        "The base image tag is content-addressed over docker/Dockerfile.base and the "
+        "pins in docker/build-arg-defaults.env, so editing either publishes a NEW tag "
+        "that has to be built and pushed:\n"
+        "  pixi run build-docker-base --image-name <ecr-uri>"
+    )
+
+
 def build(  # noqa: PLR0913
     *,
     fg_labs_sha: str,
@@ -232,7 +284,15 @@ def build(  # noqa: PLR0913
         cmd.append("--load")
     cmd.append(".")
 
-    run_cmd(cmd, dry_run=dry_run, cwd=REPO_ROOT)
+    try:
+        run_cmd(cmd, dry_run=dry_run, cwd=REPO_ROOT)
+    except subprocess.CalledProcessError as error:
+        # Re-raised rather than pre-flighted: a pre-flight would need a registry
+        # round-trip on every build to tell "missing" from "unreachable", and
+        # would still be wrong whenever the active builder's driver disagreed
+        # with what the probe could see. Diagnosing after the fact costs nothing
+        # on the happy path and inspects the state that actually failed.
+        raise RuntimeError(str(error) + _explain_base_image_failure(resolved_base_image)) from error
 
 
 def build_base(
@@ -268,6 +328,14 @@ def build_base(
 
     default_platforms = FLEET_PLATFORMS if push else _native_platform()
     resolved_platforms = platforms if platforms else default_platforms
+
+    # Same manifest-list limitation as `build` -- see the comment there.
+    if load and "," in resolved_platforms:
+        raise ValueError(
+            f"--load cannot export multiple platforms ({resolved_platforms}): the local "
+            "docker image store holds no manifest lists. Build a single platform, or "
+            "use --push to publish a manifest list to a registry."
+        )
 
     target = base_image_uri(image_name, tag=base_image_tag())
 

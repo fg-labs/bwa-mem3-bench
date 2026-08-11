@@ -181,3 +181,55 @@ def test_main_dockerfile_no_longer_builds_what_the_base_carries() -> None:
         assert moved not in instructions, (
             f"{moved!r} is back in the per-SHA builder stage; it belongs in docker/Dockerfile.base"
         )
+
+
+def test_missing_base_image_failure_names_the_driver_cause() -> None:
+    """buildx blames authentication for what is actually a driver-visibility problem.
+
+    A `docker-container` builder runs in its own container with its own image
+    store, so a locally-`--load`ed base is invisible to it and `FROM` becomes a
+    registry pull -- surfacing as `pull access denied ... insufficient_scope`,
+    which sends you off checking ECR credentials. Found by actually running the
+    two-stage build; no amount of `buildx build --check` or unit testing reaches
+    it, because it only appears when a real `FROM` is resolved.
+    """
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(build_module, "_image_in_local_daemon", lambda image: True)
+        present = build_module._explain_base_image_failure("base:tag")
+    finally:
+        monkeypatch.undo()
+    assert "docker-container" in present
+    assert "BUILDX_BUILDER" in present
+    assert "build-docker-base" in present
+
+
+def test_absent_base_image_failure_points_at_rebuilding_it() -> None:
+    """The other cause needs the opposite fix, so the two must not share a message."""
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(build_module, "_image_in_local_daemon", lambda image: False)
+        absent = build_module._explain_base_image_failure("base:tag")
+    finally:
+        monkeypatch.undo()
+    assert "not in " in absent
+    assert "build-docker-base" in absent
+    assert "docker-container" not in absent, (
+        "the driver hint is wrong when the image is simply absent"
+    )
+
+
+def test_build_base_also_rejects_multiple_platforms_with_load() -> None:
+    """Sibling of the same guard on `build`.
+
+    `build_base` carries the identical `--load` / `--platforms` shape, so fixing
+    only `build` would leave the base-image path able to compile both
+    architectures and then fail at the export step.
+    """
+    with pytest.raises(ValueError, match="cannot export multiple platforms"):
+        build_module.build_base(
+            image_name="test",
+            platforms="linux/amd64,linux/arm64",
+            load=True,
+            dry_run=True,
+        )

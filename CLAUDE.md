@@ -48,6 +48,17 @@ All commands are `pixi run python -m bwa_mem3_bench.cli <subcommand>`.
    older images rebuildable. It lives in its own ECR repo (`<ecr-uri>-base`)
    because the benchmark repo's lifecycle rule keeps only the last 30 tagged
    images and would eventually reap a rarely-rebuilt base.
+
+   **A `docker-container` builder cannot see a locally-`--load`ed base.** It
+   runs in its own container with its own image store, so `FROM ${BASE_IMAGE}`
+   becomes a registry pull and fails with `pull access denied ...
+   insufficient_scope` — which reads like an ECR auth problem and is not one.
+   For the normal flow this never bites, because the base is pushed. To test
+   the two-stage build entirely locally, run both halves on a `docker`-driver
+   builder (`BUILDX_BUILDER=desktop-linux`), accepting that the GC ceiling in
+   `docker/buildkitd.toml` binds only to the `docker-container` driver and so
+   does not apply there. Measured on an M-series Mac, arm64, `--load` on both:
+   base **290 s** (arm64 skips the upstream bwa-mem2 build), per-SHA **92 s**.
 5. **Submit coordinator**: `submit --fg-labs-sha <sha> --target smoke|all`.
    The coordinator is itself a Batch job (queue `bwa-mem3-bench-coordinator`,
    instance type `c6a.large`/`c6a.xlarge`); it runs snakemake and submits
