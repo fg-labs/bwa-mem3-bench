@@ -1,0 +1,39 @@
+# BuildKit daemon config for the `docker-container` buildx builder this repo uses.
+#
+# Why this file exists: BuildKit's default garbage-collection threshold scales
+# with the size of the disk it lives on. Docker Desktop provisions its VM disk
+# sparsely at the full host disk size (1.8 TB on the machine this was written
+# on), so the default policy saw no reason to collect anything until the cache
+# was well into the hundreds of GB. In practice the builder's state volume
+# reached ~95 GB of pure build cache before anyone noticed.
+#
+# Every `build` in this repo passes a fresh `--build-arg FG_LABS_SHA=...`, which
+# invalidates the fg-labs/bwa-mem3 clone-and-compile layer and everything below
+# it. So each benchmarked SHA deposits a complete new set of compile layers that
+# no later build will ever reuse. That is normal and fine -- but it means the
+# cache grows without bound unless GC is given an explicit ceiling.
+#
+# Attach with:
+#   docker buildx create --name bwa-mem3-bench-builder \
+#       --driver docker-container --config docker/buildkitd.toml --use
+# or just `pixi run docker-builder-create`.
+
+# REQUIRES BuildKit >= 0.16 (Docker Desktop >= 4.34, or `docker buildx version`
+# reporting v0.16+). These three keys replaced the older single `keepBytes`, and
+# buildkitd IGNORES UNKNOWN CONFIG KEYS WITHOUT ERRORING -- so on an older daemon
+# this whole file is silently inert and the cache is unbounded again. Confirm the
+# values took effect rather than assuming:
+#   docker buildx inspect --bootstrap bwa-mem3-bench-builder
+# should echo back `Reserved Space: 10GiB / Max Used Space: 30GiB /
+# Min Free Space: 20GiB`. Verified that way on BuildKit v0.31.2.
+[worker.oci]
+  enabled = true
+  gc = true
+  # Start collecting once the cache exceeds `reservedSpace`, and never let it
+  # exceed `maxUsedSpace`. Sized to comfortably hold the shared upstream
+  # bwa-mem2 build plus a few recent fg-labs SHAs, which is all that is ever
+  # reused -- older SHAs are dead weight by construction.
+  reservedSpace = "10GB"
+  maxUsedSpace = "30GB"
+  # Always leave this much free on the underlying disk regardless of the above.
+  minFreeSpace = "20GB"
