@@ -7,7 +7,11 @@ from unittest.mock import patch
 
 import pytest
 
-from bwa_mem3_bench.commands.bless_golden import _parse_s3_bams, bless_golden
+# Import the module object (not the re-exported function) for patching its
+# `subprocess` / `run_cmd` symbols — `commands/__init__` re-exports the
+# `bless_golden` *function*, which shadows the submodule on attribute access.
+from bwa_mem3_bench.commands import _bless_golden as bless_golden_module
+from bwa_mem3_bench.commands._bless_golden import _parse_s3_bams, bless_golden
 from bwa_mem3_bench.release_allowances import (
     DEFAULT_ALLOWANCES_PATH,
     ReleaseAllowance,
@@ -15,11 +19,6 @@ from bwa_mem3_bench.release_allowances import (
     canonical_golden_sha,
     load_allowances,
 )
-
-# Import the module object (not the re-exported function) for patching its
-# `subprocess` / `run_cmd` symbols — `commands/__init__` re-exports the
-# `bless_golden` *function*, which shadows the submodule on attribute access.
-bless_golden_module = importlib.import_module("bwa_mem3_bench.commands.bless_golden")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -100,7 +99,7 @@ def _isolate_runs_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # Resolve the module via import_module (the sys.modules entry) rather than a
     # dotted target: commands/__init__ re-exports the bless_golden *function*,
     # which shadows the submodule on attribute access.
-    bless_golden_mod = importlib.import_module("bwa_mem3_bench.commands.bless_golden")
+    bless_golden_mod = importlib.import_module("bwa_mem3_bench.commands._bless_golden")
     monkeypatch.setattr(bless_golden_mod, "REPO_ROOT", tmp_path)
 
 

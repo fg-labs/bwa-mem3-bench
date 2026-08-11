@@ -1,14 +1,12 @@
 """Unit tests for the upload-data SE/PE staging branches."""
 
-import importlib
-from types import ModuleType
-
 from bwa_mem3_bench import data_sources
 
 # `bwa_mem3_bench.commands.__init__` re-exports the `upload_data` *function* under
 # the same name as the submodule, shadowing it in the package namespace.  Use
 # importlib to get the actual module object so monkeypatch can find `run_cmd`.
-_upload_data_mod: ModuleType = importlib.import_module("bwa_mem3_bench.commands.upload_data")
+from bwa_mem3_bench.commands import _upload_data as _upload_data_mod
+
 # Ensure _upload_sample is accessible for the tests.
 _upload_sample = _upload_data_mod._upload_sample  # type: ignore[attr-defined]
 

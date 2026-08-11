@@ -1,12 +1,11 @@
-"""Tests for ``bwa_mem3_bench.commands.watch`` helpers."""
+"""Tests for ``bwa_mem3_bench.commands._watch`` helpers."""
 
 from __future__ import annotations
 
-import importlib
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-watch_module = importlib.import_module("bwa_mem3_bench.commands.watch")
+from bwa_mem3_bench.commands import _watch as watch_module
 
 # 250 ``j*`` ids + one ``dup`` id = 251 unique ids; ceil(251 / 100) = 3 chunks.
 _EXPECTED_CHUNK_SPAN_CALLS = 3

@@ -15,7 +15,6 @@ reproduce them cleanly. `aws cleanup-s3` is not the cause; it reaps only
 
 from __future__ import annotations
 
-import importlib
 import json
 import re
 from datetime import UTC, datetime
@@ -25,7 +24,8 @@ import pytest
 from botocore.exceptions import ClientError
 
 from bwa_mem3_bench import REPO_ROOT
-from bwa_mem3_bench.commands.collect import (
+from bwa_mem3_bench.commands import _collect as collect_mod
+from bwa_mem3_bench.commands._collect import (
     _EXCLUDED_PATTERNS,
     _LOCALLY_WRITTEN,
     _MAX_ROWS_LISTED,
@@ -34,12 +34,6 @@ from bwa_mem3_bench.commands.collect import (
 )
 from bwa_mem3_bench.storage.ingest import LateCell
 from bwa_mem3_bench.storage.sqlite import connect
-
-# `bwa_mem3_bench.commands.collect` as an ATTRIBUTE is the re-exported `collect`
-# FUNCTION, not the module (see `commands/__init__.py`), so
-# `from ... import collect as collect_mod` binds a function and every
-# `monkeypatch.setattr` below fails with AttributeError. Import the module by name.
-collect_mod = importlib.import_module("bwa_mem3_bench.commands.collect")
 
 SHA = "abc123"
 _TIMING_HEADER = (

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from bwa_mem3_bench.commands.submit import submit
+from bwa_mem3_bench.commands._submit import submit
 
 # Default number of replicates used to establish a statistically sound baseline.
 _REPS_BASELINE = 5

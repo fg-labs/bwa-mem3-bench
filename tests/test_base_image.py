@@ -9,7 +9,6 @@ failure, which is the expensive kind.
 
 from __future__ import annotations
 
-import importlib
 import inspect
 import re
 from itertools import pairwise
@@ -26,10 +25,7 @@ from bwa_mem3_bench.base_image import (
     base_image_uri,
     base_pins,
 )
-
-# `bwa_mem3_bench.commands.build` the ATTRIBUTE is the re-exported function, not
-# the module -- same trap as in `test_compat_arm.py`.
-build_module = importlib.import_module("bwa_mem3_bench.commands.build")
+from bwa_mem3_bench.commands import _build as build_module
 
 
 def test_the_base_dockerfile_exists() -> None:
