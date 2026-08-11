@@ -27,7 +27,15 @@ def test_root_help() -> None:
 
 
 def test_subcommand_help_does_not_error() -> None:
-    for name in ("build", "submit", "collect", "bless-baseline", "upload-data"):
+    for name in (
+        "build",
+        "build-base",
+        "image-tag",
+        "submit",
+        "collect",
+        "bless-baseline",
+        "upload-data",
+    ):
         r = _run([name, "--help"])
         assert r.returncode == 0, f"{name} --help failed: {r.stderr}"
 

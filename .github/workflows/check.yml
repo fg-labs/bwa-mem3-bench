@@ -24,8 +24,12 @@ jobs:
       - uses: prefix-dev/setup-pixi@14c8aabd75893f83f4ab30c03e7cf853c8208961 # v0.8.10
         with:
           # Must match (or be ahead of) the pixi version that authored pixi.lock
-          # locally, since pixi rejects locks written by newer formats.
-          pixi-version: v0.66.0
+          # locally, since pixi rejects locks written by newer formats. The
+          # failure is `Lock-file version N is newer than supported` at
+          # `pixi install --locked`, i.e. before any task runs -- so bump this
+          # in the same commit as any `pixi add`/`pixi lock` that rewrites the
+          # lock format. pixi 0.71 writes v7; 0.66 reads at most v6.
+          pixi-version: v0.71.0
           environments: default
           cache: true
       # Catches what the Python tests structurally cannot: workflow schema errors

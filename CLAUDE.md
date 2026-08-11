@@ -84,13 +84,12 @@ All commands are `pixi run python -m bwa_mem3_bench.cli <subcommand>`.
    **Credentials: there are none.** The workflow assumes
    `bwa-mem3-bench-image-build-role` via OIDC — GitHub mints a short-lived token
    describing the job, AWS verifies it and returns ~1-hour credentials. Nothing
-   lives in repository secrets. Two setup steps, once per account/repo:
-   - the account needs the GitHub OIDC provider (an account-level singleton, so
-     CDK deliberately does not own it):
-     `aws iam create-open-id-connect-provider --url
-     https://token.actions.githubusercontent.com --client-id-list sts.amazonaws.com`
-   - the repo needs the role ARN as a variable: `gh variable set
-     AWS_IMAGE_BUILD_ROLE_ARN --body <ImageBuildRoleArn from cdk outputs>`
+   lives in repository secrets. The CDK storage stack declares the account's
+   GitHub OIDC provider (with `RemovalPolicy.RETAIN`, since it is an
+   account-level singleton other projects may rely on), so `cdk deploy` creates
+   it — do NOT also create one by hand, which makes the deploy fail with
+   `EntityAlreadyExists`. One setup step after deploying:
+   `gh variable set AWS_IMAGE_BUILD_ROLE_ARN --body <ImageBuildRoleArn from cdk outputs>`
 
    The role's trust policy pins the subject to
    `repo:fg-labs/bwa-mem3-bench:ref:refs/heads/main`. **Do not loosen that.**

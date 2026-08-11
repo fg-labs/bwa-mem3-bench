@@ -12,15 +12,22 @@ native for the platforms they build.
 
 from __future__ import annotations
 
+import re
 from itertools import pairwise
 from pathlib import Path
 
 import pytest
 import yaml
 
+from bwa_mem3_bench import REPO_ROOT
+from bwa_mem3_bench.base_image import BASE_REPO_SUFFIX
 from bwa_mem3_bench.commands import _build as build_module
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "build-image.yml"
+
+#: Jobs that check the repository out: `prepare` (resolves the tag) and each
+#: `build` matrix leg. The join job needs no source.
+_EXPECTED_CHECKOUT_JOBS = 2
 
 
 def _workflow() -> dict:
@@ -205,6 +212,86 @@ def _run_scripts(job: str) -> str:
     return "\n".join(step.get("run", "") for step in _workflow()["jobs"][job]["steps"])
 
 
+def test_the_workflow_repository_names_match_their_source_of_truth() -> None:
+    """The workflow hardcodes repository names that live in code and in CDK.
+
+    The `-base` suffix is the sharp one. The build leg calls `build-base
+    --image-name <repo>`, which appends `BASE_REPO_SUFFIX` itself, while the join
+    step writes `-base` literally -- so changing the constant makes the build push
+    one repository and the join read another. The build succeeds and the join then
+    fails naming a source that was never pushed, pointing at the manifest step
+    rather than at the rename that caused it.
+
+    The bare name is checked against the CDK storage stack's default `ecr_name`,
+    which is `project_name`.
+    """
+    workflow_text = WORKFLOW.read_text()
+
+    base_refs = re.findall(r"\$\{REGISTRY\}/([A-Za-z0-9._-]+)", workflow_text)
+    assert base_refs, "no repository references found; has the workflow changed shape?"
+
+    # Every reference is either the benchmark repo or that name plus the suffix.
+    benchmark = "bwa-mem3-bench"
+    allowed = {benchmark, f"{benchmark}{BASE_REPO_SUFFIX}"}
+    assert set(base_refs) <= allowed, (
+        f"workflow references repositories {sorted(set(base_refs) - allowed)}, which "
+        f"are neither the benchmark repo nor its {BASE_REPO_SUFFIX!r} sibling"
+    )
+    assert f"{benchmark}{BASE_REPO_SUFFIX}" in base_refs, (
+        "the join step must reference the base repository; if BASE_REPO_SUFFIX "
+        "changed, the workflow's literal '-base' no longer matches what "
+        "`build-base` pushes to"
+    )
+
+    # The storage stack defaults `ecr_name` to `project_name`, which app.py sets
+    # from PROJECT_NAME -- so that constant is what the ECR repository is named.
+    app = (REPO_ROOT / "cdk" / "app.py").read_text()
+    project_name = re.search(r'^PROJECT_NAME\s*=\s*"([^"]+)"', app, re.MULTILINE)
+    assert project_name, "could not find PROJECT_NAME in cdk/app.py"
+    assert project_name.group(1) == benchmark, (
+        f"cdk/app.py names the project {project_name.group(1)!r} but the workflow "
+        f"pushes to {benchmark!r}; the workflow would target a repository that "
+        "does not exist"
+    )
+
+
+def test_every_workflow_pins_a_pixi_that_can_read_the_lockfile() -> None:
+    """A lock written by a newer pixi than CI pins fails before any task runs.
+
+    `pixi install --locked` aborts with `Lock-file version N is newer than
+    supported`, so the job dies in setup with nothing having executed -- and a
+    `pixi add` is an easy way to bump the lock format without noticing. Checked
+    across every workflow because build-image.yml pins the same version twice and
+    would have failed identically to check.yml.
+
+    Compares major.minor only: a patch release does not change the lock format,
+    and requiring exactness would fail on every unrelated pixi bump.
+    """
+    lock_version = int(
+        yaml.safe_load((Path(WORKFLOW).parents[2] / "pixi.lock").read_text())["version"]
+    )
+    # The floor is a fact about pixi releases, not about this repo: 0.67 is the
+    # first that writes v7. Update alongside the pin when the lock format moves.
+    minimum_by_lock_version = {6: (0, 0), 7: (0, 67)}
+    assert lock_version in minimum_by_lock_version, (
+        f"pixi.lock is version {lock_version}, which this test has no floor for; "
+        "add one and confirm the workflow pins are at least that"
+    )
+    required = minimum_by_lock_version[lock_version]
+
+    pins = []
+    for path in (Path(WORKFLOW).parents[0]).glob("*.yml"):
+        for match in re.finditer(r"pixi-version:\s*v?(\d+)\.(\d+)\.(\d+)", path.read_text()):
+            pins.append((path.name, (int(match.group(1)), int(match.group(2)))))
+    assert pins, "no pixi-version pins found; this guard would be vacuous"
+
+    for name, pin in pins:
+        assert pin >= required, (
+            f"{name} pins pixi {pin[0]}.{pin[1]}, which cannot read a version-"
+            f"{lock_version} pixi.lock (needs >= {required[0]}.{required[1]})"
+        )
+
+
 @pytest.mark.parametrize("job", ["prepare", "build", "join"])
 def test_no_run_script_interpolates_an_expression(job: str) -> None:
     """No `${{ ... }}` anywhere inside a `run:` body, in any job.
@@ -272,16 +359,26 @@ def test_the_sha_is_validated_before_any_credentialed_job() -> None:
     assert "40" in _run_scripts("prepare"), "prepare must enforce a full 40-char SHA"
 
 
-def test_checkout_does_not_persist_the_github_token() -> None:
-    """The build job holds AWS credentials; don't also leave a token in .git/config."""
-    checkouts = [
-        step
-        for step in _workflow()["jobs"]["build"]["steps"]
-        if step.get("uses", "").startswith("actions/checkout@")
-    ]
-    assert checkouts, "expected a checkout step in the build job"
-    for step in checkouts:
-        assert step["with"]["persist-credentials"] is False
+def test_no_checkout_persists_the_github_token() -> None:
+    """Every checkout in this workflow, not just the credentialed job's.
+
+    `build` holds AWS credentials, so a token left in `.git/config` there is the
+    sharpest case -- but `prepare` also runs repository code through pixi, and
+    hardening one checkout while leaving its sibling is the asymmetry that gets
+    noticed later rather than the one that was reasoned about.
+    """
+    checked = 0
+    for job_name, job in _workflow()["jobs"].items():
+        for step in job.get("steps", []):
+            if not step.get("uses", "").startswith("actions/checkout@"):
+                continue
+            checked += 1
+            assert step.get("with", {}).get("persist-credentials") is False, (
+                f"the checkout in job {job_name!r} persists GITHUB_TOKEN"
+            )
+    assert checked >= _EXPECTED_CHECKOUT_JOBS, (
+        f"expected checkouts in several jobs, found {checked}"
+    )
 
 
 @pytest.mark.parametrize(
