@@ -1,0 +1,280 @@
+# Build a bench image on native hardware for both fleet architectures, and push
+# it to ECR as a manifest list.
+#
+# WHY THIS RUNS IN CI AND NOT ON A LAPTOP.
+# The fleet runs x86 (c6a/c7i/c7a) and Graviton (c7g/c8g), so every image needs
+# both architectures. Building both on an Apple Silicon laptop emulates the amd64
+# half under QEMU, which for a C++ compile is 5-15x slower than native AND eats
+# the machine for the duration. GitHub's `ubuntu-24.04` and `ubuntu-24.04-arm`
+# runners are each native for one half, so nothing is emulated and the laptop
+# does no work at all.
+#
+# WHY TWO JOBS AND A JOIN. The two architectures run on different machines, so
+# they cannot be one `docker buildx build`. Each leg pushes a single-platform
+# image under an arch-suffixed tag and `join` assembles those into a manifest
+# list, which copies no layers.
+#
+# The per-arch tags are deliberately left in ECR afterwards. They cannot be
+# deleted: the manifest list references those images, and the benchmark repo's
+# lifecycle rule 1 expires UNTAGGED images after 7 days, so untagging them would
+# break every image a week after it was built. The retention count in
+# cdk/stacks/storage_stack.py accounts for the 3 tags per SHA.
+#
+# RECOVERING A HALF-FAILED RUN. Prefer "Re-run failed jobs" over "Re-run all
+# jobs", but the two targets fail differently and neither is harmless:
+#   - target=base: the base repository's tags are IMMUTABLE, so re-running a leg
+#     that already pushed fails with a tag-immutability error. Loud and safe.
+#   - target=per-sha: the benchmark repository is MUTABLE (it has to be -- the
+#     coordinator resolves `:latest`), so re-running a leg that already pushed
+#     SILENTLY OVERWRITES it. Same inputs rebuild the same source, so the result
+#     is equivalent rather than wrong, but note that a `<sha>` tag is therefore
+#     not proof that the image was built exactly once.
+#
+# CREDENTIALS. There are none. `id-token: write` lets the job mint a short-lived
+# OIDC token describing itself; AWS verifies that against GitHub's published keys
+# and returns ~1-hour credentials for the image-build role. Nothing is stored in
+# repository secrets. The role's trust policy pins the subject to this repo on
+# refs/heads/main -- see GITHUB_IMAGE_BUILD_SUBJECT in the storage stack for why
+# that pin is load-bearing on a public repository.
+name: build-image
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Which image to build
+        type: choice
+        options: [per-sha, base]
+        default: per-sha
+      fg_labs_sha:
+        description: fg-labs/bwa-mem3 commit SHA, full 40 hex chars (required for per-sha)
+        type: string
+      # A choice, not free text. The values are the same allowlist `build()`
+      # enforces in Python -- but that check runs long after GitHub has already
+      # substituted the string into a shell command, so it is no defense against
+      # injection. Constraining the input at the source is.
+      make_target:
+        description: fg-labs Makefile target
+        type: choice
+        options: ["", lto-build]
+        default: ""
+
+# Never `pull_request` or `pull_request_target`: this workflow pushes to ECR, and
+# on a public repository either trigger would offer that to a fork.
+permissions:
+  contents: read
+
+concurrency:
+  # One build per tag at a time: two concurrent builds of the same tag would race
+  # on the join and could leave the manifest list pointing at one leg from each
+  # run. This is sound only because `make_target` is a `choice`; as free text,
+  # " lto-build" and "lto-build" would resolve to the SAME tag (build() strips it)
+  # while landing in DIFFERENT concurrency groups, defeating the guard.
+  # Interpolated into a group name, not a shell command, so not an injection sink.
+  group: build-image-${{ inputs.target }}-${{ inputs.fg_labs_sha }}-${{ inputs.make_target }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  # Resolve the tag ONCE. The base image's tag is content-addressed over
+  # Dockerfile.base plus the pins, so it cannot be read off the inputs, and both
+  # build legs plus the join must agree on it exactly.
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: prefix-dev/setup-pixi@14c8aabd75893f83f4ab30c03e7cf853c8208961 # v0.8.10
+        with:
+          pixi-version: v0.66.0
+          environments: default
+          cache: true
+      - name: reject a per-sha build with no SHA
+        if: inputs.target == 'per-sha' && inputs.fg_labs_sha == ''
+        run: |
+          echo "::error::target=per-sha requires fg_labs_sha" && exit 1
+      # Checked in `prepare` so the failure is immediate and in one place, rather
+      # than surfacing twice as an opaque "Credentials could not be loaded" from
+      # the build legs. Set it from the storage stack's ImageBuildRoleArn output:
+      #   gh variable set AWS_IMAGE_BUILD_ROLE_ARN --body <arn>
+      - name: require the image-build role variable
+        if: vars.AWS_IMAGE_BUILD_ROLE_ARN == ''
+        run: |
+          echo "::error::repository variable AWS_IMAGE_BUILD_ROLE_ARN is not set" && exit 1
+      # `fg_labs_sha` is free text and reaches a shell here, a `git checkout` in
+      # the Dockerfile, and an image tag. Validated BEFORE any of that, and in
+      # the one job that holds no credentials.
+      - name: validate the fg-labs SHA
+        if: inputs.target == 'per-sha'
+        env:
+          FG_LABS_SHA: ${{ inputs.fg_labs_sha }}
+        run: |
+          case "${FG_LABS_SHA}" in
+            *[!0-9a-f]* | "")
+              echo "::error::fg_labs_sha must be 40 lowercase hex chars" && exit 1 ;;
+          esac
+          [ "${#FG_LABS_SHA}" -eq 40 ] \
+            || { echo "::error::fg_labs_sha must be exactly 40 chars"; exit 1; }
+      - id: tag
+        name: resolve the image tag
+        # Every untrusted value is passed through `env:` and referenced as a shell
+        # variable. Interpolating `${{ inputs.* }}` directly into `run:` lets the
+        # expression engine paste attacker-chosen text into the script BEFORE bash
+        # parses it, so no amount of quoting in the script helps -- and two steps
+        # later this job's siblings hold AWS credentials.
+        env:
+          TARGET: ${{ inputs.target }}
+          FG_LABS_SHA: ${{ inputs.fg_labs_sha }}
+          MAKE_TARGET: ${{ inputs.make_target }}
+        run: |
+          if [ "${TARGET}" = "base" ]; then
+            tag=$(pixi run python -m bwa_mem3_bench.cli image-tag --base)
+          else
+            tag=$(pixi run python -m bwa_mem3_bench.cli image-tag \
+              --fg-labs-sha "${FG_LABS_SHA}" \
+              --make-target "${MAKE_TARGET}")
+          fi
+          # A newline in `tag` would inject additional key=value pairs into the
+          # step's outputs. The tag is machine-derived, so anything outside this
+          # character class means an upstream guard has already been defeated.
+          case "${tag}" in
+            "" | *[!A-Za-z0-9._-]*)
+              echo "::error::refusing to emit a malformed tag: ${tag}" && exit 1 ;;
+          esac
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "resolved tag: ${tag}"
+
+  build:
+    needs: prepare
+    permissions:
+      contents: read
+      id-token: write # mint the OIDC token; without this the role cannot be assumed
+    strategy:
+      fail-fast: false # a failure on one arch should not hide the other's result
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # vendor/minibwa is built into the image from the vendored source
+          # rather than cloned in the Dockerfile, so the submodule has to be
+          # present. It is a public repository, so the default token suffices.
+          submodules: recursive
+          # Do not leave the GITHUB_TOKEN in .git/config: this job goes on to
+          # hold AWS credentials, and a persisted token is one more thing worth
+          # stealing if anything here is ever made to run untrusted code. The
+          # submodule fetch above still works -- checkout uses the token during
+          # the fetch itself, it just does not write it to disk afterwards.
+          persist-credentials: false
+      - uses: prefix-dev/setup-pixi@14c8aabd75893f83f4ab30c03e7cf853c8208961 # v0.8.10
+        with:
+          pixi-version: v0.66.0
+          environments: default
+          cache: true
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_IMAGE_BUILD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2.1.6
+      # `--arch-tag` both suffixes the pushed tag and suppresses `:latest`: a
+      # single-platform image published as :latest would be pulled by the whole
+      # fleet and fail to execute on the other architecture. The CLI also refuses
+      # an --arch-tag that disagrees with --platforms, which is what stops a
+      # mislabelled leg from being joined into the wrong slot of the manifest
+      # list -- a failure nothing downstream could detect.
+      # This step holds live AWS credentials, so nothing reaches it by string
+      # interpolation -- see the note in `prepare`. `matrix.*` and the ECR
+      # registry are workflow-controlled rather than user-supplied, but they go
+      # through `env:` too: the rule is easier to keep than to audit case by case.
+      - name: build and push ${{ matrix.platform }}
+        env:
+          TARGET: ${{ inputs.target }}
+          FG_LABS_SHA: ${{ inputs.fg_labs_sha }}
+          MAKE_TARGET: ${{ inputs.make_target }}
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          repo="${REGISTRY}/bwa-mem3-bench"
+          if [ "${TARGET}" = "base" ]; then
+            pixi run python -m bwa_mem3_bench.cli build-base \
+              --image-name "${repo}" \
+              --platforms "${PLATFORM}" \
+              --arch-tag "${ARCH}" \
+              --push
+          else
+            pixi run python -m bwa_mem3_bench.cli build \
+              --fg-labs-sha "${FG_LABS_SHA}" \
+              --image-name "${repo}" \
+              --platforms "${PLATFORM}" \
+              --arch-tag "${ARCH}" \
+              --make-target "${MAKE_TARGET}" \
+              --push
+          fi
+
+  join:
+    needs: [prepare, build]
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_IMAGE_BUILD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2.1.6
+      # :latest is applied HERE, to the finished manifest list, and only for a
+      # plain per-SHA build. The coordinator job definition resolves :latest, so
+      # it must never point at a single architecture or at a build-flag variant.
+      - name: assemble the manifest list
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          TARGET: ${{ inputs.target }}
+          MAKE_TARGET: ${{ inputs.make_target }}
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          if [ "${TARGET}" = "base" ]; then
+            repo="${REGISTRY}/bwa-mem3-bench-base"
+          else
+            repo="${REGISTRY}/bwa-mem3-bench"
+          fi
+          tags=(--tag "${repo}:${TAG}")
+          if [ "${TARGET}" = "per-sha" ] && [ -z "${MAKE_TARGET}" ]; then
+            tags+=(--tag "${repo}:latest")
+          fi
+          docker buildx imagetools create "${tags[@]}" \
+            "${repo}:${TAG}-amd64" "${repo}:${TAG}-arm64"
+      # A manifest list that is missing an architecture still pushes cleanly and
+      # only fails later, on a worker of the missing arch, as an image-pull or
+      # exec-format error far from the cause. Assert both are present before
+      # calling the build good.
+      - name: verify both architectures are in the manifest list
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          TARGET: ${{ inputs.target }}
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          if [ "${TARGET}" = "base" ]; then
+            repo="${REGISTRY}/bwa-mem3-bench-base"
+          else
+            repo="${REGISTRY}/bwa-mem3-bench"
+          fi
+          docker buildx imagetools inspect "${repo}:${TAG}" | tee /tmp/manifest.txt
+          for want in linux/amd64 linux/arm64; do
+            grep -q "${want}" /tmp/manifest.txt \
+              || { echo "::error::${repo}:${TAG} is missing ${want}"; exit 1; }
+          done

@@ -14,6 +14,7 @@ from bwa_mem3_bench.commands import (
     build,
     build_base,
     collect,
+    image_tag,
     submit,
     sync_local,
     upload_data,
@@ -28,6 +29,7 @@ def main(argv: list[str] | None = None) -> None:
         {
             "build": build,
             "build-base": build_base,
+            "image-tag": image_tag,
             "submit": submit,
             "collect": collect,
             "bless-baseline": bless_baseline,

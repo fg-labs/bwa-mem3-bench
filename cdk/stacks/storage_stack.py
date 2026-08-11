@@ -8,6 +8,35 @@ from aws_cdk import aws_iam as iam
 from aws_cdk import aws_s3 as s3
 from constructs import Construct
 
+#: GitHub's OIDC issuer.
+#:
+#: The IAM identity provider for it is an ACCOUNT-LEVEL SINGLETON, and it cannot
+#: be given a project-specific name: `CreateOpenIDConnectProvider` takes only a
+#: URL, a client-id list and thumbprints, and the ARN is derived from the URL
+#: (`.../oidc-provider/token.actions.githubusercontent.com`). So there is exactly
+#: one of these per account no matter who creates it, and every project wanting
+#: GitHub OIDC must REFERENCE it rather than declare its own.
+#:
+#: This stack creates it (see `github_oidc_provider` below) because the account
+#: had none and nobody can add one by hand -- `iam:CreateOpenIDConnectProvider`
+#: is denied to the human IAM users here, so CloudFormation, running as the CDK
+#: exec role, is the only path. It carries RemovalPolicy.RETAIN precisely because
+#: it is shared: destroying this project's storage stack must not delete the
+#: trust anchor other projects' roles depend on.
+GITHUB_OIDC_ISSUER = "token.actions.githubusercontent.com"
+
+#: Audience for the OIDC token. `sts.amazonaws.com` is what
+#: `aws-actions/configure-aws-credentials` requests by default.
+GITHUB_OIDC_AUDIENCE = "sts.amazonaws.com"
+
+#: The only repository allowed to assume the image-build role, and the only ref
+#: within it. Both halves are load-bearing, and this repository is PUBLIC:
+#: a `sub` condition that wildcards the repo (`repo:fg-labs/*`) or checks only
+#: `aud` lets ANY repository on GitHub -- anyone's -- assume the role and push
+#: to our ECR. Pinning the ref additionally excludes pull-request builds, whose
+#: `sub` ends in `:pull_request`, so a fork PR cannot reach it either.
+GITHUB_IMAGE_BUILD_SUBJECT = "repo:fg-labs/bwa-mem3-bench:ref:refs/heads/main"
+
 
 class StorageStack(cdk.Stack):
     """Provisions:
@@ -86,11 +115,19 @@ class StorageStack(cdk.Stack):
                 ecr.LifecycleRule(
                     rule_priority=2,
                     description=(
-                        "Keep last 30 tagged images (~30 fg-labs SHAs of "
-                        "history including tier-suffixed variants)"
+                        "Keep last 90 tagged images (~30 fg-labs SHAs of "
+                        "history at 3 tags each, plus tier-suffixed variants)"
                     ),
                     tag_status=ecr.TagStatus.ANY,
-                    max_image_count=30,
+                    # 90, not 30, because the CI build publishes THREE tags per
+                    # SHA: the manifest list plus one per-architecture image
+                    # (`<sha>-amd64`, `<sha>-arm64`). The per-arch tags cannot be
+                    # removed after the join -- the manifest list references
+                    # those images, and rule 1 above reaps untagged images after
+                    # 7 days, so untagging them would break every image a week
+                    # later. `tagStatus: ANY` counts images, so 30 would have cut
+                    # real history from ~30 SHAs to ~10.
+                    max_image_count=90,
                 ),
             ],
         )
@@ -137,6 +174,117 @@ class StorageStack(cdk.Stack):
                 ),
             ],
         )
+
+        # ── GitHub OIDC identity provider (account-level, shared) ────────────
+        # Declared here because the account had none and no human can add one:
+        # `iam:CreateOpenIDConnectProvider` is denied to the IAM users in this
+        # account, so CloudFormation running as the CDK exec role is the only
+        # available path. L1 (`CfnOIDCProvider`) rather than the L2 construct on
+        # purpose -- the L2 provisions a Lambda-backed custom resource, and the
+        # native CloudFormation type needs no such machinery.
+        #
+        # RETAIN because this resource is SHARED and unnameable: there is exactly
+        # one GitHub OIDC provider per account (the ARN is derived from the issuer
+        # URL), so any other project in this account must reference this one. A
+        # `cdk destroy` of this project's storage stack must therefore not delete
+        # it and break their roles' trust anchor.
+        #
+        # No ThumbprintList: IAM validates well-known OIDC issuers against its own
+        # trust store and derives the thumbprint itself, so a hardcoded one here
+        # would just be a rotation liability.
+        self.github_oidc_provider = iam.CfnOIDCProvider(
+            self,
+            "GitHubOidcProvider",
+            url=f"https://{GITHUB_OIDC_ISSUER}",
+            client_id_list=[GITHUB_OIDC_AUDIENCE],
+        )
+        self.github_oidc_provider.apply_removal_policy(cdk.RemovalPolicy.RETAIN)
+
+        # ── Image-build role (GitHub Actions, OIDC-federated) ────────────────
+        # Assumed by `.github/workflows/build-image.yml` via
+        # sts:AssumeRoleWithWebIdentity. No access keys exist for it: GitHub
+        # mints a short-lived signed token describing the job, AWS verifies that
+        # token against GitHub's published keys and returns ~1-hour credentials.
+        # Nothing is stored in repository secrets, so there is nothing to leak
+        # or rotate, and revocation is unilateral from this side.
+        #
+        # This is a SEPARATE role from `job_role` on purpose. Pushing to ECR
+        # needs write permissions that the shared worker role must never hold:
+        # every benchmark worker assumes `job_role`, whose boundary is pull-only,
+        # so granting push there would let any rule's shell overwrite a released
+        # image. The boundary below caps this role at ECR push plus read-only S3
+        # even if an inline policy is added later.
+        self.image_build_boundary = iam.ManagedPolicy(
+            self,
+            "BenchImageBuildBoundary",
+            managed_policy_name=f"{project_name}-image-build-boundary",
+            statements=[
+                iam.PolicyStatement(
+                    # GetAuthorizationToken is account-level and cannot be
+                    # resource-scoped; the layer and manifest actions are scoped
+                    # to the two repositories below.
+                    actions=["ecr:GetAuthorizationToken"],
+                    resources=["*"],
+                ),
+                iam.PolicyStatement(
+                    actions=[
+                        "ecr:BatchCheckLayerAvailability",
+                        "ecr:CompleteLayerUpload",
+                        "ecr:InitiateLayerUpload",
+                        "ecr:PutImage",
+                        "ecr:UploadLayerPart",
+                        # Pull as well as push: the per-SHA build resolves
+                        # `FROM ${BASE_IMAGE}` out of the base repository, and
+                        # the manifest-list join reads back the per-arch images
+                        # it is joining.
+                        "ecr:BatchGetImage",
+                        "ecr:GetDownloadUrlForLayer",
+                    ],
+                    resources=[
+                        self.ecr_repo.repository_arn,
+                        self.base_ecr_repo.repository_arn,
+                    ],
+                ),
+                iam.PolicyStatement(
+                    actions=["s3:GetObject", "s3:ListBucket", "s3:GetBucketLocation"],
+                    resources=[self.bucket.bucket_arn, f"{self.bucket.bucket_arn}/*"],
+                ),
+            ],
+        )
+
+        self.image_build_role = iam.Role(
+            self,
+            "BenchImageBuildRole",
+            role_name=f"{project_name}-image-build-role",
+            # StringEquals, never StringLike: a wildcard here is the difference
+            # between "one branch of one repo" and "any repository on GitHub".
+            # Both claims are checked -- `aud` alone would authenticate the
+            # issuer while saying nothing about WHO is asking.
+            assumed_by=iam.WebIdentityPrincipal(
+                self.github_oidc_provider.attr_arn,
+                conditions={
+                    "StringEquals": {
+                        f"{GITHUB_OIDC_ISSUER}:sub": GITHUB_IMAGE_BUILD_SUBJECT,
+                        f"{GITHUB_OIDC_ISSUER}:aud": GITHUB_OIDC_AUDIENCE,
+                    }
+                },
+            ),
+            description=f"{project_name} GitHub Actions image builds",
+            permissions_boundary=self.image_build_boundary,
+            # Bounds the ROLE SESSION only, and an hour covers a cold base build
+            # on a 4-vCPU hosted runner.
+            #
+            # It is NOT the lifetime of what a leaked build can use: the ECR
+            # authorization token that `docker login` obtains is independently
+            # valid for 12 hours and keeps working after this session expires.
+            # So this value limits the window for re-assuming the role, not the
+            # window for pushing images. Keeping credentials off the shell's
+            # argv and out of interpolated strings is what actually bounds that
+            # -- see the env-var handling in .github/workflows/build-image.yml.
+            max_session_duration=cdk.Duration.hours(1),
+        )
+        self.ecr_repo.grant_pull_push(self.image_build_role)
+        self.base_ecr_repo.grant_pull_push(self.image_build_role)
 
         # ── Permission boundary ──────────────────────────────────────────────
         # Scopes the job role to only the permissions it actually needs,
@@ -330,6 +478,13 @@ class StorageStack(cdk.Stack):
             "JobRoleArn",
             value=self.job_role.role_arn,
             export_name="BwaMem3BenchJobRoleArn",
+        )
+        # Consumed by .github/workflows/build-image.yml as `role-to-assume`.
+        cdk.CfnOutput(
+            self,
+            "ImageBuildRoleArn",
+            value=self.image_build_role.role_arn,
+            export_name="BwaMem3BenchImageBuildRoleArn",
         )
         cdk.CfnOutput(
             self,

@@ -686,11 +686,21 @@ def test_fg_labs_checkout_fetches_the_sha_not_just_branches() -> None:
     """
     dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
     code = "\n".join(line for line in dockerfile.splitlines() if not line.lstrip().startswith("#"))
-    assert "git fetch --quiet origin ${FG_LABS_SHA}" in code
+    assert 'git fetch --quiet origin "${FG_LABS_SHA}"' in code
     assert "git fetch --all" not in code, (
         "`git fetch --all` cannot reach a commit that is not a branch head; "
         "fetch the SHA directly so deleted release branches stay buildable"
     )
+    # The build-arg reaches this shell verbatim, so an unquoted expansion would
+    # let a value carrying shell metacharacters execute inside the builder and
+    # bake the result into an image the fleet then runs. `cli build` also refuses
+    # any SHA that is not 40 hex chars; this is the second layer, and it is the
+    # one that holds for callers that invoke docker directly.
+    for unquoted in ("origin ${FG_LABS_SHA}", "git checkout ${FG_LABS_SHA}"):
+        assert unquoted not in code, (
+            f"unquoted expansion {unquoted!r} in docker/Dockerfile; quote it so a "
+            "hostile FG_LABS_SHA cannot inject shell into the build"
+        )
 
 
 def test_rule_alt_covers_all_three_compat_modes() -> None:
