@@ -233,10 +233,36 @@ def test_make_target_is_a_closed_choice_not_free_text() -> None:
     `build()` does enforce an allowlist, but in Python -- long after GitHub has
     substituted the value into the script. Constraining the input at its source
     is what actually prevents it.
+
+    `default` is a sentinel for "plain make": a `choice` option may not be the
+    empty string (GitHub rejects the workflow outright, which actionlint catches
+    as `string should not be empty`), so the scripts translate it back to "".
     """
     make_target = _workflow()[True]["workflow_dispatch"]["inputs"]["make_target"]
     assert make_target["type"] == "choice"
-    assert set(make_target["options"]) == {"", "lto-build"}
+    assert set(make_target["options"]) == {"default", "lto-build"}
+    assert "" not in make_target["options"], (
+        "GitHub rejects an empty choice option; use the `default` sentinel"
+    )
+
+
+def test_the_make_target_sentinel_is_translated_wherever_it_reaches_a_command() -> None:
+    """`default` must never be passed through as a literal Makefile target.
+
+    It would become the tag suffix `-default` and be rejected by `build()`'s
+    allowlist, so this fails closed rather than mis-building -- but it would fail
+    only after the runner had spun up, so it is pinned here instead.
+    """
+    for job in ("prepare", "build"):
+        script = _run_scripts(job)
+        if "MAKE_TARGET" not in script:
+            continue
+        assert 'if [ "${make_target}" = "default" ]; then make_target=""; fi' in script, (
+            f"job {job} uses MAKE_TARGET without translating the `default` sentinel"
+        )
+        assert '--make-target "${MAKE_TARGET}"' not in script, (
+            f"job {job} passes the raw sentinel instead of the translated value"
+        )
 
 
 def test_the_sha_is_validated_before_any_credentialed_job() -> None:

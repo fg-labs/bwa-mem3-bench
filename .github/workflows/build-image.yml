@@ -49,15 +49,16 @@ on:
       fg_labs_sha:
         description: fg-labs/bwa-mem3 commit SHA, full 40 hex chars (required for per-sha)
         type: string
-      # A choice, not free text. The values are the same allowlist `build()`
-      # enforces in Python -- but that check runs long after GitHub has already
-      # substituted the string into a shell command, so it is no defense against
-      # injection. Constraining the input at the source is.
+      # A closed set, not free text: `build()`'s allowlist runs in Python, long
+      # after GitHub has substituted the value into a shell command, so it is no
+      # defense against injection. Constraining the input at its source is.
+      # `default` is a sentinel for "plain make" -- a choice option cannot be the
+      # empty string, so the scripts below translate it back.
       make_target:
         description: fg-labs Makefile target
         type: choice
-        options: ["", lto-build]
-        default: ""
+        options: [default, lto-build]
+        default: default
 
 # Never `pull_request` or `pull_request_target`: this workflow pushes to ECR, and
 # on a public repository either trigger would offer that to a fork.
@@ -130,12 +131,14 @@ jobs:
           FG_LABS_SHA: ${{ inputs.fg_labs_sha }}
           MAKE_TARGET: ${{ inputs.make_target }}
         run: |
+          make_target="${MAKE_TARGET}"
+          if [ "${make_target}" = "default" ]; then make_target=""; fi
           if [ "${TARGET}" = "base" ]; then
             tag=$(pixi run python -m bwa_mem3_bench.cli image-tag --base)
           else
             tag=$(pixi run python -m bwa_mem3_bench.cli image-tag \
               --fg-labs-sha "${FG_LABS_SHA}" \
-              --make-target "${MAKE_TARGET}")
+              --make-target "${make_target}")
           fi
           # A newline in `tag` would inject additional key=value pairs into the
           # step's outputs. The tag is machine-derived, so anything outside this
@@ -208,6 +211,8 @@ jobs:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
           repo="${REGISTRY}/bwa-mem3-bench"
+          make_target="${MAKE_TARGET}"
+          if [ "${make_target}" = "default" ]; then make_target=""; fi
           if [ "${TARGET}" = "base" ]; then
             pixi run python -m bwa_mem3_bench.cli build-base \
               --image-name "${repo}" \
@@ -220,7 +225,7 @@ jobs:
               --image-name "${repo}" \
               --platforms "${PLATFORM}" \
               --arch-tag "${ARCH}" \
-              --make-target "${MAKE_TARGET}" \
+              --make-target "${make_target}" \
               --push
           fi
 
@@ -253,7 +258,7 @@ jobs:
             repo="${REGISTRY}/bwa-mem3-bench"
           fi
           tags=(--tag "${repo}:${TAG}")
-          if [ "${TARGET}" = "per-sha" ] && [ -z "${MAKE_TARGET}" ]; then
+          if [ "${TARGET}" = "per-sha" ] && [ "${MAKE_TARGET}" = "default" ]; then
             tags+=(--tag "${repo}:latest")
           fi
           docker buildx imagetools create "${tags[@]}" \

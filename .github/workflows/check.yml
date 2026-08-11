@@ -28,6 +28,13 @@ jobs:
           pixi-version: v0.66.0
           environments: default
           cache: true
+      # Catches what the Python tests structurally cannot: workflow schema errors
+      # and shell bugs inside `run:` bodies. It found `options: ["", lto-build]`
+      # in build-image.yml -- a workflow GitHub rejects outright -- which every
+      # unit test happily parsed, because PyYAML accepts an empty string where
+      # GitHub's schema does not.
+      - name: workflow lint
+        run: pixi run workflow-lint
       - name: rust fmt
         run: pixi run cargo-fmt-check
       - name: rust clippy
