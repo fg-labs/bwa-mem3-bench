@@ -19,6 +19,12 @@ EXPECTED_BATCH_QUEUE_COUNT = 8
 # drops the IMDSv2 token PUT; 2 is AWS's documented minimum for containers.
 EXPECTED_IMDS_HOP_LIMIT = 2
 
+# The ONLY GitHub Actions subject allowed to assume the image-build role. Written
+# out literally rather than imported from the stack: the point of the assertion is
+# to pin this exact value, and a test that reads the constant it is checking would
+# happily follow it wherever it moved.
+EXPECTED_OIDC_SUBJECT = "repo:fg-labs/bwa-mem3-bench:ref:refs/heads/main"
+
 
 def _synth(out_dir: Path) -> None:
     """Invoke `python app.py` from the cdk dir with CDK_OUTDIR override."""
@@ -47,6 +53,47 @@ def test_storage_stack_has_bucket_and_ecr(tmp_path: Path) -> None:
     resource_types = {r["Type"] for r in template["Resources"].values()}
     assert "AWS::S3::Bucket" in resource_types
     assert "AWS::ECR::Repository" in resource_types
+
+
+def test_image_build_role_is_pinned_to_one_repository_and_ref(tmp_path: Path) -> None:
+    """The single most dangerous thing in the GitHub Actions build path.
+
+    This repository is PUBLIC and the role can push to ECR. A `sub` condition that
+    wildcards the repository (`repo:fg-labs/*`), or a trust policy that checks only
+    `aud`, lets ANY repository on GitHub — anyone's, worldwide — assume the role and
+    overwrite our images. Pinning the ref additionally excludes pull-request builds,
+    whose subject ends in `:pull_request`, so a fork's PR cannot reach it either.
+
+    Asserted on the synthesized template rather than the construct call, because
+    what protects the account is the policy CloudFormation actually deploys.
+    """
+    out_dir = tmp_path / "cdk.out"
+    _synth(out_dir)
+    template = json.loads((out_dir / "BwaMem3BenchStorage.template.json").read_text())
+
+    roles = [
+        r["Properties"]
+        for r in template["Resources"].values()
+        if r["Type"] == "AWS::IAM::Role"
+        and r["Properties"].get("RoleName") == "bwa-mem3-bench-image-build-role"
+    ]
+    assert len(roles) == 1, "expected exactly one image-build role"
+    statements = roles[0]["AssumeRolePolicyDocument"]["Statement"]
+    assert len(statements) == 1, f"exactly one trust statement expected, got {statements}"
+    statement = statements[0]
+
+    assert statement["Action"] == "sts:AssumeRoleWithWebIdentity"
+    assert statement["Effect"] == "Allow"
+    assert "Federated" in statement["Principal"], (
+        "the role must be assumable only via the OIDC provider, not by a service or account"
+    )
+
+    equals = statement["Condition"]["StringEquals"]
+    assert equals["token.actions.githubusercontent.com:sub"] == EXPECTED_OIDC_SUBJECT
+    assert equals["token.actions.githubusercontent.com:aud"] == "sts.amazonaws.com"
+    assert "StringLike" not in statement["Condition"], (
+        "a StringLike subject condition permits wildcards; this must be an exact match"
+    )
 
 
 def test_batch_stack_has_a_queue_per_arch(tmp_path: Path) -> None:

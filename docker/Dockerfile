@@ -102,10 +102,14 @@ RUN cd /build/minibwa && \
 #
 # GitHub serves any commit by SHA, so naming it directly works whether or not it
 # is on a branch — and keeps working after the branch is gone.
-RUN git clone --recursive ${FG_LABS_REPO} fg-labs && \
+# Quoted: these are build-args, so their values reach this shell verbatim and an
+# unquoted expansion would let one carry shell metacharacters into the builder.
+# `cli build` also refuses any FG_LABS_SHA that is not 40 hex chars, so this is
+# the second of two layers rather than the only one.
+RUN git clone --recursive "${FG_LABS_REPO}" fg-labs && \
     cd fg-labs && \
-    git fetch --quiet origin ${FG_LABS_SHA} && \
-    git checkout ${FG_LABS_SHA} && \
+    git fetch --quiet origin "${FG_LABS_SHA}" && \
+    git checkout "${FG_LABS_SHA}" && \
     git submodule update --init --recursive && \
     # Same GCC-12 __rdtsc redefinition fix as upstream (no-op if fg-labs already
     # patched). The `|| true` is scoped to JUST the sed via the brace group — a

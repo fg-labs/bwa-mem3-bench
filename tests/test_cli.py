@@ -27,7 +27,15 @@ def test_root_help() -> None:
 
 
 def test_subcommand_help_does_not_error() -> None:
-    for name in ("build", "submit", "collect", "bless-baseline", "upload-data"):
+    for name in (
+        "build",
+        "build-base",
+        "image-tag",
+        "submit",
+        "collect",
+        "bless-baseline",
+        "upload-data",
+    ):
         r = _run([name, "--help"])
         assert r.returncode == 0, f"{name} --help failed: {r.stderr}"
 
@@ -50,9 +58,9 @@ def test_subcommand_stubs_run_in_dry_mode() -> None:
         [
             "build",
             "--fg-labs-sha",
-            "abcdef1",
+            "abcdef1234567890abcdef1234567890abcdef12",
             "--minibwa-sha",
-            "fedcba9",
+            "fedcba9876543210fedcba9876543210fedcba98",
             "--dry-run",
         ]
     )
@@ -68,7 +76,7 @@ def test_build_baseline_arch_suffixes_tag_and_passes_build_arg() -> None:
         [
             "build",
             "--fg-labs-sha",
-            "abcdef1",
+            "abcdef1234567890abcdef1234567890abcdef12",
             "--baseline-arch",
             "avx512bw",
             "--push",
@@ -78,7 +86,7 @@ def test_build_baseline_arch_suffixes_tag_and_passes_build_arg() -> None:
     assert r.returncode == 0, r.stderr
     out = r.stdout
     assert "BASELINE_ARCH=avx512bw" in out
-    assert ":abcdef1-avx512bw" in out
+    assert ":abcdef1234567890abcdef1234567890abcdef12-avx512bw" in out
     assert ":latest" not in out
 
 
@@ -87,7 +95,7 @@ def test_build_no_baseline_arch_keeps_latest_tag_on_push() -> None:
         [
             "build",
             "--fg-labs-sha",
-            "abcdef1",
+            "abcdef1234567890abcdef1234567890abcdef12",
             "--push",
             "--dry-run",
         ]
@@ -95,7 +103,7 @@ def test_build_no_baseline_arch_keeps_latest_tag_on_push() -> None:
     assert r.returncode == 0, r.stderr
     out = r.stdout
     assert "BASELINE_ARCH=" in out  # passed as empty string
-    assert ":abcdef1" in out
+    assert ":abcdef1234567890abcdef1234567890abcdef12" in out
     assert ":latest" in out
 
 
@@ -108,7 +116,7 @@ def test_build_make_target_suffixes_tag_and_suppresses_latest() -> None:
         [
             "build",
             "--fg-labs-sha",
-            "abcdef1",
+            "abcdef1234567890abcdef1234567890abcdef12",
             "--make-target",
             "lto-build",
             "--push",
@@ -118,7 +126,7 @@ def test_build_make_target_suffixes_tag_and_suppresses_latest() -> None:
     assert r.returncode == 0, r.stderr
     out = r.stdout
     assert "FG_LABS_MAKE_TARGET=lto-build" in out
-    assert ":abcdef1-lto-build" in out
+    assert ":abcdef1234567890abcdef1234567890abcdef12-lto-build" in out
     assert ":latest" not in out
 
 
@@ -128,7 +136,7 @@ def test_build_unsupported_make_target_rejected() -> None:
         [
             "build",
             "--fg-labs-sha",
-            "abcdef1",
+            "abcdef1234567890abcdef1234567890abcdef12",
             "--make-target",
             "bogus-target",
             "--dry-run",
@@ -147,7 +155,7 @@ def test_build_baseline_arch_and_make_target_compose_suffix_order() -> None:
         [
             "build",
             "--fg-labs-sha",
-            "abcdef1",
+            "abcdef1234567890abcdef1234567890abcdef12",
             "--baseline-arch",
             "avx512bw",
             "--make-target",
@@ -160,5 +168,5 @@ def test_build_baseline_arch_and_make_target_compose_suffix_order() -> None:
     out = r.stdout
     assert "BASELINE_ARCH=avx512bw" in out
     assert "FG_LABS_MAKE_TARGET=lto-build" in out
-    assert ":abcdef1-avx512bw-lto-build" in out
+    assert ":abcdef1234567890abcdef1234567890abcdef12-avx512bw-lto-build" in out
     assert ":latest" not in out

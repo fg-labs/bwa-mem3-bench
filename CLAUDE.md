@@ -59,6 +59,61 @@ All commands are `pixi run python -m bwa_mem3_bench.cli <subcommand>`.
    `docker/buildkitd.toml` binds only to the `docker-container` driver and so
    does not apply there. Measured on an M-series Mac, arm64, `--load` on both:
    base **290 s** (arm64 skips the upstream bwa-mem2 build), per-SHA **92 s**.
+4c. **Or build in CI instead of on your laptop — the normal path.** Run the
+   `build-image` workflow (`gh workflow run build-image.yml -f target=per-sha
+   -f fg_labs_sha=<sha>`, or `-f target=base`). It builds `linux/amd64` on
+   `ubuntu-24.04` and `linux/arm64` on `ubuntu-24.04-arm`, so **neither half is
+   emulated** and your machine does nothing. Building both locally would run the
+   amd64 half under QEMU: 5-15× slower for a C++ compile, and it saturates the
+   laptop while it does it.
+
+   The two architectures are on different machines and so cannot be one buildx
+   invocation. Each leg pushes `<tag>-amd64` / `<tag>-arm64` and a `join` job
+   assembles them with `docker buildx imagetools create` (metadata only, no
+   layers copied), applying `:latest` to the finished manifest list. `cli build
+   --arch-tag` is what suffixes a leg's tag, and it *refuses* an arch that
+   disagrees with `--platforms` — joining a mislabelled leg would advertise an
+   arm64 image as `linux/amd64`, which is green everywhere and then dies on a
+   worker with an exec-format error.
+
+   **The per-arch tags stay in ECR on purpose.** The manifest list references
+   those images, and lifecycle rule 1 expires *untagged* images after 7 days, so
+   untagging them post-join would break every image a week later. That is why
+   retention on the benchmark repo is 90 tagged images, not 30: 3 tags per SHA.
+
+   **Credentials: there are none.** The workflow assumes
+   `bwa-mem3-bench-image-build-role` via OIDC — GitHub mints a short-lived token
+   describing the job, AWS verifies it and returns ~1-hour credentials. Nothing
+   lives in repository secrets. The CDK storage stack declares the account's
+   GitHub OIDC provider (with `RemovalPolicy.RETAIN`, since it is an
+   account-level singleton other projects may rely on), so `cdk deploy` creates
+   it — do NOT also create one by hand, which makes the deploy fail with
+   `EntityAlreadyExists`. One setup step after deploying:
+   `gh variable set AWS_IMAGE_BUILD_ROLE_ARN --body <ImageBuildRoleArn from cdk outputs>`
+
+   The role's trust policy pins the subject to
+   `repo:fg-labs/bwa-mem3-bench:ref:refs/heads/main`. **Do not loosen that.**
+   This repo is public and the role can push to ECR; a wildcarded repo or an
+   `aud`-only condition would let any repository on GitHub assume it. The ref pin
+   also excludes fork PRs, whose subject ends in `:pull_request`.
+
+   **If one architecture fails, prefer "Re-run failed jobs".** The two targets
+   fail differently: base tags are IMMUTABLE so re-running a leg that already
+   pushed errors out (loud, safe), whereas the benchmark repo is MUTABLE — it
+   must be, since the coordinator resolves `:latest` — so a `per-sha` re-run
+   silently overwrites. Same inputs rebuild the same source, so the image is
+   equivalent, but a `<sha>` tag is not proof it was built exactly once.
+
+   **Untrusted inputs never reach a shell by interpolation.** `fg_labs_sha` is
+   validated as 40 hex chars in `prepare` (the job with no credentials) *and* in
+   `sha_image_tag()`, and every `${{ }}` value is passed via `env:` and read as a
+   shell variable. This matters because `FG_LABS_SHA` becomes a `--build-arg`
+   that `docker/Dockerfile` expands into a `git checkout`, and the credentialed
+   jobs hold an ECR token valid for **12 hours** — longer than the role session,
+   so exfiltration is the risk that bounds the design, not session length.
+   `make_target` is a `choice`, not free text, for the same reason: the Python
+   allowlist in `build()` runs long after the shell has seen the value.
+
 4d. **Verify the push settled before submitting.** Do NOT go straight from
    `build --push` to `submit`. Workers pull by tag and cache per host, so a
    coordinator submitted while ECR's tag pointer is still propagating runs the

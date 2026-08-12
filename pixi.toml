@@ -19,6 +19,7 @@ pytest-cov = ">=4.0"
 ruff = ">=0.1"
 mypy = ">=1.0"
 types-pyyaml = ">=6.0.12.20260408,<7"
+actionlint = ">=1.7.12,<2"
 
 [feature.workflow.dependencies]
 snakemake-minimal = ">=8.27.1,<9"
@@ -71,6 +72,13 @@ py-lint      = "ruff check bwa_mem3_bench tests"
 py-type      = "mypy --strict bwa_mem3_bench"
 py-test      = "pytest -v"
 
+# GitHub Actions workflows. Checks the workflow SCHEMA and shellchecks every
+# `run:` body -- neither of which the Python tests can do: they parse the YAML
+# with PyYAML, which happily accepts constructs GitHub rejects (an empty
+# `choice` option, for one, which is how a workflow that could never run passed
+# a full green suite).
+workflow-lint = "actionlint .github/workflows/*.yml"
+
 # fgumi, for `tests/test_fgumi_non_primary.py`. Not a conda/pypi dependency:
 # `compare` is feature-gated off in a default build, so it has to come from the
 # same pinned git ref the runtime image uses. The script sources that pin rather
@@ -82,7 +90,7 @@ py-test      = "pytest -v"
 install-fgumi = "bash scripts/install-fgumi.sh"
 
 # Combined
-check = { depends-on = ["cargo-fmt-check", "cargo-clippy", "cargo-test", "py-fmt-check", "py-lint", "py-type", "py-test"] }
+check = { depends-on = ["cargo-fmt-check", "cargo-clippy", "cargo-test", "workflow-lint", "py-fmt-check", "py-lint", "py-type", "py-test"] }
 
 # Docker
 #

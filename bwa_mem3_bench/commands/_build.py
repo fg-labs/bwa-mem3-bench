@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import platform
+import re
 import subprocess
 import sys
 
@@ -14,6 +15,20 @@ from bwa_mem3_bench.commands._run import run_cmd
 #: Platforms an image must carry to run on the whole bench fleet: x86 (c6a/c7i/c7a)
 #: and Graviton (c7g/c8g). Only meaningful for images that get pushed to ECR.
 FLEET_PLATFORMS = "linux/amd64,linux/arm64"
+
+#: A full git object name: exactly 40 lowercase hex characters.
+#:
+#: Enforced because `FG_LABS_SHA` is not merely a label. It becomes a Docker
+#: `--build-arg` that `docker/Dockerfile` expands into a `git fetch` and
+#: `git checkout` shell command, and it becomes part of a published image tag. A
+#: value carrying shell metacharacters could therefore run inside the builder and
+#: bake whatever it produced into an image the benchmark fleet then executes.
+#: The Dockerfile quotes those expansions as well -- two layers, because the CLI
+#: is reachable from a laptop and the Dockerfile from any other caller.
+#: Abbreviated SHAs are rejected too: the tag is how a benchmark result is
+#: attributed to a commit, and two different abbreviations of one commit would
+#: publish as two unrelated images.
+_FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 #: `platform.machine()` values mapped onto the OCI architecture names buildx wants.
 _OCI_ARCH_BY_MACHINE = {
@@ -231,6 +246,122 @@ def _explain_base_image_failure(base_image: str) -> str:
     )
 
 
+def _check_full_sha(name: str, value: str) -> None:
+    """Reject a commit SHA that is not a full 40-character hex object name.
+
+    :param name: parameter name, for the error message.
+    :param value: the candidate SHA.
+    :raises ValueError: if `value` is not 40 lowercase hex characters.
+    """
+    if not _FULL_SHA.match(value):
+        raise ValueError(
+            f"{name} must be a full 40-character lowercase hex commit SHA, got {value!r}. "
+            "It is expanded into a shell command inside the image build and "
+            "becomes part of the published tag, so abbreviations and anything "
+            "non-hex are refused."
+        )
+
+
+def sha_image_tag(
+    *,
+    fg_labs_sha: str,
+    baseline_arch: str = "",
+    make_target: str = "",
+    arch_tag: str = "",
+) -> str:
+    """Return the tag a per-SHA build publishes.
+
+    Suffix order is `baseline_arch`, then `make_target`, then `arch_tag` -- arch
+    last, so stripping it off the end yields the tag the manifest list will carry.
+    A join step can therefore name its per-architecture sources by appending to
+    the final tag rather than splicing into the middle of it.
+
+    Shared with the `image-tag` subcommand so that a caller which needs to know
+    the tag in advance -- the manifest-list join in
+    `.github/workflows/build-image.yml` -- derives it from this function instead
+    of reimplementing the suffix rules and drifting from them.
+
+    :param fg_labs_sha: fg-labs/bwa-mem3 commit SHA.
+    :param baseline_arch: x86 SIMD tier the image is host-locked to, if any.
+    :param make_target: fg-labs/bwa-mem3 Makefile target, if not the default.
+    :param arch_tag: architecture name, when one architecture is built per push.
+    :return: the tag, sans repository and sans a leading colon.
+    :raises ValueError: if `fg_labs_sha` is not a full 40-char hex SHA.
+    """
+    _check_full_sha("fg_labs_sha", fg_labs_sha)
+    suffix_parts = [part for part in (baseline_arch, make_target, arch_tag) if part]
+    suffix = "-" + "-".join(suffix_parts) if suffix_parts else ""
+    return f"{fg_labs_sha}{suffix}"
+
+
+def image_tag(
+    *,
+    fg_labs_sha: str | None = None,
+    base: bool = False,
+    baseline_arch: str = "",
+    make_target: str = "",
+) -> None:
+    """Print the tag a build would publish, without building anything.
+
+    Exists because the base image's tag is content-addressed over
+    ``docker/Dockerfile.base`` and the pins in
+    ``docker/build-arg-defaults.env``, so it cannot be known by reading the
+    command line. Two callers need it: a human asking "which base tag does my
+    build want?" after a pin bump, and the manifest-list join in CI, which has
+    to name the tag its per-architecture legs pushed under.
+
+    :param fg_labs_sha: fg-labs/bwa-mem3 commit SHA. Required unless ``base``.
+    :param base: print the builder base image's content-addressed tag instead.
+    :param baseline_arch: x86 SIMD tier suffix, matching ``build``'s.
+    :param make_target: Makefile target suffix, matching ``build``'s.
+    :raises ValueError: if neither or both of ``fg_labs_sha`` and ``base`` are given.
+    """
+    if bool(fg_labs_sha) == bool(base):
+        raise ValueError("pass exactly one of --fg-labs-sha or --base")
+    if base:
+        print(base_image_tag())
+        return
+    print(
+        sha_image_tag(
+            fg_labs_sha=str(fg_labs_sha),
+            baseline_arch=baseline_arch,
+            make_target=make_target,
+        )
+    )
+
+
+def _check_arch_tag(arch_tag: str, resolved_platforms: str) -> None:
+    """Reject an `arch_tag` that does not describe the platform actually being built.
+
+    The tag suffix is what a later `imagetools create` uses to decide which
+    single-platform push belongs in which slot of the manifest list. Get it wrong
+    and the join succeeds, producing a manifest list whose `amd64` entry holds an
+    arm64 image -- so the build is green, ECR looks right, and every worker on one
+    architecture dies with an exec-format error at run time. Nothing downstream can
+    catch that, which is why it is caught here.
+
+    :param arch_tag: architecture name that will be appended to the pushed tag.
+    :param resolved_platforms: the platform value handed to buildx.
+    :raises ValueError: if `arch_tag` is set alongside several platforms, or names
+        an architecture other than the one being built.
+    """
+    if not arch_tag:
+        return
+    if "," in resolved_platforms:
+        raise ValueError(
+            f"--arch-tag {arch_tag} builds one architecture per invocation, but "
+            f"--platforms is {resolved_platforms}. A multi-platform build already "
+            "produces a manifest list and needs no per-arch tag."
+        )
+    built = resolved_platforms.split("/")[1] if "/" in resolved_platforms else resolved_platforms
+    if arch_tag != built:
+        raise ValueError(
+            f"--arch-tag {arch_tag} disagrees with --platforms {resolved_platforms}, "
+            f"which builds {built}. Joining a mislabelled push into a manifest list "
+            "yields an image that runs on neither architecture reliably."
+        )
+
+
 def build(  # noqa: PLR0913
     *,
     fg_labs_sha: str,
@@ -240,6 +371,7 @@ def build(  # noqa: PLR0913
     image_name: str = "bwa-mem3-bench",
     baseline_arch: str = "",
     make_target: str = "",
+    arch_tag: str = "",
     push: bool = False,
     load: bool = False,
     also_tag_latest: bool = True,
@@ -290,19 +422,34 @@ def build(  # noqa: PLR0913
         against the same fg-labs SHA without re-tagging branches upstream.
         The matching ``submit --make-target ...`` propagates the suffix to
         worker image tags.
+    :param arch_tag: architecture name to append to the pushed tag, e.g.
+        ``amd64``. Set only when building ONE architecture per invocation so
+        that a separate step can join the single-platform pushes into a
+        manifest list -- which is how the GitHub Actions build works, since
+        the two architectures run on different native runners and cannot be
+        one buildx invocation. Requires a single ``platforms`` value, and
+        forces ``also_tag_latest`` off: a single-platform image published as
+        ``:latest`` would be pulled by the whole fleet and fail to execute on
+        the other architecture. Leave empty for an ordinary local or
+        multi-platform build.
     :param push: push to ECR after build (mutually exclusive with --load).
     :param load: load into local docker (single-arch only).
     :param also_tag_latest: when pushing, also tag + push as `:latest`. The
         coordinator Batch job definition references `:latest`, so every new
         image needs it. Default True; set False to only push the SHA tag.
-        Forced False when ``baseline_arch`` or ``make_target`` is set — a
-        host-locked or build-variant image tagged ``:latest`` would silently
-        become the default for any submit that didn't specify the matching
-        arg.
+        Forced False when ``baseline_arch``, ``make_target`` or ``arch_tag``
+        is set — a host-locked or build-variant image tagged ``:latest`` would
+        silently become the default for any submit that didn't specify the
+        matching arg.
     :param dry_run: print the command without executing.
     """
     if push and load:
         raise ValueError("--push and --load are mutually exclusive")
+
+    # Validated FIRST, before the ECR login or anything else with a side effect:
+    # both values become unquoted `--build-arg` expansions inside the Dockerfile's
+    # shell, so a hostile value must never reach a step that has authenticated.
+    _check_full_sha("fg_labs_sha", fg_labs_sha)
 
     # A multi-arch build is only worth its cost when the result is pushed as a
     # manifest list for the fleet to pull. A local build that is neither pushed
@@ -328,6 +475,8 @@ def build(  # noqa: PLR0913
             "use --push to publish a manifest list to a registry."
         )
 
+    _check_arch_tag(arch_tag, resolved_platforms)
+
     make_target = make_target.strip()
     _supported_make_targets = {"", "lto-build"}
     if make_target not in _supported_make_targets:
@@ -338,6 +487,7 @@ def build(  # noqa: PLR0913
     # Default the MINIBWA_SHA label to the canonical pin (build-arg-defaults.env)
     # so a plain `build` matches the vendored submodule without an explicit flag.
     resolved_minibwa_sha = minibwa_sha or _pinned_minibwa_sha()
+    _check_full_sha("minibwa_sha", resolved_minibwa_sha)
 
     # The base image carries every build input FG_LABS_SHA does not invalidate.
     # Its tag is content-addressed over Dockerfile.base plus the pins, so a pin
@@ -374,13 +524,12 @@ def build(  # noqa: PLR0913
     # e.g. `--baseline-arch=avx512bw --make-target=lto-build` produces
     # `<sha>-avx512bw-lto-build` (matches the order the args appear in
     # the conceptual build pipeline: arch selection then build flags).
-    suffix_parts: list[str] = []
-    if baseline_arch:
-        suffix_parts.append(baseline_arch)
-    if make_target:
-        suffix_parts.append(make_target)
-    tag_suffix = "-" + "-".join(suffix_parts) if suffix_parts else ""
-    sha_tag = f"{fg_labs_sha}{tag_suffix}"
+    sha_tag = sha_image_tag(
+        fg_labs_sha=fg_labs_sha,
+        baseline_arch=baseline_arch,
+        make_target=make_target,
+        arch_tag=arch_tag,
+    )
 
     cmd = [
         "docker",
@@ -418,7 +567,11 @@ def build(  # noqa: PLR0913
     # image tagged :latest would crash all c6a workers on next pull, and an
     # LTO (or other build-flag variant) image tagged :latest would silently
     # become the new "default" for any submit that didn't specify make_target.
-    if push and also_tag_latest and not baseline_arch and not make_target:
+    # A single-platform push must never claim :latest -- the coordinator and every
+    # worker resolve that tag, so publishing one architecture under it takes the
+    # whole fleet down on the other. When arch_tag is set the join step applies
+    # :latest to the finished manifest list instead.
+    if push and also_tag_latest and not baseline_arch and not make_target and not arch_tag:
         cmd.extend(["--tag", f"{image_name}:latest"])
     if push:
         cmd.append("--push")
@@ -448,10 +601,11 @@ def build(  # noqa: PLR0913
         raise
 
 
-def build_base(
+def build_base(  # noqa: PLR0913
     *,
     platforms: str | None = None,
     image_name: str = "bwa-mem3-bench",
+    arch_tag: str = "",
     push: bool = False,
     load: bool = False,
     dry_run: bool = False,
@@ -471,6 +625,11 @@ def build_base(
     :param image_name: benchmark image name, sans `:<tag>`. The base is built
         for the sibling repository (``<image_name>-base``), which must exist;
         the CDK storage stack provisions it.
+    :param arch_tag: architecture name to append to the pushed tag. Same
+        contract as :func:`build`'s -- set it only when building one
+        architecture per invocation, for a later manifest-list join. The base
+        image has no ``:latest`` to protect, but the mislabelling hazard is
+        identical and is checked the same way.
     :param push: push to ECR after build (mutually exclusive with --load).
     :param load: load into local docker (single-arch only).
     :param dry_run: print the command without executing.
@@ -492,7 +651,10 @@ def build_base(
             "use --push to publish a manifest list to a registry."
         )
 
-    target = base_image_uri(image_name, tag=base_image_tag())
+    _check_arch_tag(arch_tag, resolved_platforms)
+
+    base_tag = base_image_tag()
+    target = base_image_uri(image_name, tag=f"{base_tag}-{arch_tag}" if arch_tag else base_tag)
 
     if push:
         _ecr_login(image_name, dry_run=dry_run)

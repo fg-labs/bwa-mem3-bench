@@ -3,7 +3,7 @@
 from bwa_mem3_bench.commands import aws, bench
 from bwa_mem3_bench.commands._bless_baseline import bless_baseline
 from bwa_mem3_bench.commands._bless_golden import bless_golden
-from bwa_mem3_bench.commands._build import build, build_base
+from bwa_mem3_bench.commands._build import build, build_base, image_tag
 from bwa_mem3_bench.commands._collect import collect
 from bwa_mem3_bench.commands._submit import submit
 from bwa_mem3_bench.commands._sync_local import sync_local
@@ -18,6 +18,7 @@ __all__ = [
     "build",
     "build_base",
     "collect",
+    "image_tag",
     "submit",
     "sync_local",
     "upload_data",
