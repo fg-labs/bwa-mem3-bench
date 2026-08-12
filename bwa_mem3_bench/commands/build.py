@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import platform
 import subprocess
+import sys
 
 from bwa_mem3_bench import REPO_ROOT
 from bwa_mem3_bench import fgumi_ref as _pinned_fgumi_ref
@@ -12,6 +14,123 @@ from bwa_mem3_bench import holodeck_repo as _pinned_holodeck_repo
 from bwa_mem3_bench import minibwa_sha as _pinned_minibwa_sha
 from bwa_mem3_bench import tachyon_version as _pinned_tachyon_version
 from bwa_mem3_bench.commands._run import run_cmd
+
+#: Platforms an image must carry to run on the whole bench fleet: x86 (c6a/c7i/c7a)
+#: and Graviton (c7g/c8g). Only meaningful for images that get pushed to ECR.
+FLEET_PLATFORMS = "linux/amd64,linux/arm64"
+
+#: `platform.machine()` values mapped onto the OCI architecture names buildx wants.
+_OCI_ARCH_BY_MACHINE = {
+    "x86_64": "amd64",
+    "amd64": "amd64",
+    "aarch64": "arm64",
+    "arm64": "arm64",
+}
+
+
+#: The buildx driver `docker/buildkitd.toml` binds to. A `--config` is only read
+#: by a builder that runs its own buildkitd, which is what this driver does; the
+#: `docker` driver shares the daemon's built-in builder and ignores the file.
+GC_BOUND_BUILDX_DRIVER = "docker-container"
+
+#: The builder `pixi run docker-builder-create` makes, i.e. the only one this repo
+#: knows was created WITH `--config docker/buildkitd.toml`. The driver alone is not
+#: sufficient: a hand-rolled `docker-container` builder has the right driver and no
+#: config, so its cache is unbounded exactly like the default builder's.
+GC_BOUND_BUILDX_BUILDER = "bwa-mem3-bench-builder"
+
+#: Seconds to wait for the advisory driver probe. An unresponsive daemon must not
+#: stall a build on a check that only prints a warning.
+_BUILDER_PROBE_TIMEOUT_S = 5
+
+
+def _native_platform() -> str:
+    """Return the OCI platform string for the machine running the build.
+
+    Resolved from `platform.machine()` rather than by shelling out to
+    `docker version`, so it stays usable under --dry-run and in tests.
+
+    :return: e.g. `linux/arm64` on Apple Silicon, `linux/amd64` on an x86 host.
+    :raises ValueError: if the machine type is empty or not a known architecture.
+    """
+    machine = platform.machine().lower()
+    # `platform.machine()` is documented to return an EMPTY STRING when the value
+    # cannot be determined, and it returns plenty of arches buildx has no business
+    # building for (i386, ppc64le). Forwarding either produces `--platform linux/`
+    # or `--platform linux/ppc64le`, and buildx's own error names neither the
+    # empty value nor where it came from.
+    if machine not in _OCI_ARCH_BY_MACHINE:
+        raise ValueError(
+            f"cannot map this host's architecture to an OCI platform: "
+            f"platform.machine() returned {platform.machine()!r}. "
+            f"Known values: {sorted(_OCI_ARCH_BY_MACHINE)}. "
+            "Pass --platforms explicitly to build for a specific platform."
+        )
+    return f"linux/{_OCI_ARCH_BY_MACHINE[machine]}"
+
+
+def _warn_if_builder_is_not_gc_bounded(*, dry_run: bool) -> None:
+    """Warn when the active buildx builder ignores `docker/buildkitd.toml`.
+
+    That config is the only thing bounding this repo's build cache, and it binds
+    ONLY to a `docker-container` builder created with `--config`. Every other
+    builder -- the daemon's default, anything selected via `BUILDX_BUILDER` --
+    silently ignores it, so the cache grows without bound exactly as it did
+    before the config existed. The failure has no symptom until the disk is full,
+    which is how it reached ~95 GB unnoticed, so it is worth a line on stderr.
+
+    Advisory only: a wrong builder is not a reason to refuse a build, and the
+    driver probe needs a live daemon that `--dry-run` should not require.
+
+    :param dry_run: skip the probe entirely.
+    """
+    if dry_run:
+        return
+    try:
+        probe = subprocess.run(
+            ["docker", "buildx", "inspect", "--format", "{{.Name}} {{.Driver}}"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_BUILDER_PROBE_TIMEOUT_S,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        # An unresponsive or absent docker must not stall the build on a check
+        # that only ever prints a warning.
+        return
+    # A failed probe means no daemon or no such builder; the build itself is
+    # about to report that far better than a warning would.
+    if probe.returncode != 0:
+        return
+
+    name, _, driver = probe.stdout.strip().partition(" ")
+    if not driver:
+        return
+
+    if driver != GC_BOUND_BUILDX_DRIVER:
+        reason = (
+            f"the active buildx builder {name!r} uses the {driver!r} driver, and "
+            f"only the {GC_BOUND_BUILDX_DRIVER!r} driver reads a --config"
+        )
+    elif name != GC_BOUND_BUILDX_BUILDER:
+        # Right driver, unknown provenance. buildx does not report which config
+        # file a builder was created with, so a `docker-container` builder that
+        # is not the one `docker-builder-create` makes cannot be assumed to carry
+        # the ceiling -- and silently assuming it would defeat the check.
+        reason = (
+            f"the active buildx builder {name!r} has the right driver but is not "
+            f"{GC_BOUND_BUILDX_BUILDER!r}, so it may have been created without "
+            "`--config docker/buildkitd.toml`"
+        )
+    else:
+        return
+
+    print(
+        f"warning: {reason}. docker/buildkitd.toml's cache ceiling may NOT apply, "
+        "leaving this build's layers unbounded. Create or select the project "
+        "builder with `pixi run docker-builder-create`.",
+        file=sys.stderr,
+    )
 
 
 def _ecr_login(image_name: str, *, dry_run: bool) -> None:
@@ -36,7 +155,7 @@ def build(  # noqa: PLR0913
     minibwa_sha: str | None = None,
     holodeck_ref: str | None = None,
     upstream_tag: str = "v2.2.1",
-    platforms: str = "linux/amd64,linux/arm64",
+    platforms: str | None = None,
     image_name: str = "bwa-mem3-bench",
     baseline_arch: str = "",
     make_target: str = "",
@@ -58,7 +177,13 @@ def build(  # noqa: PLR0913
         the canonical pin in ``docker/build-arg-defaults.env``. Pass explicitly
         to build against a different holodeck commit.
     :param upstream_tag: upstream bwa-mem2 tag to bake in (default v2.2.1).
-    :param platforms: comma-separated platforms for buildx.
+    :param platforms: comma-separated platforms for buildx. Defaults to the
+        whole fleet (`linux/amd64,linux/arm64`) when ``push`` is set, and to
+        the host's own architecture otherwise. Building both architectures is
+        only useful for an image that will actually be pulled by both x86 and
+        Graviton workers; for a local build it doubles the layers deposited in
+        the build cache and, on Apple Silicon, runs the amd64 half under QEMU
+        emulation for no benefit. Pass explicitly to override either default.
     :param image_name: image name, sans `:<tag>`. Use an ECR URI to tag for
         push, e.g. `<account-id>.dkr.ecr.<region>.amazonaws.com/bwa-mem3-bench`.
     :param baseline_arch: fg-labs/bwa-mem3 ``BASELINE_ARCH`` build-arg
@@ -95,6 +220,30 @@ def build(  # noqa: PLR0913
     """
     if push and load:
         raise ValueError("--push and --load are mutually exclusive")
+
+    # A multi-arch build is only worth its cost when the result is pushed as a
+    # manifest list for the fleet to pull. A local build that is neither pushed
+    # nor loaded leaves its layers in the build cache and nowhere else, so
+    # defaulting to both architectures there is pure cache growth.
+    # Short-circuited, so `_native_platform()` runs ONLY when no override was
+    # given. Evaluating it eagerly would make an unmappable host arch raise even
+    # when `--platforms` was passed -- which is precisely the escape hatch that
+    # error message recommends, so it has to still work on such a host.
+    resolved_platforms = platforms or (FLEET_PLATFORMS if push else _native_platform())
+
+    # `--load` exports through the docker exporter, which writes into the local
+    # daemon's image store -- and that store has no concept of a manifest list. A
+    # multi-platform build with --load therefore dies inside buildx with "docker
+    # exporter does not currently support exporting manifest lists", after doing
+    # all the compiling. Checked here so the failure is instant and says what to
+    # do instead. Checked AFTER resolution so an explicit --platforms is caught
+    # too, not just a default.
+    if load and "," in resolved_platforms:
+        raise ValueError(
+            f"--load cannot export multiple platforms ({resolved_platforms}): the local "
+            "docker image store holds no manifest lists. Build a single platform, or "
+            "use --push to publish a manifest list to a registry."
+        )
 
     make_target = make_target.strip()
     _supported_make_targets = {"", "lto-build"}
@@ -154,7 +303,7 @@ def build(  # noqa: PLR0913
         "--file",
         "docker/Dockerfile",
         "--platform",
-        platforms,
+        resolved_platforms,
         # OCI attestation manifests confuse the AWS ECS agent, which then pulls the
         # wrong-arch variant onto Graviton nodes. Plain manifest lists are fine.
         "--provenance=false",
@@ -203,4 +352,5 @@ def build(  # noqa: PLR0913
         cmd.append("--load")
     cmd.append(".")
 
+    _warn_if_builder_is_not_gc_bounded(dry_run=dry_run)
     run_cmd(cmd, dry_run=dry_run, cwd=REPO_ROOT)
