@@ -37,6 +37,43 @@ All commands are `pixi run python -m bwa_mem3_bench.cli <subcommand>`.
 4. **Build + push image**: `build --fg-labs-sha <sha> --image-name <ecr-uri>
    --push`. **Always required** when `workflow/`, `config/`, `docker/`, or the
    `bwa_mem3_bench` package changes — those are `COPY`ed into the image.
+   This builds `FROM` the base image (see below), which must already be pushed.
+4b. **Build + push the BASE image** (`build-base --image-name <ecr-uri> --push`)
+   — only after bumping a pin in `docker/build-arg-defaults.env` or editing
+   `docker/Dockerfile.base`. The base carries the clang toolchain, the Rust
+   toolchains, the upstream bwa-mem2 build and the pinned cargo tools
+   (tricord/holodeck/fgumi/tachyon): everything `FG_LABS_SHA` does not
+   invalidate. Its tag is content-addressed over the recipe plus those pins
+   (`bwa_mem3_bench/base_image.py`), so a bump publishes a NEW tag and leaves
+   older images rebuildable. It lives in its own ECR repo (`<ecr-uri>-base`)
+   because the benchmark repo's lifecycle rule keeps only the last 30 tagged
+   images and would eventually reap a rarely-rebuilt base.
+
+   **A `docker-container` builder cannot see a locally-`--load`ed base.** It
+   runs in its own container with its own image store, so `FROM ${BASE_IMAGE}`
+   becomes a registry pull and fails with `pull access denied ...
+   insufficient_scope` — which reads like an ECR auth problem and is not one.
+   For the normal flow this never bites, because the base is pushed. To test
+   the two-stage build entirely locally, run both halves on a `docker`-driver
+   builder (`BUILDX_BUILDER=desktop-linux`), accepting that the GC ceiling in
+   `docker/buildkitd.toml` binds only to the `docker-container` driver and so
+   does not apply there. Measured on an M-series Mac, arm64, `--load` on both:
+   base **290 s** (arm64 skips the upstream bwa-mem2 build), per-SHA **92 s**.
+4d. **Verify the push settled before submitting.** Do NOT go straight from
+   `build --push` to `submit`. Workers pull by tag and cache per host, so a
+   coordinator submitted while ECR's tag pointer is still propagating runs the
+   PREVIOUS image and fails in ways that look unrelated to the build. Match the
+   digest ECR reports against the one buildx printed at the end of the push:
+
+   ```bash
+   aws ecr describe-images --repository-name bwa-mem3-bench \
+       --image-ids imageTag=<sha> --query 'imageDetails[].imageDigest' --output text
+   ```
+
+   A "background build completed exit 0" notification is not a push-settled
+   signal. The CI workflow's `join` step verifies the manifest list carries both
+   architectures, which is a different check — it says the list is well-formed,
+   not that the tag has propagated to the workers' view.
 5. **Submit coordinator**: `submit --fg-labs-sha <sha> --target smoke|all`.
    The coordinator is itself a Batch job (queue `bwa-mem3-bench-coordinator`,
    instance type `c6a.large`/`c6a.xlarge`); it runs snakemake and submits

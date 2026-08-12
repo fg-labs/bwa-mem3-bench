@@ -1,10 +1,21 @@
 # syntax=docker/dockerfile:1.7
 
 ############ Stage 1: builder ############
-FROM --platform=$TARGETPLATFORM debian:bookworm AS builder
+#
+# Starts FROM the base image built by `docker/Dockerfile.base`, which carries the
+# clang-19 toolchain, the Rust toolchains, the upstream bwa-mem2 v2.2.1 build and
+# the four cargo-installed pinned tools (tricord, holodeck, fgumi, tachyon).
+# Those inputs are independent of FG_LABS_SHA, so keeping them here meant every
+# SHA bump either rebuilt them or depended on a local build cache surviving.
+# As a base image they are an ordinary pull instead. See `Dockerfile.base` and
+# `bwa_mem3_bench/base_image.py` for how the base tag is derived.
+#
+# BASE_IMAGE is deliberately defaultless: a wrong-but-plausible default would
+# silently build against a stale toolchain, and there is no correct value that
+# is not a function of the pins. `cli build` computes and passes it.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE} AS builder
 
-ARG UPSTREAM_REPO
-ARG UPSTREAM_TAG
 ARG FG_LABS_REPO
 ARG FG_LABS_SHA
 # fg-labs/bwa-mem3 BASELINE_ARCH (PR #84): non-kernel TU compile floor on x86.
@@ -44,96 +55,6 @@ ARG BWA_VERSION
 ARG BWAMETH_VERSION
 ARG TARGETARCH
 
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        build-essential git cmake curl wget gnupg ca-certificates pkg-config \
-        libz-dev libbz2-dev liblzma-dev libcurl4-openssl-dev libssl-dev \
-        libncurses-dev libgit2-dev \
-        python3 python3-pip python3-venv \
-        autoconf automake autoconf-archive libtool \
-    && rm -rf /var/lib/apt/lists/*
-
-# clang-19 toolchain (from apt.llvm.org — bookworm ships only clang-14). We
-# build all three aligners (bwa-mem2, bwa-mem3, minibwa) with clang rather than
-# gcc: clang produces ~16% faster bwa-mem3, ~10% faster bwa-mem2, and ~4%
-# faster minibwa on this workload (see fg-labs/bwa-mem3-bench#31 and the
-# bwa-mem3 build docs). Kept on the stable bookworm base so the snakemake /
-# coordinator Python stack is unchanged; only the compiler moves.
-ARG LLVM_VERSION=19
-RUN wget -qO /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key && \
-    echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-${LLVM_VERSION} main" \
-        > /etc/apt/sources.list.d/llvm.list && \
-    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        clang-${LLVM_VERSION} libomp-${LLVM_VERSION}-dev && \
-    rm -rf /var/lib/apt/lists/*
-# `clang` / `clang++` wrappers on /usr/local/bin (ahead of /usr/bin on PATH).
-# They pin clang-19 and append codegen-neutral compat flags so the 2021-era
-# upstream bwa-mem2 v2.2.1 sources build under a modern clang. clang-16+ turned
-# several long-standing C/C++ conformance warnings into hard errors by default:
-#   C (clang wrapper): bwa-mem2's bundled ext/safestringlib calls abort() (and a
-#     few libc functions) without a prototype -> -Werror=implicit-function-
-#     declaration / int-conversion / incompatible-pointer-types. Downgrade to
-#     warnings (the functions are real libc symbols; codegen-neutral).
-#   C++ (clang++ wrapper): bwa-mem2's kseq.h/utils.cpp use the C++17-removed
-#     `register` keyword -> -Werror=register. Downgrade (keyword is a no-op on
-#     modern compilers; codegen-neutral).
-# Baking the flags into the wrappers (rather than CXX="clang++ -Wno-register")
-# makes them ride through `make multi`'s per-tier sub-make recursion, which
-# passes CXX/CC *unquoted*. bwa-mem3 v0.6.0 and minibwa v0.4 build clean under
-# clang-19 and are unaffected by the extra warning suppression.
-RUN printf '#!/bin/sh\nexec clang-%s -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-pointer-types "$@"\n' "${LLVM_VERSION}" > /usr/local/bin/clang && \
-    printf '#!/bin/sh\nexec clang++-%s -Wno-register "$@"\n' "${LLVM_VERSION}" > /usr/local/bin/clang++ && \
-    chmod +x /usr/local/bin/clang /usr/local/bin/clang++ && \
-    clang --version | head -1
-# autoconf-archive + libtool aren't strictly required by the current
-# ext/htslib submodule, but they're on upstream's official prereqs list
-# (fg-labs/bwa-mem3 PR #93 → docs/src/getting-started/installation.md) and an
-# htslib bump could start depending on them. Defensive hygiene.
-# NOTE: libdeflate-dev is intentionally NOT installed here, before the upstream
-# bwa-mem2 v2.2.1 build below. Upstream's bundled htslib auto-detects libdeflate
-# and uses it, but the bwa-mem2 link step does not add -ldeflate, producing
-# undefined-reference errors at link time. fg-labs/bwa-mem3 main, by contrast,
-# requires libdeflate directly (src/fast_reader.c #include <libdeflate.h>,
-# links -ldeflate). So libdeflate-dev is installed in a dedicated RUN *between*
-# the upstream and fg-labs builds (see below) — present for fg-labs, absent for
-# upstream. The runtime stage ships libdeflate0 for the resulting dynamic link.
-
-# Install Rust toolchain (pinned to match rust-toolchain.toml).
-ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
-ENV PATH=/opt/cargo/bin:$PATH
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain 1.85.0 --profile minimal
-
-WORKDIR /build
-
-# Build upstream bwa-mem2. Upstream v2.2.1 only has x86 SIMD (SSE4.1, AVX,
-# AVX2, AVX-512BW); skip the build on arm64 so no `bwa-mem2.upstream` exists
-# there. The workflow won't ask for it on arm archs (see BASELINE_ARCHS in
-# workflow/Snakefile). Showing upstream has no ARM story is one of the points
-# of this benchmark.
-RUN if [ "$TARGETARCH" != "arm64" ]; then \
-        git clone --depth 1 --branch ${UPSTREAM_TAG} --recursive ${UPSTREAM_REPO} upstream && \
-        # Upstream v2.2.1 re-declares __rdtsc in src/utils.h which also exists in
-        # GCC's <x86intrin.h>. GCC 12+ rejects the redefinition. Strip upstream's
-        # copy so GCC's stdlib version is used (semantically identical — both
-        # wrap the x86 RDTSC instruction).
-        sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' upstream/src/utils.h && \
-        cd upstream && \
-        make multi -j"$(nproc)" CXX=clang++ CC=clang && \
-        install -Dm755 bwa-mem2 /out/bin/bwa-mem2.upstream && \
-        for v in sse41 avx avx2 avx512bw; do \
-            [ -f bwa-mem2.$v ] && install -Dm755 bwa-mem2.$v /out/bin/bwa-mem2.upstream.$v || true; \
-        done; \
-    fi
-
-# libdeflate-dev for the fg-labs/bwa-mem3 build only. Installed AFTER the
-# upstream bwa-mem2 build above (which breaks if htslib links libdeflate) and
-# BEFORE the fg-labs build below (which requires <libdeflate.h> + -ldeflate via
-# src/fast_reader.c, added on main by the content-detecting FASTQ reader fast
-# path). The runtime stage already ships libdeflate0 for the dynamic link.
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        libdeflate-dev \
-    && rm -rf /var/lib/apt/lists/*
-
 # NOTE: the fg-labs/bwa-mem3 clone + build is deliberately the LAST step in this
 # stage (moved below, after compare-bams / minibwa / tricord / holodeck).
 # FG_LABS_SHA is the one build input that changes on every release iteration, and
@@ -166,110 +87,6 @@ RUN cd /build/minibwa && \
     make clean && \
     make -j"$(nproc)" CC=clang && \
     install -Dm755 minibwa /out/bin/minibwa
-
-# Install tricorder (fg-labs/tricord) for benchmarking the alignment subprocess
-# without snakemake's `benchmark:` directive. Tricord requires Rust 1.94+, so
-# install a separate stable toolchain rather than retraining 1.85 above. We
-# pin to a published crates.io version for reproducibility; bump as needed.
-ARG TRICORD_VERSION=0.1.2
-RUN rustup toolchain install stable --profile minimal --no-self-update && \
-    cargo +stable install --locked --root /out --version "${TRICORD_VERSION}" tricord
-
-# Install holodeck (fg-labs/holodeck) for the truth-based accuracy benchmark:
-# it generates the simulated truth datasets and provides `holodeck eval`. The
-# repo is public, so cargo-install it from a pinned git ref (no submodule).
-# Build with +stable (already installed for tricord, >=1.94): the +toolchain
-# override takes precedence over holodeck's rust-toolchain.toml pin, avoiding a
-# hard toolchain coupling. holodeck's `built` build-dependency links libgit2,
-# hence libgit2-dev in the builder apt (build-only; the binary does not link it).
-ARG HOLODECK_REPO
-ARG HOLODECK_REF
-RUN cargo +stable install --locked --git "${HOLODECK_REPO}" --rev "${HOLODECK_REF}" \
-    --root /out holodeck
-
-# Install fgumi for `fgumi compare bams`, the full-content identity check the
-# `--compat=bwa-mem2` arms are scored with. Public repo, so cargo-install from a
-# pinned git ref, same as holodeck.
-#
-# Why a second comparison tool rather than extending our own compare-bams:
-# compare-bams answers a GRADED question (concordance_pct + per-class/per-tag
-# breakdown, feeding the SQLite gates) and deliberately compares only placement,
-# FLAG and aux tags — it never looks at QNAME, SEQ, QUAL, TLEN, RNEXT/PNEXT, or
-# the header. `fgumi compare bams` answers the
-# BOOLEAN question (equal / not equal) over all eleven core SAM fields plus
-# order-independent tags, and enforces @HD/@SQ/@RG compatibility as a hard
-# precondition with @PG/@CO excluded. For a byte-identity assertion the boolean
-# is the right semantic and the wider field set is the whole point.
-#
-# It is NOT a replacement for compare-bams: it cannot compare default-mode
-# bwa-mem3 against bwa-mem2 at all (their @SQ dictionaries differ, since
-# default mode emits M5/AS/UR/SP from the .hdr sidecar and upstream does not, so
-# the header precondition hard-errors), and it reports no percentage — which is
-# what Gates #1/#2 read.
-#
-# `--features compare` is required: the subcommand is feature-gated off by
-# default. Built with +stable (>=1.94) so the +toolchain override takes
-# precedence over fgumi's own rust-toolchain.toml 1.93 pin, same rationale as
-# holodeck above.
-ARG FGUMI_REPO
-ARG FGUMI_REF
-RUN cargo +stable install --locked --git "${FGUMI_REPO}" --rev "${FGUMI_REF}" \
-    --features compare --root /out fgumi
-
-# tachyon measures the HOST, not the aligner: a dependent-load pointer chase over
-# a working set past last-level cache, reporting how fast memory is right now.
-#
-# Installed because wall times on this fleet are not comparable across runs.
-# Repeating a rep on the same EC2 instance reproduces within 2.03%; a fresh
-# instance per rep spreads 9.40%. The v0.9.0 bless failed a perf gate on
-# hic-1M-compat/m7i at +13.0%, and re-running the PREVIOUS release's binary the
-# same day measured it 18.7% slower than its own recorded number -- the host had
-# changed, not the code. cpu_time/wall held at 14.1-14.7 of 16 vCPUs throughout,
-# so no vCPU was lost; identical work simply burned ~20% more CPU-seconds waiting
-# on memory that co-tenants were consuming.
-#
-# Nothing calls it yet -- this makes the binary available and PINS it, so wiring
-# it into a rule is a one-line change rather than an image rebuild plus a pin
-# decision. Where to run it is a cost question (10 s default against a 20 s
-# hic-1M alignment is +50%, against the ~45 min thread-scaling ladder it is
-# nothing), tracked in fg-labs/bwa-mem3-bench#56.
-#
-# Installed from crates.io by VERSION, matching the tricord precedent above
-# rather than the git-ref pattern holodeck and fgumi use -- those track
-# unreleased commits out of necessity, whereas tachyon is a published crate, and
-# `0.1.0` says more to a future reader of this pin than a 40-char SHA does. It
-# also drops a git clone from the build.
-#
-# Built with +stable (already installed for tricord) rather than the stage's 1.85
-# default. 1.85 does satisfy tachyon's MSRV today, but a crates.io install does
-# not honour the package's own rust-toolchain.toml the way a git checkout would,
-# so an MSRV bump upstream would break this layer with a confusing edition error
-# instead of being absorbed.
-ARG TACHYON_VERSION
-RUN cargo +stable install --locked --root /out \
-    --version "${TACHYON_VERSION}" tachyon
-# Record WHAT COMPILED the probe, here in the builder, because the runtime stage
-# has no Rust toolchain and so cannot recover it later. `--locked` pins tachyon's
-# dependencies and `TACHYON_VERSION` pins its source, but `+stable` floats: this
-# layer is currently built by rustc 1.97.1 while the stage default is 1.85.0, and
-# a rebuild months from now will use whatever `stable` means then. Codegen is a
-# second-order influence on a probe whose inner loop is one ~100 ns dependent
-# load, so this is very unlikely to matter at the 10-20% resolution we care
-# about — but "unlikely" is not "recorded", and the entire reason the probe
-# exists is that we previously could not tell a host difference from a code
-# difference after the fact. Pinning a dated toolchain was considered and
-# rejected on fg-labs/bwa-mem3-bench#56 (every other Rust tool in this image uses
-# `+stable`; pinning one alone would be inconsistent and need manual bumping
-# forever). Recording provenance is cheaper and strictly more informative: it
-# lets the question be answered later rather than assumed away.
-#
-# Hand-formatted JSON rather than a heredoc through python3: this stage has no
-# python3, and neither field can contain a JSON metacharacter (a semver string
-# and rustc's own version line).
-RUN mkdir -p /out/share/bwa-mem3-bench && \
-    printf '{"tachyon_version": "%s", "rustc": "%s"}\n' \
-        "${TACHYON_VERSION}" "$(rustc +stable --version)" \
-        > /out/share/bwa-mem3-bench/tachyon-provenance.json
 
 # Build fg-labs bwa-mem3 — intentionally the LAST builder step (see the NOTE
 # above the compare-bams build for the layer-cache rationale).
