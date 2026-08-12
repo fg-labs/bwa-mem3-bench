@@ -92,10 +92,19 @@ All commands are `pixi run python -m bwa_mem3_bench.cli <subcommand>`.
    `gh variable set AWS_IMAGE_BUILD_ROLE_ARN --body <ImageBuildRoleArn from cdk outputs>`
 
    The role's trust policy pins the subject to
-   `repo:fg-labs/bwa-mem3-bench:ref:refs/heads/main`. **Do not loosen that.**
-   This repo is public and the role can push to ECR; a wildcarded repo or an
-   `aud`-only condition would let any repository on GitHub assume it. The ref pin
-   also excludes fork PRs, whose subject ends in `:pull_request`.
+   `repo:fg-labs/bwa-mem3-bench:environment:image-build`, and the `build` and
+   `join` jobs declare `environment: image-build`. **Do not loosen that**, and do
+   not remove the environment's required reviewers — this repo is public and the
+   role can push to ECR (which the fleet then *executes*), so the approval gate is
+   what an environment scope leans on in place of a branch pin. A wildcarded repo
+   or an `aud`-only condition would let any repository on GitHub assume the role;
+   a fork PR cannot match either form, since its subject ends `:pull_request`.
+
+   **This is why you can test from a PR branch.** `gh workflow run
+   build-image.yml --ref my-branch` runs the workflow as written on that branch
+   and pauses before the credentialed jobs until the reviewer approves. With the
+   older `ref:refs/heads/main` pin, STS refused any branch outright and the
+   credentialed half could only be exercised after merging.
 
    **If one architecture fails, prefer "Re-run failed jobs".** The two targets
    fail differently: base tags are IMMUTABLE so re-running a leg that already

@@ -190,6 +190,29 @@ def test_only_the_build_and_join_jobs_can_mint_an_oidc_token() -> None:
         assert jobs[name]["permissions"]["id-token"] == "write"
 
 
+def test_every_credentialed_job_runs_in_the_gated_environment() -> None:
+    """The environment is what the role's trust policy names, and what gates it.
+
+    The subject is `repo:...:environment:image-build`, so a job WITHOUT this key
+    mints a token that STS refuses -- and, more importantly, the environment's
+    required reviewer is the only thing standing between a dispatch from an
+    arbitrary branch and a push to ECR. A credentialed job that skipped the
+    environment would either fail closed or, if the subject were ever loosened,
+    bypass the approval entirely.
+    """
+    jobs = _workflow()["jobs"]
+    for name, job in jobs.items():
+        mints_token = job.get("permissions", {}).get("id-token") == "write"
+        if mints_token:
+            assert job.get("environment") == "image-build", (
+                f"job {name!r} mints an OIDC token outside the gated environment"
+            )
+        else:
+            assert "environment" not in job, (
+                f"job {name!r} declares an environment but needs no credentials"
+            )
+
+
 def test_the_join_verifies_both_architectures_landed() -> None:
     """A manifest list missing an arch pushes cleanly and fails much later."""
     steps = _workflow()["jobs"]["join"]["steps"]

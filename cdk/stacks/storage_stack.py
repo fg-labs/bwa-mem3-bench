@@ -29,13 +29,26 @@ GITHUB_OIDC_ISSUER = "token.actions.githubusercontent.com"
 #: `aws-actions/configure-aws-credentials` requests by default.
 GITHUB_OIDC_AUDIENCE = "sts.amazonaws.com"
 
-#: The only repository allowed to assume the image-build role, and the only ref
-#: within it. Both halves are load-bearing, and this repository is PUBLIC:
-#: a `sub` condition that wildcards the repo (`repo:fg-labs/*`) or checks only
-#: `aud` lets ANY repository on GitHub -- anyone's -- assume the role and push
-#: to our ECR. Pinning the ref additionally excludes pull-request builds, whose
-#: `sub` ends in `:pull_request`, so a fork PR cannot reach it either.
-GITHUB_IMAGE_BUILD_SUBJECT = "repo:fg-labs/bwa-mem3-bench:ref:refs/heads/main"
+#: The only subject allowed to assume the image-build role.
+#:
+#: Scoped to a GitHub ENVIRONMENT rather than to `ref:refs/heads/main`. Both pin
+#: the role to this one repository; the difference is what else they allow.
+#:
+#: A ref pin means only a dispatch from `main` can mint credentials, so the
+#: credentialed half of the workflow -- ECR login, the builds, the push, the
+#: join -- cannot be exercised from a PR branch at all: STS refuses, and the
+#: change has to be merged before it can be tested. An environment pin lets a
+#: dispatch from ANY branch reach the role, but only after the environment's
+#: required reviewer approves that specific run, so an unreviewed branch still
+#: cannot push an image the benchmark fleet executes.
+#:
+#: The approval gate is therefore load-bearing, not decoration: without required
+#: reviewers on the `image-build` environment this string would let any branch
+#: push to ECR unattended. This repository is PUBLIC -- but a fork's pull request
+#: carries `...:pull_request` as its subject and cannot match either form, and
+#: pushing a branch here needs write access.
+GITHUB_IMAGE_BUILD_ENVIRONMENT = "image-build"
+GITHUB_IMAGE_BUILD_SUBJECT = f"repo:fg-labs/bwa-mem3-bench:environment:{GITHUB_IMAGE_BUILD_ENVIRONMENT}"
 
 
 class StorageStack(cdk.Stack):

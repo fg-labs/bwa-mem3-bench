@@ -7,6 +7,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CDK_DIR = REPO_ROOT / "cdk"
 
@@ -23,7 +25,7 @@ EXPECTED_IMDS_HOP_LIMIT = 2
 # out literally rather than imported from the stack: the point of the assertion is
 # to pin this exact value, and a test that reads the constant it is checking would
 # happily follow it wherever it moved.
-EXPECTED_OIDC_SUBJECT = "repo:fg-labs/bwa-mem3-bench:ref:refs/heads/main"
+EXPECTED_OIDC_SUBJECT = "repo:fg-labs/bwa-mem3-bench:environment:image-build"
 
 
 def _synth(out_dir: Path) -> None:
@@ -61,8 +63,14 @@ def test_image_build_role_is_pinned_to_one_repository_and_ref(tmp_path: Path) ->
     This repository is PUBLIC and the role can push to ECR. A `sub` condition that
     wildcards the repository (`repo:fg-labs/*`), or a trust policy that checks only
     `aud`, lets ANY repository on GitHub — anyone's, worldwide — assume the role and
-    overwrite our images. Pinning the ref additionally excludes pull-request builds,
-    whose subject ends in `:pull_request`, so a fork's PR cannot reach it either.
+    overwrite our images. A fork's pull request carries `...:pull_request` as its
+    subject and cannot match this form either.
+
+    The subject is scoped to a GitHub ENVIRONMENT, which trades the ref pin for an
+    approval gate: any branch may dispatch, but the environment's required
+    reviewer must approve the run before credentials are minted. That gate is
+    therefore load-bearing — `test_the_image_build_environment_requires_approval`
+    pins it, and without it this subject would let any branch push unattended.
 
     Asserted on the synthesized template rather than the construct call, because
     what protects the account is the policy CloudFormation actually deploys.
@@ -124,3 +132,37 @@ def test_launch_template_reaches_imds_from_the_container_with_v2_required(tmp_pa
     metadata = templates[0]["Properties"]["LaunchTemplateData"]["MetadataOptions"]
     assert metadata["HttpPutResponseHopLimit"] == EXPECTED_IMDS_HOP_LIMIT
     assert metadata["HttpTokens"] == "required"
+
+
+def test_the_image_build_environment_requires_approval() -> None:
+    """The approval gate is the only thing the environment-scoped subject leans on.
+
+    Scoping the trust policy to an environment rather than to `refs/heads/main`
+    lets ANY branch dispatch the workflow — which is the point, since it makes the
+    credentialed half testable from a PR. What keeps that from also letting an
+    unreviewed branch push images the benchmark fleet executes is the
+    environment's `required_reviewers` rule. Remove the reviewers and the subject
+    silently becomes "any branch, unattended".
+
+    Queried live rather than from config: the gate lives in GitHub's settings, not
+    in this repository, so nothing in the tree would show its removal. Skipped
+    when `gh` cannot reach the API, so the suite still runs offline.
+    """
+    probe = subprocess.run(
+        [
+            "gh",
+            "api",
+            "/repos/fg-labs/bwa-mem3-bench/environments/image-build",
+            "--jq",
+            '[.protection_rules[]?|select(.type=="required_reviewers")]|length',
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        pytest.skip(f"cannot query the environment: {probe.stderr.strip()[:120]}")
+    assert probe.stdout.strip() == "1", (
+        "the `image-build` environment has no required_reviewers rule, so the "
+        "OIDC subject pinned to it would let any branch push to ECR unattended"
+    )

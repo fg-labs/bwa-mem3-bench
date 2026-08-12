@@ -33,9 +33,11 @@
 # CREDENTIALS. There are none. `id-token: write` lets the job mint a short-lived
 # OIDC token describing itself; AWS verifies that against GitHub's published keys
 # and returns ~1-hour credentials for the image-build role. Nothing is stored in
-# repository secrets. The role's trust policy pins the subject to this repo on
-# refs/heads/main -- see GITHUB_IMAGE_BUILD_SUBJECT in the storage stack for why
-# that pin is load-bearing on a public repository.
+# repository secrets. The role's trust policy pins the subject to this repo's
+# `image-build` ENVIRONMENT, whose required reviewer must approve each run before
+# credentials are minted -- see GITHUB_IMAGE_BUILD_SUBJECT in the storage stack.
+# That is what makes this workflow dispatchable from a PR branch for testing
+# while still keeping an unreviewed branch from pushing to ECR.
 name: build-image
 
 on:
@@ -157,6 +159,12 @@ jobs:
 
   build:
     needs: prepare
+    # The OIDC subject the image-build role trusts is scoped to this environment,
+    # so this line is what makes the token assumable AT ALL -- and the
+    # environment's required reviewer must approve the run before it is minted.
+    # That approval is what lets this workflow be dispatched from a PR branch
+    # without letting an unreviewed branch push images the fleet executes.
+    environment: image-build
     permissions:
       contents: read
       id-token: write # mint the OIDC token; without this the role cannot be assumed
@@ -236,6 +244,7 @@ jobs:
 
   join:
     needs: [prepare, build]
+    environment: image-build
     permissions:
       contents: read
       id-token: write
