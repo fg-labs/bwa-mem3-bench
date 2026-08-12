@@ -235,7 +235,7 @@ def test_every_arch_iterating_compat_target_is_a_full_sweep_target(target: str) 
     bwa arm the most, since comparing ARM against an ARM upstream directly is
     the whole reason that arm exists.
     """
-    submit = (REPO_ROOT / "bwa_mem3_bench" / "commands" / "submit.py").read_text()
+    submit = (REPO_ROOT / "bwa_mem3_bench" / "commands" / "_submit.py").read_text()
     full_sweep = submit.split("_FULL_SWEEP_TARGETS = frozenset(")[1].split("\n)")[0]
     assert f'"{target}"' in full_sweep
 
@@ -862,10 +862,7 @@ def test_every_defaultless_dockerfile_arg_reaches_the_generated_build_command() 
     }
     assert defaultless, "no defaultless ARGs found -- has the Dockerfile moved?"
 
-    # `bwa_mem3_bench.commands.build` the ATTRIBUTE is the re-exported function,
-    # not the module, so `import ... as` binds the wrong object. Fetch the module
-    # itself.
-    build_module = importlib.import_module("bwa_mem3_bench.commands.build")
+    build_module = importlib.import_module("bwa_mem3_bench.commands._build")
 
     captured: list[list[str]] = []
 

@@ -1,4 +1,4 @@
-"""Tests for ``bwa_mem3_bench.commands.submit`` helpers."""
+"""Tests for ``bwa_mem3_bench.commands._submit`` helpers."""
 
 from __future__ import annotations
 
@@ -9,9 +9,8 @@ from unittest.mock import patch
 
 import pytest
 
+from bwa_mem3_bench.commands import _submit as submit_module
 from bwa_mem3_bench.release_allowances import ReleaseAllowance
-
-submit_module = importlib.import_module("bwa_mem3_bench.commands.submit")
 
 
 def _captured_archs(call_args_list: list[Any]) -> str | None:
@@ -242,7 +241,7 @@ def test_bless_baseline_runs_in_given_image_sha_with_valid_job_name() -> None:
     pull ``<ECR>:<fg_labs_sha>``) and produce a dot-free job name. The previous
     behaviour passed the upstream tag as the SHA, which is neither a valid image
     tag nor a valid job name."""
-    bless_module = importlib.import_module("bwa_mem3_bench.commands.bless_baseline")
+    bless_module = importlib.import_module("bwa_mem3_bench.commands._bless_baseline")
     with patch.object(submit_module, "run_cmd") as mock_run:
         bless_module.bless_baseline(fg_labs_sha="a887e36cabc")
     name = _captured_job_name(mock_run.call_args_list)

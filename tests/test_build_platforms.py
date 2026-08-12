@@ -15,7 +15,6 @@ grepping the source would be satisfied by a comment or a dead branch.
 
 from __future__ import annotations
 
-import importlib
 import io
 import re
 import tomllib
@@ -26,11 +25,7 @@ import pytest
 import yaml
 
 from bwa_mem3_bench import REPO_ROOT
-
-# `bwa_mem3_bench.commands.build` the ATTRIBUTE is the re-exported function, not
-# the module, so `from ... import build as build_module` binds the wrong object.
-# Fetch the module itself -- same trap as in `test_compat_arm.py`.
-build_module = importlib.import_module("bwa_mem3_bench.commands.build")
+from bwa_mem3_bench.commands import _build as build_module
 
 
 def _platform_arg(**build_kwargs: object) -> str:
