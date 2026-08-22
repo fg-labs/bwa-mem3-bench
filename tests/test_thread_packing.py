@@ -133,3 +133,51 @@ def test_batch_profile_jobs_covers_thread_ladder() -> None:
         f"`threads: {needed}`; snakemake clamps threads to jobs, so the ladder "
         f"job would reserve only {jobs} vCPUs."
     )
+
+
+def test_batch_profile_task_timeout_covers_every_rule_runtime() -> None:
+    """`aws-batch-task-timeout` is the ONLY timeout the executor ever sends to
+    AWS Batch -- every per-rule `resources.runtime` (e.g. `align_thread_scaling`'s
+    `14400`) is dead for this executor and exists purely as in-DAG documentation
+    (see the profile template's own comment on `aws-batch-task-timeout` and
+    `scaling.smk`'s `runtime = 14400`). A real ladder run was killed at exactly
+    the profile's OLD 7200 s despite declaring `runtime: 14400`, which is what
+    this PR fixes -- but the fix is a hand-kept duplicate: nothing stops a
+    future rule from declaring a `runtime` above the profile's value again.
+
+    Scans every `resources: runtime = <seconds>` across `workflow/rules/*.smk`
+    (not a hardcoded rule list, so a new rule with its own long-running
+    `runtime` is covered automatically) and asserts the profile's
+    `aws-batch-task-timeout` is at least the largest one declared.
+    """
+    declared: dict[str, int] = {}
+    for smk_path in sorted((Path(REPO_ROOT) / "workflow" / "rules").glob("*.smk")):
+        text = smk_path.read_text()
+        # Widen first, then require every hit to be a plain integer literal --
+        # a future rule computing `runtime = lambda wc: ...` would silently
+        # evade a regex that only ever looked for digits, defeating the point
+        # of this test without any signal that it had.
+        for wide in re.finditer(r"^\s*runtime\s*=\s*(\S.*?),?\s*$", text, re.MULTILINE):
+            site = f"{smk_path.name}:{wide.start()}"
+            literal = re.fullmatch(r"(\d+)", wide.group(1))
+            assert literal, (
+                f"{site} declares `runtime = {wide.group(1)}`, not a plain integer "
+                "literal -- this test can't check it against aws-batch-task-timeout; "
+                "either make it a literal or extend this test to parse it."
+            )
+            declared[site] = int(literal.group(1))
+    assert declared, "no `resources: runtime = <seconds>` found under workflow/rules/*.smk"
+
+    text = PROFILE_TEMPLATE.read_text()
+    match = re.search(r"^aws-batch-task-timeout:\s*(\d+)\s*$", text, re.MULTILINE)
+    assert match, "aws-batch profile does not set `aws-batch-task-timeout:`"
+    task_timeout = int(match.group(1))
+
+    slowest_site, slowest_runtime = max(declared.items(), key=lambda kv: kv[1])
+    assert task_timeout >= slowest_runtime, (
+        f"profile sets `aws-batch-task-timeout: {task_timeout}` but "
+        f"{slowest_site} declares `runtime = {slowest_runtime}`; the executor "
+        f"sends ONLY `aws-batch-task-timeout` to AWS Batch, so that job would "
+        f"be killed at {task_timeout}s despite snakemake believing it has "
+        f"{slowest_runtime}s."
+    )

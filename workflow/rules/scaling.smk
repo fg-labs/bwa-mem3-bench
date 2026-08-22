@@ -124,7 +124,17 @@ rule align_thread_scaling:
         shared_memory_size_mb = 20480,
         container_image = lambda wc: image_for_arch(wc.arch),
         # The ladder is long by construction: the 1-thread rung alone is ~16x a
-        # 16-thread run. The profile default (7200 s) is too tight.
+        # 16-thread run. DEAD for the aws-batch executor -- kept only as
+        # in-DAG documentation of what this job actually needs. Our forked
+        # snakemake-executor-plugin-aws-batch builds SubmitJob's timeout from
+        # the profile's aws-batch-task-timeout alone
+        # (`{"attemptDurationSeconds": self.settings.task_timeout}` in
+        # batch_job_builder.py) and never reads this field -- confirmed when a
+        # real ladder was killed at exactly the profile's 7200 s despite this
+        # declaring 14400. The value that actually governs this job lives in
+        # workflow/profiles/aws-batch.config.yaml.template's
+        # aws-batch-task-timeout; kept in sync by hand, guarded by
+        # tests/test_thread_packing.py::test_batch_profile_task_timeout_covers_every_rule_runtime.
         runtime = 14400,
     params:
         ladder = LADDER_SPEC,
