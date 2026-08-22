@@ -25,6 +25,8 @@ from bwa_mem3_bench.storage.ingest import (
 from bwa_mem3_bench.storage.sqlite import connect
 
 _TIMING_HEADER = "s\th:m:s\tmax_rss\tmax_vms\tmax_uss\tmax_pss\tio_in\tio_out\tmean_load\tcpu_time"
+# Two reps of one (sample, arch), each an independent Batch job.
+_TWO_REPS = 2
 
 
 def _write_minibwa_trial(root: Path, sha: str, cell: tuple[str, str, int], wall: float) -> None:
@@ -793,4 +795,97 @@ def test_ingest_tolerates_meta_without_an_instance_id(db_path: Path, tmp_path: P
     conn = connect(db_path)
     assert ingest_run(conn, runs_root=tmp_path, fg_labs_sha=sha) == 1
     assert conn.execute("SELECT instance_id FROM trials").fetchone() == (None,)
+    conn.close()
+
+
+def _write_rep_with_probe(  # noqa: PLR0913
+    tmp_path: Path, sha: str, sample: str, arch: str, rep: int, *, instance_id: str
+) -> Path:
+    """A minimal `runs/<sha>/<sample>/<arch>/rep-<n>/` cell with a
+    `host-probe.jsonl` alongside the usual `timing.tsv`/`meta.json`."""
+    rep_dir = tmp_path / sha / sample / arch / f"rep-{rep}"
+    (rep_dir / "benchmarks").mkdir(parents=True)
+    (rep_dir / "benchmarks" / "timing.tsv").write_text(
+        _TIMING_HEADER + "\n"
+        "9.100\t0:00:09\t1024.50\t2048.00\t900.00\t950.00\t200.75\t50.25\t380.00\t40.10\n"
+    )
+    (rep_dir / "benchmarks" / "meta.json").write_text(json.dumps({"instance_id": instance_id}))
+    (rep_dir / "benchmarks" / "host-probe.jsonl").write_text(
+        "".join(
+            json.dumps(r) + "\n"
+            for r in (
+                {
+                    "phase": "pre",
+                    "probe_version": "0.1.0",
+                    "rustc": "rustc 1.97.1",
+                    "million_accesses_per_sec": 28.4,
+                    "status": "ok",
+                },
+                {
+                    "phase": "post",
+                    "probe_version": "0.1.0",
+                    "rustc": "rustc 1.97.1",
+                    "million_accesses_per_sec": 27.9,
+                    "status": "ok",
+                },
+            )
+        )
+    )
+    return rep_dir
+
+
+def test_ingest_run_records_the_per_cell_host_probe(db_path: Path, tmp_path: Path) -> None:
+    """`align_fg_labs`'s pre/post probes reach `host_probes`, keyed on the
+    real rep -- unlike the thread-scaling ladder's job-level rep=0, each rep
+    of the regular sweep is an independent Batch job that may land on a
+    different host, so the rep has to be part of the identity."""
+    sha = "aa11bb22"
+    _write_rep_with_probe(tmp_path, sha, "wgs-5M", "c7i", 1, instance_id="i-0aaa")
+
+    conn = connect(db_path)
+    assert ingest_run(conn, runs_root=tmp_path, fg_labs_sha=sha) == 1
+    rows = conn.execute(
+        "SELECT rep, phase, instance_id, m_accesses_per_sec FROM host_probes ORDER BY phase"
+    ).fetchall()
+    assert rows == [
+        (1, "post", "i-0aaa", 27.9),
+        (1, "pre", "i-0aaa", 28.4),
+    ]
+    conn.close()
+
+
+def test_ingest_run_keeps_probes_from_different_reps_separate(
+    db_path: Path, tmp_path: Path
+) -> None:
+    """Two reps of the same (sample, arch) landing on different hosts must
+    both survive -- the bug this whole feature exists to avoid is exactly
+    "rep 2's reading silently overwrites rep 1's"."""
+    sha = "cc33dd44"
+    _write_rep_with_probe(tmp_path, sha, "wgs-5M", "c7i", 1, instance_id="i-0aaa")
+    _write_rep_with_probe(tmp_path, sha, "wgs-5M", "c7i", 2, instance_id="i-0bbb")
+
+    conn = connect(db_path)
+    assert ingest_run(conn, runs_root=tmp_path, fg_labs_sha=sha) == _TWO_REPS
+    rows = conn.execute(
+        "SELECT rep, instance_id FROM host_probes WHERE phase = 'pre' ORDER BY rep"
+    ).fetchall()
+    assert rows == [(1, "i-0aaa"), (2, "i-0bbb")]
+    conn.close()
+
+
+def test_ingest_run_tolerates_a_cell_without_a_host_probe(db_path: Path, tmp_path: Path) -> None:
+    """A cell collected before per-cell probing existed has no
+    `host-probe.jsonl` at all -- the trial must still ingest, with zero rows
+    in `host_probes` for it rather than an error."""
+    sha = "ee55ff66"
+    rep_dir = tmp_path / sha / "wgs-5M" / "c6a" / "rep-1"
+    (rep_dir / "benchmarks").mkdir(parents=True)
+    (rep_dir / "benchmarks" / "timing.tsv").write_text(
+        _TIMING_HEADER + "\n"
+        "9.100\t0:00:09\t1024.50\t2048.00\t900.00\t950.00\t200.75\t50.25\t380.00\t40.10\n"
+    )
+
+    conn = connect(db_path)
+    assert ingest_run(conn, runs_root=tmp_path, fg_labs_sha=sha) == 1
+    assert conn.execute("SELECT COUNT(*) FROM host_probes").fetchone()[0] == 0
     conn.close()

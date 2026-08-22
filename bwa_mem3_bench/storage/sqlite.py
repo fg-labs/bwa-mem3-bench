@@ -30,6 +30,18 @@ EXPECTED_SCHEMA_VERSION = SCHEMA_VERSION
 #   v8 → v9: added trials.measured_at — a run's S3 prefix is not proof that
 #            everything under it belongs to that run, and nothing recorded WHEN a
 #            cell was measured.
+#   v9 → v10: added host_probes.rep, changing its UNIQUE key from
+#             (fg_labs_sha, sample, arch, phase) to
+#             (fg_labs_sha, sample, arch, rep, phase) — tachyon probing extended
+#             from the thread-scaling ladder (one job-level probe, rep 0) to the
+#             regular per-cell sweep (one probe per rep, since each rep is an
+#             independent Batch job that may land on a different host). A bare
+#             ALTER TABLE ADD COLUMN cannot change a UNIQUE constraint, so this
+#             is the one migration so far that recreates the table: rename the
+#             old one aside before executescript (so CREATE TABLE IF NOT EXISTS
+#             creates the new-schema table under the real name), then copy every
+#             old row forward with rep=0 — the same job-level sentinel those rows
+#             always meant — and drop the renamed original.
 # Only versions whose step needs an ALTER get a constant; v4 does not (its step
 # added a whole table).
 _SCHEMA_V1 = 1
@@ -39,6 +51,21 @@ _SCHEMA_V5 = 5
 _SCHEMA_V7 = 7
 _SCHEMA_V8 = 8
 _SCHEMA_V9 = 9
+_SCHEMA_V10 = 10
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    """Whether `table` exists in `conn`'s schema right now.
+
+    A migration step guarded only by a version bound assumes the DB actually
+    carries every table that version implies, which is not always true of a
+    hand-built fixture (or, in principle, a DB that was interrupted mid
+    migration) — checking existence directly makes the step correct either way.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    ).fetchone()
+    return row is not None
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -65,6 +92,19 @@ def connect(db_path: Path) -> sqlite3.Connection:
             f"code supports (expected {EXPECTED_SCHEMA_VERSION}); upgrade the tool "
             f"or rebuild the DB"
         )
+    # v9 -> v10's host_probes UNIQUE-key change needs the table recreated (see
+    # the migration notes above `_SCHEMA_V1`) — rename the old one aside BEFORE
+    # executescript runs, so `CREATE TABLE IF NOT EXISTS host_probes` below finds
+    # the name free and creates the new-schema table rather than leaving the old
+    # one in place untouched. A DB predating v8 has no `host_probes` at all, so
+    # there is nothing to rename; executescript alone gives it the current
+    # schema. Checked by existence, not just the version bound: a DB can claim
+    # version >= 8 without actually carrying every table that version implies
+    # (e.g. a test fixture built from an older schema with the pragma alone
+    # bumped), and the version bound alone would then try to rename a table
+    # that was never there.
+    if _SCHEMA_V8 <= existing_version < _SCHEMA_V10 and _table_exists(conn, "host_probes"):
+        conn.execute("ALTER TABLE host_probes RENAME TO host_probes_old")
     conn.executescript(SCHEMA_SQL)
     conn.commit()
     if existing_version == 0:
@@ -106,6 +146,25 @@ def connect(db_path: Path) -> sqlite3.Connection:
     # "duplicate column name".
     if existing_version < _SCHEMA_V9:
         conn.execute("ALTER TABLE trials ADD COLUMN measured_at TEXT")
+    # v9 -> v10, second half: copy every host_probes_old row forward with
+    # rep=0 — matching what those rows always meant, since v8-v9 host_probes
+    # only ever held job-level thread-scaling probes. Guarded on the RENAMED
+    # table's existence, not the version bound alone, for the same reason as
+    # the rename step above: this only fires when that step actually ran.
+    if _table_exists(conn, "host_probes_old"):
+        conn.execute(
+            """
+            INSERT INTO host_probes
+                (fg_labs_sha, sample, arch, rep, phase, instance_id, probe_version,
+                 rustc, m_accesses_per_sec, ns_per_access, threads,
+                 working_set_mb_per_thread, seconds, status)
+            SELECT fg_labs_sha, sample, arch, 0, phase, instance_id, probe_version,
+                   rustc, m_accesses_per_sec, ns_per_access, threads,
+                   working_set_mb_per_thread, seconds, status
+            FROM host_probes_old
+            """
+        )
+        conn.execute("DROP TABLE host_probes_old")
     if existing_version < EXPECTED_SCHEMA_VERSION:
         conn.execute(f"PRAGMA user_version = {EXPECTED_SCHEMA_VERSION}")
         conn.commit()
@@ -402,24 +461,31 @@ def upsert_host_probe(  # noqa: PLR0913
     working_set_mb_per_thread: float | None,
     seconds: float | None,
     status: str | None,
+    rep: int = 0,
     commit: bool = True,
 ) -> int:
     """Insert or update one tachyon host-contention reading; returns the row id.
 
-    Keyed on ``(fg_labs_sha, sample, arch, phase)`` so re-ingesting a run is
-    idempotent, matching `upsert_scaling`. A cell emits one reading per phase
-    (``pre`` / ``post``), and the whole cell runs on one host, so that key is
-    sufficient without ``instance_id`` — which is recorded as the JOIN column to
-    other work on the same machine, not as part of the identity.
+    Keyed on ``(fg_labs_sha, sample, arch, rep, phase)`` so re-ingesting a run
+    is idempotent, matching `upsert_scaling`. A cell emits one reading per
+    phase (``pre`` / ``post``), and the whole cell runs on one host, so that
+    key is sufficient without ``instance_id`` — which is recorded as the JOIN
+    column to other work on the same machine, not as part of the identity.
+
+    :param rep: defaults to 0, the job-level sentinel for a probe that is not
+        attached to any one rep — the thread-scaling ladder's usage, where the
+        whole ladder is one Batch job on one host. The regular per-cell sweep
+        (`align_fg_labs`) passes the real rep, since each rep there is an
+        independent Batch job that may land on a different host.
     """
     row = conn.execute(
         """
         INSERT INTO host_probes
-            (fg_labs_sha, sample, arch, phase, instance_id, probe_version, rustc,
-             m_accesses_per_sec, ns_per_access, threads,
+            (fg_labs_sha, sample, arch, rep, phase, instance_id, probe_version,
+             rustc, m_accesses_per_sec, ns_per_access, threads,
              working_set_mb_per_thread, seconds, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(fg_labs_sha, sample, arch, phase) DO UPDATE SET
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(fg_labs_sha, sample, arch, rep, phase) DO UPDATE SET
             instance_id = excluded.instance_id,
             probe_version = excluded.probe_version,
             rustc = excluded.rustc,
@@ -435,6 +501,7 @@ def upsert_host_probe(  # noqa: PLR0913
             fg_labs_sha,
             sample,
             arch,
+            rep,
             phase,
             instance_id,
             probe_version,

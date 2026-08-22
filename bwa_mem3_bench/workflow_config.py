@@ -379,6 +379,17 @@ class ThreadScalingStep:
 # skipping, long enough that a transient neighbour does not dominate the sample.
 _DEFAULT_HOST_PROBE_SECONDS = 10.0
 
+# Seconds per host-contention probe for the regular per-cell sweep
+# (`align_fg_labs`), when `sweep_host_probe_seconds` is absent. Deliberately far
+# below tachyon's own 10 s default, which is sized for the ladder's ~45-minute
+# job: a per-cell pre+post pair runs on EVERY sweep cell, including smoke-1M's
+# ~2 s wall time, where a 10 s-per-side pair would be a 10x overhead rather than
+# a rounding error. 2 s per side is a few percent of a typical 20-130 s real-data
+# cell and roughly matches smoke-1M's own wall time -- short enough that probing
+# never dominates, long enough that tachyon's own guidance (a probe needs to run
+# past its warm-up to be a reading rather than noise) is still met.
+_DEFAULT_SWEEP_HOST_PROBE_SECONDS = 2.0
+
 
 @dataclass(frozen=True)
 class ThreadScaling:
@@ -436,6 +447,11 @@ class WorkflowConfig:
     # `ignore_tags` and `expect_tags` lists. Per-sample `compare_options` extend
     # these.
     compare_defaults: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    # Wall-clock budget for each of the two tachyon host-contention probes that
+    # bracket every regular sweep cell (`align_fg_labs`). Defaulted, like
+    # `thread_scaling.host_probe_seconds`: a diagnostic knob, not a decision a
+    # config must make.
+    sweep_host_probe_seconds: float = _DEFAULT_SWEEP_HOST_PROBE_SECONDS
 
     def _resolve_tags(self, sample_name: str, kind: str, key: str) -> set[str]:
         """Union of a kind's default tag list and the sample's addition to it.
@@ -1026,6 +1042,26 @@ def _thread_scaling_from(
     )
 
 
+def _sweep_host_probe_seconds_from(defaults: dict[str, Any]) -> float:
+    """Validate the top-level `sweep_host_probe_seconds` default.
+
+    Same rigour as `thread_scaling.host_probe_seconds` and for the same
+    concrete reason: it is pasted into `align_fg_labs`'s shell body, so a
+    malformed value fails a sweep cell rather than the config load.
+    """
+    raw_probe = defaults.get("sweep_host_probe_seconds", _DEFAULT_SWEEP_HOST_PROBE_SECONDS)
+    if (
+        isinstance(raw_probe, bool)
+        or not isinstance(raw_probe, (int, float))
+        or not math.isfinite(raw_probe)
+        or raw_probe <= 0
+    ):
+        raise ValueError(
+            f"`sweep_host_probe_seconds` must be a finite number > 0; got {raw_probe!r}"
+        )
+    return float(raw_probe)
+
+
 def load_config(config_dir: Path) -> WorkflowConfig:
     """Load and validate the three-file config into a `WorkflowConfig`."""
     samples_yaml = _read_yaml(config_dir / "samples.yaml")
@@ -1096,4 +1132,5 @@ def load_config(config_dir: Path) -> WorkflowConfig:
         golden_prefix=defaults["golden_prefix"],
         data_prefix=defaults["data_prefix"],
         compare_defaults=compare_defaults,
+        sweep_host_probe_seconds=_sweep_host_probe_seconds_from(defaults),
     )

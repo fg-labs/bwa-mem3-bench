@@ -250,6 +250,15 @@ rule align_fg_labs:
         # same instance_id. Only writing it in this shell body guarantees the
         # metadata describes the machine that ran the alignment.
         meta = "runs/{sha}/{sample}/{arch}/rep-{rep}/benchmarks/meta.json",
+        # HOW CONTENDED that machine was, measured either side of the timed
+        # alignment -- the same tachyon pre/post design `align_thread_scaling`
+        # uses (see that rule's `host_probe` output for the full rationale),
+        # extended to the regular sweep so a flagged wall-time regression can be
+        # checked against host quality instead of reasoned about only from the
+        # archs' documented noise-CV pattern. Diagnostic only -- annotate and
+        # filter on it, never divide a wall time by it. See
+        # fg-labs/bwa-mem3-bench#56.
+        host_probe = "runs/{sha}/{sample}/{arch}/rep-{rep}/benchmarks/host-probe.jsonl",
     resources:
         batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
         mem_mb = lambda wc: _mem_mb_for(wc.sample),
@@ -280,6 +289,7 @@ rule align_fg_labs:
         mem_flags = lambda wc: _mem_flags(wc.sample),
         batch_flag = _batch_flag(),
         is_meth = lambda wc: "1" if _is_meth(wc.sample) else "0",
+        probe_seconds = CONFIG.sweep_host_probe_seconds,
     shell:
         # Both paths stage the index into /dev/shm via `bwa-mem2 shm` so the
         # FMI load is pinned and excluded from the timed region; `mem`
@@ -322,6 +332,13 @@ rule align_fg_labs:
             bwa-mem2.fg-labs shm {input.ref[0]}
             trap 'bwa-mem2.fg-labs shm -d || true' EXIT
         fi
+        # Probe AFTER staging, same reasoning as align_thread_scaling: both
+        # readings must see the same index resident in /dev/shm, or a
+        # difference between them could be the index's footprint rather than a
+        # change in host contention. `>` truncates so a retried attempt (after
+        # e.g. a spot interruption left a partial file) produces exactly one
+        # pre reading, not a stacked second one.
+        emit-host-probe pre {params.probe_seconds} > {output.host_probe}
         # Timed region emits UNCOMPRESSED BAM straight from bwa-mem2 (`--bam=0
         # -o`): no SAM-text serialization and no separate samtools process, and
         # no wasted zlib work — realistic, since a real pipeline feeds the
@@ -340,6 +357,10 @@ rule align_fg_labs:
             echo "ERROR: {output.bam}.raw has 0 alignment records (aligner crashed/OOM?)" >&2
             exit 1
         fi
+        # Second reading, still with the index staged -- see align_thread_scaling
+        # for the pre/post-agreement rationale. `>>` deliberately, appending to
+        # the truncated pre reading above.
+        emit-host-probe post {params.probe_seconds} >> {output.host_probe}
         # UNTIMED: compress the uncompressed timed output to the final BAM for
         # the downstream compare + S3 upload. Records are byte-identical to the
         # `.raw`, so concordance is unaffected.

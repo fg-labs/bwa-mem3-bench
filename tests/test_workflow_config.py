@@ -20,6 +20,7 @@ from bwa_mem3_bench.workflow_config import (
     _as_bool,
     _as_positive_int,
     _as_str_list,
+    _sweep_host_probe_seconds_from,
     _thread_scaling_from,
     _validate_compat_siblings,
     compat_sample_suffix,
@@ -977,6 +978,25 @@ def test_host_probe_budget_is_optional_and_defaults() -> None:
 def test_shipped_config_sets_a_host_probe_budget() -> None:
     """The shipped ladder must actually probe; the default is a fallback, not a plan."""
     assert load_config(CONFIG_DIR).thread_scaling.host_probe_seconds > 0
+
+
+@pytest.mark.parametrize("seconds", [True, "2", 0, -1.0, float("nan"), float("inf")])
+def test_sweep_host_probe_seconds_rejects_a_bad_budget(seconds: object) -> None:
+    """Same rigour as `thread_scaling.host_probe_seconds`, for the same reason:
+    the value is pasted into `align_fg_labs`'s shell body, so a malformed one
+    fails a sweep cell rather than the config load."""
+    with pytest.raises(ValueError, match="sweep_host_probe_seconds"):
+        _sweep_host_probe_seconds_from({"sweep_host_probe_seconds": seconds})
+
+
+def test_sweep_host_probe_seconds_is_optional_and_defaults() -> None:
+    """A diagnostic probe's duration is not a decision a config must make."""
+    assert _sweep_host_probe_seconds_from({}) > 0
+
+
+def test_shipped_config_sets_a_sweep_host_probe_budget() -> None:
+    """Every sweep cell must actually probe; the default is a fallback, not a plan."""
+    assert load_config(CONFIG_DIR).sweep_host_probe_seconds > 0
 
 
 def test_parse_ladder_override_parses_and_sorts_rungs() -> None:

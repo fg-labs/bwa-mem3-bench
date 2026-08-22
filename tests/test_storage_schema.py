@@ -19,6 +19,8 @@ from bwa_mem3_bench.storage.sqlite import (
 _PROBE_PHASES = 2
 # An arbitrary second value for the in-place-update assertion.
 _REVISED_RATE = 30.1
+# The migrated rep=0 reading plus a freshly-inserted rep=1 reading.
+_TWO_HOST_PROBE_ROWS = 2
 
 # A pre-supp-metrics (v2) comparisons table — no supp_json column.
 _V2_SCHEMA = """
@@ -118,6 +120,22 @@ _V7_SCHEMA = (
         "    main_mem_seconds REAL, read_io_seconds REAL, sam_io_seconds REAL,\n"
         "    kernel_seconds REAL, UNIQUE(fg_labs_sha, sample, arch, threads, rep));",
     )
+)
+
+
+# A v9 DB: everything v7 has, plus trials.measured_at and a `host_probes`
+# table keyed on the OLD (fg_labs_sha, sample, arch, phase) constraint — the
+# state every production DB is in before the v10 bump.
+_V9_SCHEMA = (
+    _V7_SCHEMA.replace("PRAGMA user_version = 7;", "PRAGMA user_version = 9;")
+    + """
+ALTER TABLE trials ADD COLUMN measured_at TEXT;
+CREATE TABLE host_probes (id INTEGER PRIMARY KEY AUTOINCREMENT, fg_labs_sha TEXT,
+    sample TEXT, arch TEXT, phase TEXT, instance_id TEXT, probe_version TEXT,
+    rustc TEXT, m_accesses_per_sec REAL, ns_per_access REAL, threads INTEGER,
+    working_set_mb_per_thread REAL, seconds REAL, status TEXT,
+    UNIQUE (fg_labs_sha, sample, arch, phase));
+"""
 )
 
 
@@ -409,6 +427,66 @@ def test_v8_db_migrates_to_v9_adding_measured_at(db_path: Path) -> None:
     assert conn.execute(
         "SELECT wall_seconds, measured_at FROM trials WHERE fg_labs_sha = 'old'"
     ).fetchone() == (19.41, None)
+    conn.close()
+
+
+def test_v9_db_migrates_to_v10_recreating_host_probes(db_path: Path) -> None:
+    """A v9 DB's `host_probes` is keyed on (fg_labs_sha, sample, arch, phase) --
+    no `rep` column, no `rep` in the UNIQUE key. The v10 step must recreate the
+    table (a bare ALTER cannot change a UNIQUE constraint) and carry every
+    existing row forward with rep=0, the job-level sentinel those rows always
+    meant (v9 host_probes only ever held the thread-scaling ladder's probes).
+    """
+    raw = sqlite3.connect(db_path)
+    raw.executescript(_V9_SCHEMA)
+    raw.execute("INSERT INTO runs(fg_labs_sha, status) VALUES ('old', 'complete')")
+    raw.execute(
+        "INSERT INTO host_probes"
+        "(fg_labs_sha, sample, arch, phase, instance_id, m_accesses_per_sec, status) "
+        "VALUES ('old', 'wgs-5M', 'c8g64', 'pre', 'i-abc', 28.4, 'ok')"
+    )
+    raw.commit()
+    raw.close()
+
+    conn = connect(db_path)
+    assert "rep" in _columns(conn, "host_probes")
+    (ver,) = conn.execute("PRAGMA user_version").fetchone()
+    assert ver == EXPECTED_SCHEMA_VERSION
+    # The pre-existing reading survives, migrated to rep=0.
+    assert conn.execute(
+        "SELECT rep, sample, arch, phase, instance_id, m_accesses_per_sec, status "
+        "FROM host_probes WHERE fg_labs_sha = 'old'"
+    ).fetchone() == (0, "wgs-5M", "c8g64", "pre", "i-abc", 28.4, "ok")
+    # No leftover scratch table.
+    tables = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    }
+    assert "host_probes_old" not in tables
+    # The new UNIQUE key actually distinguishes reps: a second reading for the
+    # same (sha, sample, arch, phase) but a DIFFERENT rep must coexist, not
+    # collide with the migrated row.
+    upsert_host_probe(
+        conn,
+        fg_labs_sha="old",
+        sample="wgs-5M",
+        arch="c8g64",
+        rep=1,
+        phase="pre",
+        instance_id="i-def",
+        probe_version=None,
+        rustc=None,
+        m_accesses_per_sec=30.0,
+        ns_per_access=None,
+        threads=None,
+        working_set_mb_per_thread=None,
+        seconds=None,
+        status="ok",
+    )
+    assert (
+        conn.execute("SELECT COUNT(*) FROM host_probes WHERE fg_labs_sha = 'old'").fetchone()[0]
+        == _TWO_HOST_PROBE_ROWS
+    )
     conn.close()
 
 

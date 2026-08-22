@@ -45,6 +45,15 @@ reps_baseline: 5
 # that should run at its author's defaults).
 batch_bases: 160000000
 
+# Wall-clock budget for each of the two tachyon host-contention probes that
+# bracket every regular sweep cell (`align_fg_labs`) -- one pre, one post,
+# same pre/post-agreement reasoning as `thread_scaling.host_probe_seconds`
+# below, but sized far shorter: a sweep cell's own wall time ranges from
+# smoke-1M's ~2 s to a real dataset's ~130 s, so the ladder's 10 s-per-side
+# default would be a 10x overhead on the cheapest cells rather than a rounding
+# error. See fg-labs/bwa-mem3-bench#56.
+sweep_host_probe_seconds: 2.0
+
 # Thread-scaling ladder (`--target thread_scaling`, part of `bless_release`).
 #
 # Strong-scaling efficiency E(n) = T(1) / (n * T(n)) is only meaningful on FIXED

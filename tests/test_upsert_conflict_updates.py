@@ -251,7 +251,7 @@ CASES: tuple[UpsertCase, ...] = (
     UpsertCase(
         table="host_probes",
         upsert=upsert_host_probe,
-        prepare=lambda conn: {**_prepare_cell(conn), "phase": "pre"},
+        prepare=lambda conn: {**_prepare_cell(conn), "rep": REP, "phase": "pre"},
         first={
             "instance_id": "i-0a6621e058441b4e6",
             "probe_version": "0.1.0",
