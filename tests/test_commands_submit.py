@@ -69,11 +69,44 @@ def test_target_bless_release_auto_fills_archs() -> None:
     the full arch sweep when no ``--archs`` is given, or it silently shrinks to
     the single ``core_arch`` default."""
     with patch.object(submit_module, "run_cmd") as mock_run:
-        submit_module.submit(fg_labs_sha="deadbeef", target="bless_release")
+        submit_module.submit(
+            fg_labs_sha="deadbeef", target="bless_release", golden_ref_sha="prevsha"
+        )
 
     archs = _captured_archs(mock_run.call_args_list)
     assert archs is not None, "expected ARCHS env override for target=bless_release"
     assert set(archs.split(",")) == {"c8g", "c7g", "c6a", "c7i", "c7a", "m7i"}
+
+
+def test_bless_release_without_golden_ref_sha_raises_clear_cli_error() -> None:
+    """A release bless with no --golden-ref-sha does not fail loudly on its own:
+    Gate #2 (vs-golden) simply never gets requested, and the run "succeeds"
+    with zero vs-golden data anywhere. This must be caught before the coordinator
+    is ever submitted, not discovered after a multi-hour run finishes."""
+    with (
+        patch.object(submit_module, "run_cmd") as mock_run,
+        pytest.raises(ValueError, match="bless_release requires --golden-ref-sha"),
+    ):
+        submit_module.submit(fg_labs_sha="deadbeef", target="bless_release")
+    mock_run.assert_not_called()
+
+
+def test_bless_release_with_golden_ref_sha_succeeds() -> None:
+    """The happy path: --golden-ref-sha present, no error, submit proceeds."""
+    with patch.object(submit_module, "run_cmd") as mock_run:
+        submit_module.submit(
+            fg_labs_sha="deadbeef", target="bless_release", golden_ref_sha="prevsha"
+        )
+    mock_run.assert_called_once()
+
+
+def test_other_targets_do_not_require_golden_ref_sha() -> None:
+    """Only `bless_release` claims to be a release gate; `all` (and everything
+    else) stays golden-optional -- an exploratory `all` run without a pinned
+    golden is a normal, common workflow, not a footgun."""
+    with patch.object(submit_module, "run_cmd") as mock_run:
+        submit_module.submit(fg_labs_sha="deadbeef", target="all")
+    mock_run.assert_called_once()
 
 
 def test_target_smoke_does_not_auto_fill_archs() -> None:
