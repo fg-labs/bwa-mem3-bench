@@ -22,6 +22,14 @@ class ArchSpec:
     platform: str        # linux/amd64 or linux/arm64
 
 
+@dataclass(frozen=True)
+class ArenaArchSpec:
+    logical_id: str      # camelcase for CDK construct ids
+    arch_key: str        # matches workflow/rules/arena.smk's ARENA_QUEUES key (c7i, c8g)
+    instance_type: str   # SAME instance type as the regular spot ArchSpec for this arch —
+                          # the arena measures the SAME hardware, just on-demand instead of spot
+
+
 ARCHS: tuple[ArchSpec, ...] = (
     ArchSpec("C8g", "c8g", "c8g.4xlarge", "linux/arm64"),
     ArchSpec("C7g", "c7g", "c7g.4xlarge", "linux/arm64"),
@@ -50,6 +58,20 @@ ARCHS: tuple[ArchSpec, ...] = (
     # Graviton4 has no SMT (ThreadsPerCore=1), so 64 vCPU is 64 physical cores
     # and the scaling curve has no hyperthreading knee at 32.
     ArchSpec("C8g64", "c8g64", "c8g.16xlarge", "linux/arm64"),
+)
+
+
+# On-demand queues for the "arena" release-history comparison
+# (workflow/rules/arena.smk, config/defaults.yaml's `arena.archs`). Every arm
+# in that job runs INTERLEAVED on one host, so a spot reclaim mid-job would
+# corrupt every arm's timing at once — the same reasoning that keeps
+# `CoordinatorCe` below on-demand. Scoped to c7i + c8g only (not every arch in
+# `ARCHS`): the arena is a narrow, correctness-anchored progression view
+# alongside the cross-arch spot sweep, not a replacement for it, and each
+# additional arch roughly doubles the on-demand spend for the same job.
+ARENA_ARCHS: tuple[ArenaArchSpec, ...] = (
+    ArenaArchSpec("C7iArena", "c7i", "c7i.4xlarge"),
+    ArenaArchSpec("C8gArena", "c8g", "c8g.4xlarge"),
 )
 
 
@@ -190,6 +212,50 @@ class BatchStack(cdk.Stack):
             )
             self.queues[spec.arch_key] = queue
 
+        # ── Arena compute environments (on-demand) ───────────────────────────
+        # See ARENA_ARCHS above for why these are separate from the spot queues
+        # constructed just above, and on-demand rather than spot. Reuses the
+        # same launch template (high-throughput gp3 root, IMDSv2 hop-limit 2)
+        # as the regular worker fleet — the arena writes the same kind of BAM
+        # artifacts and its arms invoke `emit-host-meta`/`emit-host-probe` from
+        # inside the container exactly as `align_fg_labs` does.
+        self.arena_queues: dict[str, batch.IJobQueue] = {}
+        for arena_spec in ARENA_ARCHS:
+            arena_ce = batch.ManagedEc2EcsComputeEnvironment(
+                self,
+                f"ArenaCe{arena_spec.logical_id}",
+                vpc=vpc,
+                instance_types=[ec2.InstanceType(arena_spec.instance_type)],
+                use_optimal_instance_classes=False,
+                allocation_strategy=batch.AllocationStrategy.BEST_FIT_PROGRESSIVE,
+                spot=False,
+                # One arena job at a time per arch is the intended usage (a
+                # release bless runs it once) reserving the WHOLE host (see
+                # arena.smk's `threads: CONFIG.arena.threads` — 16, matching
+                # this *.4xlarge's own vCPU count), so a single instance's
+                # worth of headroom is enough. Sized deliberately below the
+                # regular fleet's `max_vcpus` so an accidental double-submit
+                # can't silently double the on-demand spend; bump by hand
+                # alongside `arena.threads` in config/defaults.yaml if that
+                # ever changes (kept a plain literal rather than an import
+                # from bwa_mem3_bench, which no other CDK stack depends on).
+                maxv_cpus=16,
+                minv_cpus=0,
+                instance_role=instance_role,
+                launch_template=launch_template,
+                security_groups=[security_group],
+            )
+            arena_queue_name = f"{project_name}-{arena_spec.arch_key}-arena"
+            arena_queue = batch.JobQueue(
+                self,
+                f"ArenaQueue{arena_spec.logical_id}",
+                job_queue_name=arena_queue_name,
+                compute_environments=[
+                    batch.OrderedComputeEnvironment(compute_environment=arena_ce, order=1)
+                ],
+            )
+            self.arena_queues[arena_spec.arch_key] = arena_queue
+
         # ── Coordinator compute environment ──────────────────────────────────
         # Runs snakemake orchestration inside a container. On-demand (not spot):
         # the coordinator is the single long-lived orchestrator for the whole
@@ -326,4 +392,10 @@ class BatchStack(cdk.Stack):
                 self,
                 f"Queue{spec.logical_id}",
                 value=f"{project_name}-{spec.arch_key}",
+            )
+        for arena_spec in ARENA_ARCHS:
+            cdk.CfnOutput(
+                self,
+                f"ArenaQueueOutput{arena_spec.logical_id}",
+                value=f"{project_name}-{arena_spec.arch_key}-arena",
             )
