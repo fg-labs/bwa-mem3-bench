@@ -383,6 +383,13 @@ def ingest_run(
 ) -> int:
     """Walk `runs_root/<fg_labs_sha>/<sample>/<arch>/rep-<n>/` and populate DB.
 
+    `benchmarks/host-probe.jsonl` is read when present, same as
+    `ingest_scaling`'s handling of the ladder's job-level probe — but keyed
+    per rep here, since each rep of the regular sweep is an independent Batch
+    job that may land on a different host, unlike the ladder's one-job-one-host
+    design. Older cells (collected before per-cell probing existed) simply
+    lack the file and are skipped without complaint.
+
     :param exclude: `(sample, arch, rep)` cells to skip — used by `collect` to
         keep cells measured AFTER the run's window out of the release record.
         The forward-only subset of `late_cells`, not all of it: an early cell is
@@ -457,6 +464,19 @@ def ingest_run(
                     process_seconds=process_seconds,
                     index_read_seconds=index_read_seconds,
                     commit=False,
+                )
+
+                # Per-cell tachyon contention readings, present from the release
+                # that added them onward — older cells simply have no file, same
+                # as ingest_scaling's own host-probe handling.
+                _ingest_host_probes(
+                    conn,
+                    probe_path=rep_dir / "benchmarks" / "host-probe.jsonl",
+                    fg_labs_sha=fg_labs_sha,
+                    sample=sample,
+                    arch=arch,
+                    rep=rep,
+                    instance_id=_host_instance_id(meta_path),
                 )
 
                 for kind in INGESTED_COMPARE_KINDS:
@@ -943,6 +963,7 @@ def _ingest_host_probes(  # noqa: PLR0913
     sample: str,
     arch: str,
     instance_id: str | None,
+    rep: int = 0,
 ) -> None:
     """Ingest tachyon readings from a ``host-probe.jsonl``.
 
@@ -950,6 +971,10 @@ def _ingest_host_probes(  # noqa: PLR0913
     probe could not run carries ``status: unavailable`` with null measurements;
     it is still stored, because "we tried and could not measure" is a different
     fact from "we never looked" and only the row distinguishes them.
+
+    :param rep: 0 (default) for the thread-scaling ladder's job-level probe;
+        the real rep for a per-cell probe from the regular sweep, where each
+        rep is an independent Batch job that may land on a different host.
 
     Nothing here may be fatal: these readings are diagnostic, and one malformed
     record must not cost the ladder its rungs. That takes more than catching a
@@ -983,6 +1008,7 @@ def _ingest_host_probes(  # noqa: PLR0913
             fg_labs_sha=fg_labs_sha,
             sample=sample,
             arch=arch,
+            rep=rep,
             phase=phase,
             instance_id=instance_id,
             probe_version=_probe_text(record, "probe_version"),

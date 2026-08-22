@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 # Increment this whenever the schema changes in a backward-incompatible way.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # `user_version` is INTERPOLATED from SCHEMA_VERSION, never written literally.
 # It used to be hardcoded, so bumping SCHEMA_VERSION without editing the PRAGMA
@@ -196,6 +196,12 @@ CREATE TABLE IF NOT EXISTS host_probes (
     fg_labs_sha         TEXT NOT NULL REFERENCES runs(fg_labs_sha),
     sample              TEXT NOT NULL,
     arch                TEXT NOT NULL,
+    -- 0 for a job-level probe (the thread-scaling ladder: one job, one host, no
+    -- single rep to attribute it to — mirrors `emit-host-meta`'s own "rep 0
+    -- denotes the job" convention), or the real rep for a per-cell probe from
+    -- the regular sweep (`align_fg_labs`), where each rep is an independent
+    -- Batch job that may land on a different host.
+    rep                 INTEGER NOT NULL DEFAULT 0,
     -- 'pre' / 'post' — the probe runs either side of the timed work. A pair that
     -- agrees is evidence the work ran under stable conditions; a pair that
     -- diverges says the measurements it brackets are not comparable to each
@@ -217,7 +223,7 @@ CREATE TABLE IF NOT EXISTS host_probes (
     working_set_mb_per_thread REAL,
     seconds             REAL,
     status              TEXT,
-    UNIQUE (fg_labs_sha, sample, arch, phase)
+    UNIQUE (fg_labs_sha, sample, arch, rep, phase)
 );
 
 CREATE INDEX IF NOT EXISTS idx_trials_run ON trials(fg_labs_sha);
