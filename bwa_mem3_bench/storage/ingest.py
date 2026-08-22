@@ -15,6 +15,7 @@ from typing import Any, NamedTuple
 from bwa_mem3_bench.storage import VS_BASELINE, VS_DEFAULT, VS_GOLDEN, VS_X86
 from bwa_mem3_bench.storage.sqlite import (
     upsert_accuracy,
+    upsert_arena,
     upsert_comparison,
     upsert_host_probe,
     upsert_run,
@@ -100,6 +101,10 @@ BASELINE_SHA_PREFIX = "baseline-bwa-mem2-"
 # (older ladders simply have NULL phases rather than being rejected).
 _SCALING_COLUMNS = 6
 _SCALING_COLUMNS_FULL = 10
+
+# arena.tsv: label, mode, rep, wall_s, cpu_s, max_rss_mb, process_s (see
+# arena.smk's `printf` header).
+_ARENA_COLUMNS = 7
 
 # tachyon reports its working set in bytes; `host_probes` stores MB.
 _BYTES_PER_MB = 1024 * 1024
@@ -1106,6 +1111,84 @@ def ingest_scaling(
                 read_io_seconds=_maybe_float(readio),
                 sam_io_seconds=_maybe_float(samio),
                 kernel_seconds=_maybe_float(kernel),
+                instance_id=instance_id,
+                commit=False,
+            )
+            ingested += 1
+    conn.commit()
+    return ingested
+
+
+def ingest_arena(
+    conn: sqlite3.Connection,
+    *,
+    arena_root: Path,
+    fg_labs_sha: str,
+    sample: str,
+) -> int:
+    """Ingest arena runs under ``arena/<sha>/<arch>/``.
+
+    Each ``arena.tsv`` is written by `align_arena` (one on-demand Batch job on
+    one host per arch) with a header plus one row per (label, mode, rep):
+    ``label, mode, rep, wall_s, cpu_s, max_rss_mb, process_s``. A SKIPPED arm
+    (arena.smk's "Never hard-fail on an old binary") writes the literal "NA"
+    for every numeric field, which loads as NULL -- see `upsert_arena`.
+
+    Two sibling artifacts are read when present, skipped without complaint
+    when not, exactly as `ingest_scaling` handles its own: ``meta.json`` (the
+    host the whole arena job ran on) and ``host-probe.jsonl`` (tachyon
+    contention readings).
+
+    :param conn: open benchmark DB connection.
+    :param arena_root: local mirror of the ``arena/`` prefix.
+    :param fg_labs_sha: run whose arena outputs should be ingested.
+    :param sample: the sample the arena measured (``arena.sample`` in
+        config/defaults.yaml) -- not recoverable from the tree layout itself
+        (``arena/<sha>/<arch>/``, unlike the regular sweep's
+        ``runs/<sha>/<sample>/<arch>/``), so the caller supplies it. Recorded
+        onto ``host_probes`` only, so a probe taken during the arena can be
+        joined against other runs against the same sample.
+    :return: number of rows ingested (0 when the run has no arena).
+    """
+    run_dir = arena_root / fg_labs_sha
+    if not run_dir.is_dir():
+        return 0
+
+    # The arena may be ingested for a SHA whose standard sweep was never
+    # collected (e.g. a targeted `--target arena` re-run), so ensure the runs
+    # row exists -- mirrors `ingest_scaling`'s own upsert-first pattern.
+    upsert_run(conn, fg_labs_sha=fg_labs_sha, status="complete", commit=False)
+
+    ingested = 0
+    for tsv in sorted(run_dir.glob("*/arena.tsv")):
+        arch = tsv.parent.name
+        # One host for the whole arena job, by construction (see the rule
+        # docstring), so one lookup serves every arm+rep below.
+        instance_id = _host_instance_id(tsv.parent / "meta.json")
+        _ingest_host_probes(
+            conn,
+            probe_path=tsv.parent / "host-probe.jsonl",
+            fg_labs_sha=fg_labs_sha,
+            sample=sample,
+            arch=arch,
+            instance_id=instance_id,
+        )
+        for line in tsv.read_text().splitlines()[1:]:  # skip header
+            fields = line.split("\t")
+            if len(fields) != _ARENA_COLUMNS:
+                continue
+            label, mode, rep, wall, cpu, rss, proc = fields
+            upsert_arena(
+                conn,
+                fg_labs_sha=fg_labs_sha,
+                arch=arch,
+                label=label,
+                mode=mode,
+                rep=int(rep),
+                wall_seconds=_maybe_float(wall),
+                cpu_time=_maybe_float(cpu),
+                max_rss_mb=_maybe_float(rss),
+                process_seconds=_maybe_float(proc),
                 instance_id=instance_id,
                 commit=False,
             )

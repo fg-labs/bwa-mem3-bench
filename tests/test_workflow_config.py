@@ -14,9 +14,11 @@ from bwa_mem3_bench.workflow_config import (
     METH_IGNORE_TAGS,
     METH_UNEMITTED_TAGS,
     Arch,
+    Arena,
     Sample,
     ThreadScaling,
     WorkflowConfig,
+    _arena_from,
     _as_bool,
     _as_positive_int,
     _as_str_list,
@@ -51,17 +53,19 @@ def _write_minimal_config(
     and would otherwise mask whatever the test is actually probing; passing it
     explicitly is what makes its own validation branches reachable.
 
-    `defaults.yaml`'s `thread_scaling.sample` is repointed at the synthetic
-    sample: it names a production sample (`wgs-5M`) that this config does not
-    define, and `load_config` validates that reference, so copying the block
-    verbatim would make every config this helper writes unloadable for a reason
-    unrelated to what the caller is testing.
+    `defaults.yaml`'s `thread_scaling.sample` and `arena.sample` are repointed
+    at the synthetic sample: both name a production sample (`wgs-5M`) that
+    this config does not define, and `load_config` validates those references,
+    so copying the block verbatim would make every config this helper writes
+    unloadable for a reason unrelated to what the caller is testing.
     """
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "archs.yaml").write_text((CONFIG_DIR / "archs.yaml").read_text())
     defaults = yaml.safe_load((CONFIG_DIR / "defaults.yaml").read_text())
     if "thread_scaling" in defaults:
         defaults["thread_scaling"]["sample"] = "probe"
+    if "arena" in defaults:
+        defaults["arena"]["sample"] = "probe"
     (config_dir / "defaults.yaml").write_text(yaml.safe_dump(defaults))
     if compare_defaults is None:
         compare_defaults = {kind: {"expect_tags": ["NM"]} for kind in COMPARE_KINDS}
@@ -939,6 +943,22 @@ def _thread_scaling(**overrides: object) -> ThreadScaling:
     )
 
 
+def _arena_yaml(**overrides: object) -> dict[str, object]:
+    """A minimal valid `arena` block, with keys overridable per test."""
+    return {
+        "sample": "wgs-5M",
+        "archs": ["c7i", "c8g"],
+        "reps": 3,
+        "threads": 16,
+        **overrides,
+    }
+
+
+def _arena(**overrides: object) -> Arena:
+    cfg = load_config(CONFIG_DIR)
+    return _arena_from(_arena_yaml(**overrides), samples=cfg.samples, archs=cfg.archs)
+
+
 def test_thread_scaling_accepts_a_well_formed_ladder() -> None:
     scaling = _thread_scaling()
     assert [(step.threads, step.reps) for step in scaling.ladder] == [(1, 1), (16, 3)]
@@ -1026,6 +1046,30 @@ def test_host_probe_budget_is_optional_and_defaults() -> None:
 def test_shipped_config_sets_a_host_probe_budget() -> None:
     """The shipped ladder must actually probe; the default is a fallback, not a plan."""
     assert load_config(CONFIG_DIR).thread_scaling.host_probe_seconds > 0
+
+
+@pytest.mark.parametrize("seconds", [True, "10", 0, -1.0, float("nan"), float("inf")])
+def test_arena_rejects_a_bad_host_probe_budget(seconds: object) -> None:
+    """Same rigour as `thread_scaling.host_probe_seconds`, for the same reason:
+    the value is pasted into `align_arena`'s shell body, so a malformed one
+    would fail a paid on-demand Batch job rather than the config load.
+
+    Before this validation existed, `_arena_from` did a bare `float(...)`
+    conversion -- which accepts a bool (`true` -> 1.0), `nan`, `inf`, and 0
+    without complaint, and its error (a bare `TypeError`/`ValueError` from
+    `float()` itself, if the value even fails to convert at all) would not
+    name `arena.host_probe_seconds` the way every sibling validator's does.
+    """
+    with pytest.raises(ValueError, match=r"arena\.host_probe_seconds"):
+        _arena(host_probe_seconds=seconds)
+
+
+def test_arena_host_probe_budget_is_optional_and_defaults() -> None:
+    assert _arena().host_probe_seconds > 0
+
+
+def test_shipped_config_sets_an_arena_host_probe_budget() -> None:
+    assert load_config(CONFIG_DIR).arena.host_probe_seconds > 0
 
 
 @pytest.mark.parametrize("seconds", [True, "2", 0, -1.0, float("nan"), float("inf")])

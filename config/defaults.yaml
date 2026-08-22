@@ -114,6 +114,28 @@ thread_scaling:
   # not purely a memory probe). See fg-labs/bwa-mem3-bench#56.
   host_probe_seconds: 10.0
 
+# "Arena" release-history comparison (`--target arena`,
+# workflow/rules/arena.smk): every blessed bwa-mem3 release plus lh3/bwa,
+# upstream bwa-mem2, and minibwa, interleaved on ONE fixed on-demand host per
+# arch. Scoped deliberately narrow (one sample, two archs) -- it is a
+# correctness-anchored progression view alongside the cross-arch sweep, not a
+# replacement for it, and runs on ON-DEMAND instances (see cdk/stacks/
+# batch_stack.py's ArenaCe) rather than spot, so it is priced to stay narrow.
+#
+# The arm list itself (which releases, bwa/bwa-mem2/minibwa) is NOT here -- it
+# is the fixed set the builder base image bakes in (docker/Dockerfile.base),
+# hardcoded in arena.smk. Only the measurement scope lives here.
+arena:
+  sample: wgs-5M
+  archs: [c7i, c8g]
+  reps: 3
+  threads: 16
+  # Same rationale as thread_scaling.host_probe_seconds -- at ~13-14 arms x
+  # 4 cycles (1 warmup + 3 reps), the arena runs well over an hour per arch
+  # (see align_arena's own `resources.runtime = 14400` budget), so two 10s
+  # probes are still a small fraction of it.
+  host_probe_seconds: 10.0
+
 references:
   hg38:
     key: references/hg38/

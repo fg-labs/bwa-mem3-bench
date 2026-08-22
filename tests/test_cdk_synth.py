@@ -14,12 +14,17 @@ CDK_DIR = REPO_ROOT / "cdk"
 
 # 7 per-arch queues + 1 coordinator. The per-arch set is the 6 sweep archs
 # (c8g, c7g, c6a, c7i, c7a, m7i) plus c8g64 — the 64-vCPU Graviton4 host the
-# thread-scaling ladder runs on, which is intentionally NOT in `full_archs`.
-EXPECTED_BATCH_QUEUE_COUNT = 8
+# thread-scaling ladder runs on, which is intentionally NOT in `full_archs` —
+# plus the coordinator queue, plus the two on-demand arena queues (c7i-arena,
+# c8g-arena — workflow/rules/arena.smk's ARENA_QUEUES).
+EXPECTED_BATCH_QUEUE_COUNT = 10
 
 # A container is one hop further from IMDS than its host, so the default of 1
 # drops the IMDSv2 token PUT; 2 is AWS's documented minimum for containers.
 EXPECTED_IMDS_HOP_LIMIT = 2
+
+# c7i-arena, c8g-arena — workflow/rules/arena.smk's ARENA_QUEUES.
+EXPECTED_ARENA_QUEUE_COUNT = 2
 
 # The ONLY GitHub Actions subject allowed to assume the image-build role. Written
 # out literally rather than imported from the stack: the point of the assertion is
@@ -105,12 +110,47 @@ def test_image_build_role_is_pinned_to_one_repository_and_ref(tmp_path: Path) ->
 
 
 def test_batch_stack_has_a_queue_per_arch(tmp_path: Path) -> None:
-    """One worker queue per configured arch (incl. the c8g64 scaling host) + coordinator."""
+    """One worker queue per configured arch (incl. the c8g64 scaling host),
+    the coordinator, and the two on-demand arena queues."""
     out_dir = tmp_path / "cdk.out"
     _synth(out_dir)
     template = json.loads((out_dir / "BwaMem3BenchBatch.template.json").read_text())
     queues = [r for r in template["Resources"].values() if r["Type"] == "AWS::Batch::JobQueue"]
     assert len(queues) == EXPECTED_BATCH_QUEUE_COUNT
+
+
+def test_arena_queues_are_on_demand(tmp_path: Path) -> None:
+    """The two arena queues (c7i-arena, c8g-arena) exist and are ON-DEMAND.
+
+    A spot reclaim mid-arena-job would corrupt every interleaved arm's timing
+    at once (workflow/rules/arena.smk) — the same reasoning that keeps the
+    coordinator on-demand. `AllocateStrategy` alone doesn't say spot-vs-
+    on-demand; the compute environment's `Type` (`EC2`, not `SPOT`) does.
+    """
+    out_dir = tmp_path / "cdk.out"
+    _synth(out_dir)
+    template = json.loads((out_dir / "BwaMem3BenchBatch.template.json").read_text())
+    queue_names = {
+        r["Properties"]["JobQueueName"]
+        for r in template["Resources"].values()
+        if r["Type"] == "AWS::Batch::JobQueue"
+    }
+    assert "bwa-mem3-bench-c7i-arena" in queue_names
+    assert "bwa-mem3-bench-c8g-arena" in queue_names
+
+    # The synthesized resource KEY carries the construct-id chain (e.g.
+    # "ArenaCeC7iArena198E8122" for construct id "ArenaCeC7iArena" + CDK's
+    # address hash) — unlike `ComputeEnvironmentName`, which is left
+    # CDK-auto-generated (no `compute_environment_name=` is passed) and so
+    # cannot be matched on.
+    arena_ces = [
+        v
+        for k, v in template["Resources"].items()
+        if v["Type"] == "AWS::Batch::ComputeEnvironment" and k.startswith("ArenaCe")
+    ]
+    assert len(arena_ces) == EXPECTED_ARENA_QUEUE_COUNT, "expected two arena compute environments"
+    for ce in arena_ces:
+        assert ce["Properties"]["ComputeResources"]["Type"] == "EC2"
 
 
 def test_launch_template_reaches_imds_from_the_container_with_v2_required(tmp_path: Path) -> None:

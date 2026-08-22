@@ -15,6 +15,7 @@ from bwa_mem3_bench.storage.ingest import (
     LATE_CELL_THRESHOLD_HOURS,
     LateCell,
     ingest_accuracy,
+    ingest_arena,
     ingest_baseline,
     ingest_minibwa,
     ingest_run,
@@ -223,6 +224,7 @@ def collect(
     baseline_root = LOCAL_MIRROR_ROOT / "baseline"
     minibwa_root = LOCAL_MIRROR_ROOT / "minibwa"
     scaling_root = LOCAL_MIRROR_ROOT / "scaling"
+    arena_root = LOCAL_MIRROR_ROOT / "arena"
     run_dir = runs_root / fg_labs_sha
 
     if dry_run:
@@ -232,6 +234,9 @@ def collect(
         _sync_prefix(
             f"s3://{bucket}/scaling/{fg_labs_sha}/", str(scaling_root / fg_labs_sha), dry_run=True
         )
+        _sync_prefix(
+            f"s3://{bucket}/arena/{fg_labs_sha}/", str(arena_root / fg_labs_sha), dry_run=True
+        )
         if ingest:
             print(f"[dry-run] ingest {run_dir} → {DB_PATH}")
         return
@@ -240,16 +245,23 @@ def collect(
     baseline_root.mkdir(parents=True, exist_ok=True)
     minibwa_root.mkdir(parents=True, exist_ok=True)
     (scaling_root / fg_labs_sha).mkdir(parents=True, exist_ok=True)
+    (arena_root / fg_labs_sha).mkdir(parents=True, exist_ok=True)
     _sync_prefix(f"s3://{bucket}/runs/{fg_labs_sha}/", str(run_dir), dry_run=False)
     _sync_prefix(f"s3://{bucket}/baseline/", str(baseline_root), dry_run=False)
     _sync_prefix(f"s3://{bucket}/minibwa/", str(minibwa_root), dry_run=False)
-    # Thread-scaling ladders are per-SHA (unlike the SHA-independent baseline
-    # and minibwa caches), so sync only this run's subtree.
+    # Thread-scaling ladders and arena runs are per-SHA (unlike the
+    # SHA-independent baseline and minibwa caches), so sync only this run's
+    # subtree of each.
     _sync_prefix(
         f"s3://{bucket}/scaling/{fg_labs_sha}/", str(scaling_root / fg_labs_sha), dry_run=False
     )
+    _sync_prefix(
+        f"s3://{bucket}/arena/{fg_labs_sha}/", str(arena_root / fg_labs_sha), dry_run=False
+    )
 
-    _reconcile_mirror(bucket=bucket, fg_labs_sha=fg_labs_sha, run_dir=run_dir)
+    _reconcile_mirror(
+        bucket=bucket, fg_labs_sha=fg_labs_sha, run_dir=run_dir, arena_dir=arena_root / fg_labs_sha
+    )
 
     if ingest:
         _ingest_all(
@@ -258,17 +270,30 @@ def collect(
             baseline_root=baseline_root,
             minibwa_root=minibwa_root,
             scaling_root=scaling_root,
+            arena_root=arena_root,
             ingest_late_cells=ingest_late_cells,
         )
 
 
-def _reconcile_mirror(*, bucket: str, fg_labs_sha: str, run_dir: Path) -> None:
+def _reconcile_mirror(
+    *, bucket: str, fg_labs_sha: str, run_dir: Path, arena_dir: Path | None = None
+) -> None:
     """Report local files S3 no longer has. Report only; never delete.
 
     Diagnostic, never load-bearing — the same contract `emit-host-meta` and
     `emit-host-probe` hold. The sync has already succeeded by the time this runs,
     so the artifacts are on disk and ingestable; letting a transient ListObjects
     failure abort the command would throw that work away over a report.
+
+    :param arena_dir: the run's local ``arena/<sha>/`` mirror, if this run has
+        one -- checked the same way as `run_dir`. `arena/<sha>/` has no
+        equivalent of `runs/<sha>/`'s late-cell exclusion, so an orphan here
+        (an ``arena.tsv`` or arch directory S3 no longer has) is silently
+        re-ingested by `ingest_arena` on every future `collect` unless a human
+        notices this warning and clears it by hand. NOT extended to
+        `scaling/<sha>/`, which has the identical gap -- that predates this
+        function and is out of scope here; scoped narrowly to arena, the tree
+        this parameter was added for.
     """
     try:
         orphans = _orphaned_files(run_dir, _s3_keys(bucket, f"runs/{fg_labs_sha}/"))
@@ -278,6 +303,16 @@ def _reconcile_mirror(*, bucket: str, fg_labs_sha: str, run_dir: Path) -> None:
     if orphans:
         _report_orphans(orphans, run_dir)
 
+    if arena_dir is None:
+        return
+    try:
+        arena_orphans = _orphaned_files(arena_dir, _s3_keys(bucket, f"arena/{fg_labs_sha}/"))
+    except (BotoCoreError, ClientError) as err:
+        print(f"warning: could not reconcile the arena mirror against S3: {err}", file=sys.stderr)
+        return
+    if arena_orphans:
+        _report_orphans(arena_orphans, arena_dir)
+
 
 def _ingest_all(  # noqa: PLR0913 — one argument per synced prefix, all required
     *,
@@ -286,6 +321,7 @@ def _ingest_all(  # noqa: PLR0913 — one argument per synced prefix, all requir
     baseline_root: Path,
     minibwa_root: Path,
     scaling_root: Path,
+    arena_root: Path,
     ingest_late_cells: bool,
 ) -> None:
     """Populate every table from the freshly-synced mirror."""
@@ -320,6 +356,20 @@ def _ingest_all(  # noqa: PLR0913 — one argument per synced prefix, all requir
         sc = ingest_scaling(conn, scaling_root=scaling_root, fg_labs_sha=fg_labs_sha)
         if sc:
             print(f"ingested {sc} scaling rows into {DB_PATH}", file=sys.stderr)
+
+        # Arena (--target arena). Absent for runs that did not request it,
+        # hence the truthiness guard. `sample` comes from config rather than
+        # the tree layout (arena/<sha>/<arch>/ carries no sample component --
+        # see `ingest_arena`'s docstring); falls back to skipping arena
+        # ingestion entirely if the config can't be read, same contract as
+        # `_baseline_tool_versions` below.
+        arena_sample = _arena_sample()
+        if arena_sample:
+            ar = ingest_arena(
+                conn, arena_root=arena_root, fg_labs_sha=fg_labs_sha, sample=arena_sample
+            )
+            if ar:
+                print(f"ingested {ar} arena rows into {DB_PATH}", file=sys.stderr)
 
         # Ingest baselines from each upstream tag known to the workflow
         # config so that `bench report`/`bench speedup` can join fg-labs
@@ -356,6 +406,20 @@ def _minibwa_shas(minibwa_root: Path) -> list[str]:
     if not minibwa_root.is_dir():
         return []
     return sorted(d.name for d in minibwa_root.iterdir() if d.is_dir())
+
+
+def _arena_sample() -> str | None:
+    """The sample `arena.smk` measures (`arena.sample` in config/defaults.yaml).
+
+    Falls back to None if the config can't be read (e.g. in environments where
+    the YAMLs are not present), same contract as `_baseline_tool_versions` —
+    `collect --ingest` never fails purely on missing arena ingestion.
+    """
+    try:
+        cfg = load_config(Path(REPO_ROOT) / "config")
+    except (FileNotFoundError, KeyError, OSError):
+        return None
+    return cfg.arena.sample
 
 
 def _baseline_tool_versions() -> list[str]:

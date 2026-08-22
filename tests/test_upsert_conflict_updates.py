@@ -50,6 +50,7 @@ from bwa_mem3_bench.storage import sqlite as storage
 from bwa_mem3_bench.storage.sqlite import (
     connect,
     upsert_accuracy,
+    upsert_arena,
     upsert_comparison,
     upsert_host_probe,
     upsert_run,
@@ -245,6 +246,30 @@ CASES: tuple[UpsertCase, ...] = (
             "read_io_seconds": 7.0,
             "sam_io_seconds": 2.9,
             "kernel_seconds": 47.1,
+            "instance_id": "i-0b7732f169552c5f7",
+        },
+    ),
+    UpsertCase(
+        table="arena",
+        upsert=upsert_arena,
+        prepare=lambda conn: {
+            **{k: v for k, v in _prepare_cell(conn).items() if k != "sample"},
+            "label": "fg-labs-default",
+            "mode": "default",
+            "rep": REP,
+        },
+        first={
+            "wall_seconds": 141.4,
+            "cpu_time": 2201.0,
+            "max_rss_mb": 17200.0,
+            "process_seconds": 137.9,
+            "instance_id": "i-0a6621e058441b4e6",
+        },
+        second={
+            "wall_seconds": 139.2,
+            "cpu_time": 2178.0,
+            "max_rss_mb": 17150.0,
+            "process_seconds": 135.1,
             "instance_id": "i-0b7732f169552c5f7",
         },
     ),
