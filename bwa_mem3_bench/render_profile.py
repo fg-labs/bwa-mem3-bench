@@ -1,10 +1,26 @@
 """Render the Snakemake AWS Batch profile from its template.
 
-The template lives at ``workflow/profiles/aws-batch/config.yaml.template`` and
-contains placeholders for deployment-specific values (ECR URI, S3 bucket,
-region, optional cost-center tag). The rendered ``config.yaml`` is gitignored
-— each environment renders its own copy from CDK outputs + env vars before
-invoking ``snakemake``.
+The template lives at ``workflow/profiles/aws-batch.config.yaml.template`` —
+deliberately OUTSIDE the ``aws-batch/`` profile directory itself, not just
+alongside the rendered file — and contains placeholders for
+deployment-specific values (ECR URI, S3 bucket, region, optional cost-center
+tag). The rendered ``config.yaml`` is gitignored — each environment renders
+its own copy from CDK outputs + env vars before invoking ``snakemake``.
+
+The directory split matters: Snakemake's own ``--profile`` config-file
+discovery matches any filename starting with ``config`` + an optional
+``.v<N>+`` version qualifier + ``.yaml`` via an UNANCHORED regex
+(``config(.v(?P<min_major>\\d+)\\+)?.yaml``, matched with ``re.match`` — no
+trailing ``$``), so ``config.yaml.template`` satisfies it as a same-priority
+candidate alongside the real ``config.yaml``. Ties are broken by
+``os.listdir()`` order, which is filesystem-dependent, not alphabetical —
+inside the coordinator's Batch container this consistently favored the
+image-baked ``.template`` file (present since image build) over the
+freshly-rendered ``config.yaml`` (written at container start), so snakemake
+loaded the UNSUBSTITUTED template and failed with a YAML parse error on its
+bare ``${COST_CENTER_LINE}`` placeholder line. Keeping the template out of
+the profile directory entirely sidesteps the ambiguity regardless of
+directory-listing order or future changes to Snakemake's discovery regex.
 
 Required values come from :func:`bwa_mem3_bench.aws_config.load` (which reads
 ``cdk/outputs.json`` then falls back to env vars). The optional cost-center
@@ -20,8 +36,9 @@ from string import Template
 
 from bwa_mem3_bench import REPO_ROOT, aws_config
 
-_PROFILE_DIR = REPO_ROOT / "workflow" / "profiles" / "aws-batch"
-DEFAULT_TEMPLATE = _PROFILE_DIR / "config.yaml.template"
+_PROFILES_DIR = REPO_ROOT / "workflow" / "profiles"
+_PROFILE_DIR = _PROFILES_DIR / "aws-batch"
+DEFAULT_TEMPLATE = _PROFILES_DIR / "aws-batch.config.yaml.template"
 DEFAULT_OUTPUT = _PROFILE_DIR / "config.yaml"
 
 

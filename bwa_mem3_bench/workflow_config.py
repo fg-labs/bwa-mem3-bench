@@ -360,6 +360,22 @@ class Arch:
         return f"{ecr_repo_uri}:{tag}"
 
 
+def resolve_worker_image_sha(fg_labs_sha: str, image_tag: str | None) -> str:
+    """The SHA fed to `Arch.image_uri` for a worker's image tag.
+
+    `image_tag` is an explicit `--config image_tag=<sha>` override, threaded
+    through by `docker/coordinator-entrypoint.sh`'s ``IMAGE_TAG`` -- e.g. to
+    pull a manually-tagged debug image while the run still writes outputs
+    under its own `fg_labs_sha` S3 namespace. Falls back to `fg_labs_sha`,
+    the common case, when unset.
+
+    :param fg_labs_sha: the run's own fg-labs SHA (``config["fg_labs_sha"]``).
+    :param image_tag: an explicit override, or ``None`` when not set.
+    :return: the SHA `image_for_arch` should pass to `Arch.image_uri`.
+    """
+    return image_tag or fg_labs_sha
+
+
 @dataclass(frozen=True)
 class ThreadScalingStep:
     """One rung of the thread-scaling ladder: a thread count and its replication.

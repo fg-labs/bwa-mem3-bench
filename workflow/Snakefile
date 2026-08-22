@@ -23,6 +23,7 @@ from bwa_mem3_bench.workflow_config import (
     compat_sample_suffix,
     load_config,
     parse_ladder_override,
+    resolve_worker_image_sha,
 )
 
 
@@ -39,7 +40,11 @@ REPS_BASELINE = int(config.get("reps_baseline", CONFIG.reps_baseline))
 # reads golden/fg-labs-<GOLDEN_REF_SHA>/ (not the run's own SHA).
 GOLDEN_REF_SHA = config.get("golden_ref_sha", "")
 BASELINE_ONLY = str(config.get("baseline_only", "false")).lower() == "true"
-IMAGE = config.get("image_tag", f"bwa-mem3-bench:{FG_LABS_SHA}")
+# Explicit `--config image_tag=<sha>` override for per-rule worker images
+# (docker/coordinator-entrypoint.sh's IMAGE_TAG) -- see `image_for_arch` below
+# and `resolve_worker_image_sha`. None (not a fabricated default) when unset,
+# so the fallback to FG_LABS_SHA is unambiguous.
+IMAGE_TAG = config.get("image_tag")
 
 # ---------------------------------------------------------------------------
 # Per-rule image selection.
@@ -88,10 +93,14 @@ GOLDEN_SAMPLES = (
 
 
 def image_for_arch(arch_name: str) -> str:
-    """Fully-qualified ECR image URI for a worker on `arch_name`."""
+    """Fully-qualified ECR image URI for a worker on `arch_name`.
+
+    Honors an explicit `--config image_tag=<sha>` override (IMAGE_TAG) in
+    place of FG_LABS_SHA -- see `resolve_worker_image_sha`.
+    """
     return CONFIG.archs[arch_name].image_uri(
         ecr_repo_uri=_ECR_REPO_URI,
-        fg_labs_sha=FG_LABS_SHA,
+        fg_labs_sha=resolve_worker_image_sha(FG_LABS_SHA, IMAGE_TAG),
     )
 
 

@@ -9,8 +9,10 @@ executor: aws-batch
 # Each Batch job runs in this image. The image has bwa-mem2.{upstream,fg-labs},
 # samtools, bwameth, compare-bams, awscli, and the bwa-mem3-bench python CLI
 # pre-installed so shell commands in workflow/rules/*.smk execute directly.
-# When running inside the coordinator job, override container-image via
-#   --config image_tag=<sha>  (the coordinator-entrypoint.sh passes this through).
+# Fallback ONLY for a rule with no explicit `resources.container_image` --
+# every worker rule sets one via `image_for_arch` in workflow/Snakefile, which
+# is what `--config image_tag=<sha>` (coordinator-entrypoint.sh passes this
+# through as IMAGE_TAG) actually overrides; it does not change this key.
 container-image: ${ECR_REPO_URI}:latest
 
 # snakemake-executor-plugin-aws-batch required settings. The plugin takes a
