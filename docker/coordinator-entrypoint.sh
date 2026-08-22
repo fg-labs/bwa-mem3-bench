@@ -72,7 +72,7 @@ CONFIG_ARGS=("fg_labs_sha=${FG_LABS_SHA}")
 # Batch job definition (see cdk/stacks/batch_stack.py). Optional
 # BWA_MEM3_BENCH_COST_CENTER adds a CostCenter tag to spawned worker jobs.
 python -m bwa_mem3_bench.cli render-profile \
-    --template /opt/workflow/profiles/aws-batch/config.yaml.template \
+    --template /opt/workflow/profiles/aws-batch.config.yaml.template \
     --output /opt/workflow/profiles/aws-batch/config.yaml
 
 # --cores is REQUIRED here, and must be large. Snakemake clamps every rule's

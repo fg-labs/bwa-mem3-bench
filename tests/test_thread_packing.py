@@ -47,7 +47,7 @@ ALIGN_RULES = (
 )
 
 ENTRYPOINT = Path(REPO_ROOT) / "docker" / "coordinator-entrypoint.sh"
-PROFILE_TEMPLATE = Path(REPO_ROOT) / "workflow" / "profiles" / "aws-batch" / "config.yaml.template"
+PROFILE_TEMPLATE = Path(REPO_ROOT) / "workflow" / "profiles" / "aws-batch.config.yaml.template"
 
 
 def _rule_body(smk_path: str, rule_name: str) -> str:
