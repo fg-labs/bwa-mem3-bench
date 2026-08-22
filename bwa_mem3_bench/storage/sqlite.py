@@ -42,6 +42,9 @@ EXPECTED_SCHEMA_VERSION = SCHEMA_VERSION
 #             creates the new-schema table under the real name), then copy every
 #             old row forward with rep=0 — the same job-level sentinel those rows
 #             always meant — and drop the renamed original.
+#   v10 → v11: added the `arena` table (release-history comparison, workflow/
+#              rules/arena.smk) — a new table, created in place by
+#              executescript, no ALTER needed.
 # Only versions whose step needs an ALTER get a constant; v4 does not (its step
 # added a whole table).
 _SCHEMA_V1 = 1
@@ -438,6 +441,59 @@ def upsert_scaling(  # noqa: PLR0913
             read_io_seconds,
             sam_io_seconds,
             kernel_seconds,
+            instance_id,
+        ),
+    )
+    if commit:
+        conn.commit()
+
+
+def upsert_arena(  # noqa: PLR0913
+    conn: sqlite3.Connection,
+    *,
+    fg_labs_sha: str,
+    arch: str,
+    label: str,
+    mode: str,
+    rep: int,
+    wall_seconds: float | None,
+    cpu_time: float | None,
+    max_rss_mb: float | None,
+    process_seconds: float | None,
+    instance_id: str | None = None,
+    commit: bool = True,
+) -> None:
+    """Insert or update one arm+rep of an arena run.
+
+    Keyed on (sha, arch, label, mode, rep) so re-ingesting a run is
+    idempotent, matching `upsert_scaling`'s contract for the thread-scaling
+    ladder. Every numeric column is nullable: a SKIPPED arm (arena.smk's
+    "Never hard-fail on an old binary") writes NULLs, not zeros, so it reads
+    as "could not measure" rather than as a suspiciously fast result.
+    """
+    conn.execute(
+        """
+        INSERT INTO arena
+            (fg_labs_sha, arch, label, mode, rep,
+             wall_seconds, cpu_time, max_rss_mb, process_seconds, instance_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(fg_labs_sha, arch, label, mode, rep) DO UPDATE SET
+            wall_seconds = excluded.wall_seconds,
+            cpu_time = excluded.cpu_time,
+            max_rss_mb = excluded.max_rss_mb,
+            process_seconds = excluded.process_seconds,
+            instance_id = excluded.instance_id
+        """,
+        (
+            fg_labs_sha,
+            arch,
+            label,
+            mode,
+            rep,
+            wall_seconds,
+            cpu_time,
+            max_rss_mb,
+            process_seconds,
             instance_id,
         ),
     )

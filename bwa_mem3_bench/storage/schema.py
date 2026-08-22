@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 # Increment this whenever the schema changes in a backward-incompatible way.
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # `user_version` is INTERPOLATED from SCHEMA_VERSION, never written literally.
 # It used to be hardcoded, so bumping SCHEMA_VERSION without editing the PRAGMA
@@ -225,6 +225,45 @@ CREATE TABLE IF NOT EXISTS host_probes (
     status              TEXT,
     UNIQUE (fg_labs_sha, sample, arch, rep, phase)
 );
+
+-- The "arena" release-history comparison (workflow/rules/arena.smk), one row
+-- per (sha, arch, label, mode, rep). Every arm of a given (sha, arch) runs
+-- INTERLEAVED on ONE on-demand host, by construction -- see the rule's
+-- docstring for why that is the whole point (a release-over-release wall-time
+-- claim measured under identical conditions, not two separate spot runs'
+-- medians weeks apart).
+--
+-- `label` identifies the arm: 'bwa', 'bwa-mem2-upstream', 'minibwa', a
+-- historical release tag ('v021' .. 'v090'), or the run's own candidate
+-- ('fg-labs-default' / 'fg-labs-fast'). `mode` is 'default' or 'fast' --
+-- always 'default' for every arm except the run's own candidate, since
+-- `--fast` (fg-labs/bwa-mem3 PR #189) postdates several of the historical
+-- releases and this rule has no reliable way to know which ones support it.
+--
+-- NULL wall_seconds/cpu_time/max_rss_mb/process_seconds means the arm's shell
+-- loop recorded it as SKIPPED (an old binary that could not run at all --
+-- unsupported flag, subcommand, or crash) rather than a real 0-record BAM;
+-- see arena.smk's "Never hard-fail on an old binary" for why that arm still
+-- gets a row instead of the whole job failing.
+CREATE TABLE IF NOT EXISTS arena (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    fg_labs_sha     TEXT NOT NULL REFERENCES runs(fg_labs_sha),
+    arch            TEXT NOT NULL,
+    label           TEXT NOT NULL,
+    mode            TEXT NOT NULL,
+    rep             INTEGER NOT NULL,
+    wall_seconds    REAL,
+    cpu_time        REAL,
+    max_rss_mb      REAL,
+    process_seconds REAL,
+    -- The single on-demand instance the whole (sha, arch) arena job ran on,
+    -- constant across every row for that pair by construction. NULL for
+    -- arenas ingested before the rule emitted meta.json.
+    instance_id     TEXT,
+    UNIQUE (fg_labs_sha, arch, label, mode, rep)
+);
+
+CREATE INDEX IF NOT EXISTS idx_arena_run ON arena(fg_labs_sha);
 
 CREATE INDEX IF NOT EXISTS idx_trials_run ON trials(fg_labs_sha);
 CREATE INDEX IF NOT EXISTS idx_trials_sample_arch ON trials(sample, arch);
