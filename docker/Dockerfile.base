@@ -113,7 +113,9 @@ RUN if [ "$TARGETARCH" != "arm64" ]; then \
         install -Dm755 bwa-mem2 /out/bin/bwa-mem2.upstream && \
         for v in sse41 avx avx2 avx512bw; do \
             [ -f bwa-mem2.$v ] && install -Dm755 bwa-mem2.$v /out/bin/bwa-mem2.upstream.$v || true; \
-        done; \
+        done && \
+        cd /build && \
+        rm -rf /build/upstream; \
     fi
 
 # libdeflate-dev for the fg-labs/bwa-mem3 build only. Installed AFTER the
@@ -125,6 +127,198 @@ RUN if [ "$TARGETARCH" != "arm64" ]; then \
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libdeflate-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# Every prior blessed bwa-mem3 release, for the "arena" interleaved comparison
+# (workflow/rules/arena.smk): the CURRENT candidate (built per-SHA in
+# docker/Dockerfile) run alongside its own release history on one host answers
+# "is this release actually faster/slower than the last one" without trusting
+# two builds measured weeks apart on different hosts. SHA-independent -- this
+# list only grows when a NEW release is blessed, never on an ordinary SHA
+# bump -- so it belongs here, not in the per-SHA Dockerfile, or every
+# candidate build would rebuild all ten of these for nothing.
+#
+# `sha` is the exact `to_sha` from docs/release-allowances.yaml (the SHA the
+# golden's BAMs actually live under, not necessarily the shipped tag -- see
+# that file's per-entry notes on tag aliasing). v0.10.0 itself is NOT here: it
+# is today's candidate, built fresh per-SHA by the per-SHA Dockerfile like any
+# other build.
+#
+# Same recipe as the per-SHA fg-labs build below it in docker/Dockerfile:
+# fetch the SHA directly (not `--all` -- a release-please branch head stops
+# being reachable the moment its PR squash-merges and the branch is deleted,
+# which is exactly what every one of these SHAs is), the same GCC-12 __rdtsc
+# sed (harmless no-op on releases that predate the redefinition), and
+# BASELINE_ARCH=avx2 / arch=arm64 exactly matching the bench fleet's own
+# default build. Installed as `bwa-mem3.<label>` -- the `.` namespacing
+# already used for `bwa-mem2.upstream.avx2` etc.
+#
+# ONE `RUN` PER RELEASE -- deliberately NOT a single shell loop over a list.
+# Docker's build cache is keyed per-instruction: one `RUN` is one cache key: is
+# one layer. A single looping `RUN` whose list text grows every time a new
+# release is blessed would change that ONE instruction's text, busting its
+# cache entry and forcing a full rebuild of every earlier release along with
+# the new one -- exactly the "rebuild ten of these for nothing" this section
+# exists to avoid, just moved one level down. Splitting into one `RUN` per
+# release means appending a new one below adds a new cache key without
+# touching any earlier layer's, so `cli build-base --push` after a release
+# reuses all prior release layers and builds only the new one (assuming a warm
+# cache -- see docker/buildkitd.toml's GC ceiling for how long that holds).
+#
+# Add a new `RUN` block below (same template, new label/sha) after each future
+# release is blessed -- never add to an existing block, and never remove one.
+# The list is inlined here (not a separate COPY'd file) for the same
+# content-addressing reason the paragraph above already gives for the base
+# tag as a whole: `base_image.base_image_tag()` hashes this Dockerfile's bytes
+# ONLY, not any file it COPYs in.
+RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-releases/v021 && \
+    cd /build/arena-releases/v021 && \
+    git fetch --quiet origin 89bd589db9fcb56279912fa6b23e0831f4916a62 && \
+    git checkout --quiet 89bd589db9fcb56279912fa6b23e0831f4916a62 && \
+    git submodule update --init --recursive && \
+    { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+    else \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+    fi && \
+    install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v021 && \
+    cd /build && \
+    rm -rf /build/arena-releases/v021
+
+RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-releases/v022 && \
+    cd /build/arena-releases/v022 && \
+    git fetch --quiet origin bffae5a09267877fe514c458d4956b717bcefb8f && \
+    git checkout --quiet bffae5a09267877fe514c458d4956b717bcefb8f && \
+    git submodule update --init --recursive && \
+    { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+    else \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+    fi && \
+    install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v022 && \
+    cd /build && \
+    rm -rf /build/arena-releases/v022
+
+RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-releases/v030 && \
+    cd /build/arena-releases/v030 && \
+    git fetch --quiet origin a02fcb446574d5b5d03abdbf73c9b129deead2d4 && \
+    git checkout --quiet a02fcb446574d5b5d03abdbf73c9b129deead2d4 && \
+    git submodule update --init --recursive && \
+    { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+    else \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+    fi && \
+    install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v030 && \
+    cd /build && \
+    rm -rf /build/arena-releases/v030
+
+RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-releases/v040 && \
+    cd /build/arena-releases/v040 && \
+    git fetch --quiet origin 2681143bb7ab665488cdcd5d46380cc928f5bd05 && \
+    git checkout --quiet 2681143bb7ab665488cdcd5d46380cc928f5bd05 && \
+    git submodule update --init --recursive && \
+    { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+    else \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+    fi && \
+    install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v040 && \
+    cd /build && \
+    rm -rf /build/arena-releases/v040
+
+RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-releases/v050 && \
+    cd /build/arena-releases/v050 && \
+    git fetch --quiet origin 9dd30dd0e5e477ddfd33bec752179978ac9f5a1d && \
+    git checkout --quiet 9dd30dd0e5e477ddfd33bec752179978ac9f5a1d && \
+    git submodule update --init --recursive && \
+    { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+    else \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+    fi && \
+    install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v050 && \
+    cd /build && \
+    rm -rf /build/arena-releases/v050
+
+RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-releases/v060 && \
+    cd /build/arena-releases/v060 && \
+    git fetch --quiet origin 48cf0a46824e26df2986efe940121d34b2cc7109 && \
+    git checkout --quiet 48cf0a46824e26df2986efe940121d34b2cc7109 && \
+    git submodule update --init --recursive && \
+    { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+    else \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+    fi && \
+    install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v060 && \
+    cd /build && \
+    rm -rf /build/arena-releases/v060
+
+RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-releases/v070 && \
+    cd /build/arena-releases/v070 && \
+    git fetch --quiet origin 04777b3c3f3c2f18d5838b6f4116015c7f5f2ad9 && \
+    git checkout --quiet 04777b3c3f3c2f18d5838b6f4116015c7f5f2ad9 && \
+    git submodule update --init --recursive && \
+    { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+    else \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+    fi && \
+    install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v070 && \
+    cd /build && \
+    rm -rf /build/arena-releases/v070
+
+RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-releases/394f8f8 && \
+    cd /build/arena-releases/394f8f8 && \
+    git fetch --quiet origin 394f8f8110f7d15be7ef2ca38c335590aa1e0284 && \
+    git checkout --quiet 394f8f8110f7d15be7ef2ca38c335590aa1e0284 && \
+    git submodule update --init --recursive && \
+    { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+    else \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+    fi && \
+    install -Dm755 bwa-mem3 /out/bin/bwa-mem3.394f8f8 && \
+    cd /build && \
+    rm -rf /build/arena-releases/394f8f8
+
+RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-releases/v080 && \
+    cd /build/arena-releases/v080 && \
+    git fetch --quiet origin 4acb09562b5109e2f26d85b0158fde35d03a4fb8 && \
+    git checkout --quiet 4acb09562b5109e2f26d85b0158fde35d03a4fb8 && \
+    git submodule update --init --recursive && \
+    { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+    else \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+    fi && \
+    install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v080 && \
+    cd /build && \
+    rm -rf /build/arena-releases/v080
+
+RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-releases/v090 && \
+    cd /build/arena-releases/v090 && \
+    git fetch --quiet origin 4d341b7ba81246509a87680fa569ac3210af540e && \
+    git checkout --quiet 4d341b7ba81246509a87680fa569ac3210af540e && \
+    git submodule update --init --recursive && \
+    { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+    else \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+    fi && \
+    install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v090 && \
+    cd /build && \
+    rm -rf /build/arena-releases/v090
 
 # Install tricorder (fg-labs/tricord) for benchmarking the alignment subprocess
 # without snakemake's `benchmark:` directive. Tricord requires Rust 1.94+, so
