@@ -50,17 +50,19 @@ def _write_minimal_config(
     and would otherwise mask whatever the test is actually probing; passing it
     explicitly is what makes its own validation branches reachable.
 
-    `defaults.yaml`'s `thread_scaling.sample` is repointed at the synthetic
-    sample: it names a production sample (`wgs-5M`) that this config does not
-    define, and `load_config` validates that reference, so copying the block
-    verbatim would make every config this helper writes unloadable for a reason
-    unrelated to what the caller is testing.
+    `defaults.yaml`'s `thread_scaling.sample` and `arena.sample` are repointed
+    at the synthetic sample: both name a production sample (`wgs-5M`) that
+    this config does not define, and `load_config` validates those references,
+    so copying the block verbatim would make every config this helper writes
+    unloadable for a reason unrelated to what the caller is testing.
     """
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "archs.yaml").write_text((CONFIG_DIR / "archs.yaml").read_text())
     defaults = yaml.safe_load((CONFIG_DIR / "defaults.yaml").read_text())
     if "thread_scaling" in defaults:
         defaults["thread_scaling"]["sample"] = "probe"
+    if "arena" in defaults:
+        defaults["arena"]["sample"] = "probe"
     (config_dir / "defaults.yaml").write_text(yaml.safe_dump(defaults))
     if compare_defaults is None:
         compare_defaults = {kind: {"expect_tags": ["NM"]} for kind in COMPARE_KINDS}

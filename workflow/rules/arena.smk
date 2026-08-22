@@ -1,0 +1,373 @@
+"""The "arena": every blessed bwa-mem3 release, interleaved with lh3/bwa,
+upstream bwa-mem2, and minibwa, on ONE fixed on-demand host per arch.
+
+Why this exists. The regular sweep (`rule all`) measures ONE fg-labs SHA per
+Batch run, on spot instances, and a release-over-release wall-time claim is
+built by comparing two SEPARATE runs' recorded medians -- which can be weeks
+apart, on different (spot) hosts. `fg-labs/bwa-mem3#92` and the c6a hic-1M
+false regression (see CLAUDE.md) both turned out to be exactly this: a
+measurement-substrate artifact, not a codegen change, and each needed an
+expensive one-off bare-metal reproduction to settle. The arena makes that
+reproduction a routine, repeatable part of every release bless: every arm
+below runs on the SAME host, in the SAME job, so "is this release faster than
+the last one" is answered by one wall-clock ratio measured under identical
+conditions -- not by two medians that were never comparable in the first
+place.
+
+Scope, deliberately narrow. ONE sample (`config/defaults.yaml`'s
+`arena.sample`, wgs-5M), TWO archs (c7i, c8g) -- see the CDK on-demand queues
+below for why archs are capped, and AskUserQuestion scoping in the PR that
+added this rule for why samples are capped to one. This is a
+correctness-anchored progression view ALONGSIDE the cross-arch sweep, not a
+replacement for it.
+
+The arm list. Hardcoded here (NOT config-driven, unlike `thread_scaling`'s
+ladder) because it names literal binaries the builder base image bakes in:
+
+  - `bwa`               -- lh3/bwa v{bwa_version} (timing only, matches the
+                            existing `align_bwa` rule's own "wall-time only"
+                            scope for a third-party comparator).
+  - `bwa-mem2-upstream`  -- upstream bwa-mem2 v2.2.1. x86 ONLY -- upstream has
+                            no ARM build (`_has_upstream_baseline`), so c8g's
+                            arm list is one shorter than c7i's.
+  - `minibwa`            -- lh3/minibwa (timing only, matches `align_minibwa`).
+  - `v021` .. `v090`     -- every prior BLESSED bwa-mem3 release
+                            (docs/release-allowances.yaml `to_sha`s), built
+                            fresh in `docker/Dockerfile.base` and installed as
+                            `bwa-mem3.<label>` -- see that file for why the
+                            list lives there, inlined, rather than in a
+                            separate COPY'd file. DEFAULT MODE ONLY: `--fast`
+                            (fg-labs/bwa-mem3 PR #189) postdates several of
+                            these releases, and this rule has no reliable way
+                            to know which ones support it without risking an
+                            expensive on-demand job on an unsupported-flag
+                            crash. See "Never hard-fail on an old binary"
+                            below for how a release that can't even run
+                            default mode (an even older CLI-surface break) is
+                            handled.
+  - `fg-labs-default`,
+    `fg-labs-fast`       -- today's candidate (`bwa-mem2.fg-labs`, the name
+                            every other rule in this repo already installs it
+                            under -- see docker/Dockerfile), in both modes.
+                            The ONLY arm(s) `--fast` is attempted on, since
+                            it is guaranteed to exist on the SHA being blessed.
+
+Never hard-fail on an old binary. A flag or subcommand added after v0.2.1 (or
+even a Makefile/ABI change severe enough to crash) is a real risk across a
+multi-year release history, and the arena runs on a paid on-demand host --
+losing the whole job to one old release's CLI drift would be an expensive way
+to learn that. Each arm's alignment attempt is therefore wrapped so a failure
+records a SKIPPED row and the loop continues, rather than the rule's `set -e`
+aborting everything measured so far. This is a deliberate, narrow exception to
+this codebase's normal fail-fast contract (see e.g. `align_fg_labs`'s
+`set -o pipefail` discipline) -- justified here specifically because the
+failure mode is "an ancient binary doesn't understand a flag", which carries
+no ambiguity the way a silent partial output would.
+
+Interleaved, with a discarded warmup cycle. The measured cycles run
+REP-OUTER / ARM-INNER (rep 1 of every arm, then rep 2 of every arm, ...) so a
+monotonic drift across the job's wall-clock (thermal throttling, a neighbour
+arriving) is spread evenly across every arm instead of biasing whichever arm
+happened to run first or last. One additional UNMEASURED warmup cycle runs
+first (every arm once, discarded) -- mirrors the project's own bare-metal
+reproduction protocol (CLAUDE.md's "reproduce with interleaved runs and
+discarded warmups"), which caught page-cache and allocator warm-up trends
+masquerading as a binary difference.
+
+Correctness, narrowly scoped. Every arm is a WALL-TIME comparator except one
+pairwise check: the run's own `fg-labs-default` BAM against the immediately
+PRIOR blessed release's (the last entry in ARENA_RELEASES) default-mode BAM,
+via `fgumi compare bams` -- the same boolean full-content identity tool
+`docker/Dockerfile.base` documents for `--compat=bwa-mem2`. Extending this
+pairwise check across the full 9-release history was considered and rejected:
+the "every prior release" want is about TIMING progression (which the arm
+list above already gives, wall-time-only, matching the minibwa precedent's
+"output equivalency is out of scope" -- see CLAUDE.md's minibwa integration
+notes), and older releases' `@SQ` dictionaries are increasingly likely to
+violate `fgumi compare bams`'s header-compatibility precondition the further
+back they go. One pairwise check against the immediate predecessor is the
+question the release bless actually asks: did THIS release change behaviour.
+Best-effort and non-blocking -- a header mismatch is recorded, not fatal.
+
+Prewarm: cat, not shm. `align_fg_labs` excludes index load from the timed
+region via `bwa-mem2 shm`, but `shm` may postdate some of the older releases
+just as plausibly as `--fast` and `--bam=0` do (see above), and upstream
+bwa-mem2 has never had it at all (`align_baseline`'s own docstring). So every
+arm here -- bwa-mem3 (every release), bwa-mem2.upstream, bwa, and minibwa
+alike -- is warmed the SAME way `align_baseline`/`align_bwa`/`align_minibwa`
+already do: an untimed `cat` of each index family's sidecars into
+`/dev/null` before the loop starts, and every timed run emits SAM piped
+through `samtools view -u` rather than any binary's native BAM writer (which
+`--bam=0` may also not be universal). This trades a little fidelity against
+`align_fg_labs`'s numbers (which use the native writer) for one uniform
+measurement technique every arm here can be compared against — the arena's
+14 rows are compared against EACH OTHER, not against `trials.wall_seconds`.
+"""
+
+from collections import namedtuple
+
+# label:sha for every historical release baked into the base image
+# (docker/Dockerfile.base) -- oldest first, matching that file's list. Kept in
+# sync there BY HAND: `base_image_tag()` content-addresses the base image tag
+# over Dockerfile.base's own bytes (see bwa_mem3_bench/base_image.py), which is
+# exactly why the list is inlined there rather than in a separate file this
+# module could import -- see that Dockerfile's comment for the full rationale.
+ARENA_RELEASES = [
+    ("v021", "89bd589db9fcb56279912fa6b23e0831f4916a62"),
+    ("v022", "bffae5a09267877fe514c458d4956b717bcefb8f"),
+    ("v030", "a02fcb446574d5b5d03abdbf73c9b129deead2d4"),
+    ("v040", "2681143bb7ab665488cdcd5d46380cc928f5bd05"),
+    ("v050", "9dd30dd0e5e477ddfd33bec752179978ac9f5a1d"),
+    ("v060", "48cf0a46824e26df2986efe940121d34b2cc7109"),
+    ("v070", "04777b3c3f3c2f18d5838b6f4116015c7f5f2ad9"),
+    ("394f8f8", "394f8f8110f7d15be7ef2ca38c335590aa1e0284"),
+    ("v080", "4acb09562b5109e2f26d85b0158fde35d03a4fb8"),
+    ("v090", "4d341b7ba81246509a87680fa569ac3210af540e"),
+]
+
+# The release immediately preceding today's candidate -- the one arm the
+# fgumi correctness check runs against (see the module docstring). Always the
+# LAST entry: ARENA_RELEASES is oldest-first.
+ARENA_PRIOR_RELEASE_LABEL = ARENA_RELEASES[-1][0]
+
+# ON-DEMAND queues, deliberately separate from the regular spot queues in
+# config/archs.yaml (CONFIG.archs[arch].batch_queue): a spot reclaim mid-job
+# would corrupt every arm's interleaved timing at once, the same failure mode
+# `align_thread_scaling` avoids by running its coordinator on-demand. See
+# cdk/stacks/batch_stack.py's ArenaCe for the compute-environment side.
+ARENA_QUEUES = {
+    "c7i": "bwa-mem3-bench-c7i-arena",
+    "c8g": "bwa-mem3-bench-c8g-arena",
+}
+
+ARENA_SAMPLE = CONFIG.arena.sample
+_arena_sample_cfg = CONFIG.samples[ARENA_SAMPLE]
+ARENA_FG_LABS_FLAGS = _fg_labs_flags(ARENA_SAMPLE)
+ARENA_MEM_FLAGS = _mem_flags(ARENA_SAMPLE)
+ARENA_MINIBWA_FLAGS = " ".join(_arena_sample_cfg.minibwa_flags)
+ARENA_BATCH_FLAG = _batch_flag()
+
+
+def _arena_arms(arch: str) -> list[tuple[str, str, str]]:
+    """Return (label, binary, mode) for every arm `arch` runs.
+
+    `mode` is 'default' or 'fast' -- see the module docstring for why only
+    the run's own candidate ever attempts 'fast'. bwa-mem2-upstream is
+    dropped on ARM (upstream v2.2.1 has no ARM build), matching
+    `_has_upstream_baseline`.
+    """
+    arms: list[tuple[str, str, str]] = [
+        ("bwa", "bwa", "default"),
+        ("minibwa", "minibwa", "default"),
+    ]
+    if _has_upstream_baseline(arch):
+        arms.append(("bwa-mem2-upstream", BASELINE_BINARY, "default"))
+    arms += [(label, f"bwa-mem3.{label}", "default") for label, _ in ARENA_RELEASES]
+    arms += [
+        ("fg-labs-default", "bwa-mem2.fg-labs", "default"),
+        ("fg-labs-fast", "bwa-mem2.fg-labs", "fast"),
+    ]
+    return arms
+
+
+def _arena_arm_spec(arch: str) -> str:
+    """`_arena_arms` as `label|binary|mode` tokens for the shell loop."""
+    return " ".join(f"{label}|{binary}|{mode}" for label, binary, mode in _arena_arms(arch))
+
+
+# `_ref_inputs` / `_bwa_ref_inputs` / `_minibwa_ref_inputs` each take a
+# wildcards object and read ONLY `.sample` from it. `align_arena`'s own
+# wildcards carry `sha` and `arch` but no `sample` -- the arena pins ONE
+# fixed sample (`CONFIG.arena.sample`), it is not a per-run selection -- so
+# this fixed stand-in satisfies those helpers without adding a real `sample`
+# wildcard the rule has no other use for.
+_ArenaSampleWildcards = namedtuple("_ArenaSampleWildcards", ["sample"])
+_ARENA_WC = _ArenaSampleWildcards(sample=ARENA_SAMPLE)
+
+
+def _arena_ref_inputs(wc):
+    """Union of every reference sidecar the arena's three index families need.
+
+    Delegates to each family's own helper -- `_ref_inputs` (bwa-mem2/bwa-mem3,
+    from align.smk), `_bwa_ref_inputs` (align_bwa.smk), `_minibwa_ref_inputs`
+    (align_minibwa.smk) -- rather than restating the file lists, so a future
+    change to any one family's sidecars (e.g. a new bwa-mem3 index file)
+    reaches the arena automatically. All three compute the same plain-.fasta
+    path first (same sample, same reference), so deduping preserves it at
+    index 0, which the shell body relies on via `{input.ref[0]}`.
+
+    `wc` (align_arena's real wildcards, `sha`/`arch` only) is accepted for
+    signature compatibility with snakemake's `input:` calling convention but
+    unused -- see `_ARENA_WC` above for why the sample is fixed instead.
+    """
+    seen: list[str] = []
+    for path in (
+        _ref_inputs(_ARENA_WC, meth_index="d3")
+        + _bwa_ref_inputs(_ARENA_WC)
+        + _minibwa_ref_inputs(_ARENA_WC)
+    ):
+        if path not in seen:
+            seen.append(path)
+    return seen
+
+
+rule align_arena:
+    input:
+        ref = _arena_ref_inputs,
+        fastqs = [f"{_arena_sample_cfg.source}{name}" for name in _arena_sample_cfg.fastq_names],
+    output:
+        tsv            = "arena/{sha}/{arch}/arena.tsv",
+        profile        = "arena/{sha}/{arch}/runtime-profiles.tar.gz",
+        meta           = "arena/{sha}/{arch}/meta.json",
+        host_probe     = "arena/{sha}/{arch}/host-probe.jsonl",
+        fgumi_compare  = "arena/{sha}/{arch}/fgumi-compare.txt",
+    wildcard_constraints:
+        arch = "c7i|c8g",
+    threads: CONFIG.arena.threads
+    resources:
+        batch_queue = lambda wc: ARENA_QUEUES[wc.arch],
+        mem_mb = _mem_mb_for(ARENA_SAMPLE),
+        container_image = lambda wc: image_for_arch(wc.arch),
+        # The arena is long by construction: an interleaved warmup + N measured
+        # cycles across 13-14 arms. The profile default (7200 s) can be tight
+        # once reps > 3; match the ladder's own bump.
+        runtime = 14400,
+    params:
+        arm_spec = lambda wc: _arena_arm_spec(wc.arch),
+        reps = CONFIG.arena.reps,
+        prior_label = ARENA_PRIOR_RELEASE_LABEL,
+        probe_seconds = CONFIG.arena.host_probe_seconds,
+        fg_labs_flags = ARENA_FG_LABS_FLAGS,
+        mem_flags = ARENA_MEM_FLAGS,
+        minibwa_flags = ARENA_MINIBWA_FLAGS,
+        batch_flag = ARENA_BATCH_FLAG,
+        sample = ARENA_SAMPLE,
+    shell:
+        r"""
+        set -euo pipefail
+        OUTDIR=$(dirname {output.tsv})
+        mkdir -p "$OUTDIR/runs"
+
+        emit-host-meta "{wildcards.sha}" "{params.sample}" "{wildcards.arch}" 0 > {output.meta}
+
+        # Untimed page-cache prewarm across all three index families -- see the
+        # module docstring for why this replaces `bwa-mem2 shm` here. `|| true`
+        # on each: a missing sidecar (e.g. no upstream .bwt/.sa on an arch that
+        # never stages them) must not fail the whole job over a warm-cache nicety.
+        cat {input.ref[0]}.0123 {input.ref[0]}.bwt.2bit.64 {input.ref[0]}.pac \
+            > /dev/null 2>/dev/null || true
+        cat {input.ref[0]}.bwt {input.ref[0]}.sa {input.ref[0]}.pac \
+            > /dev/null 2>/dev/null || true
+        cat {input.ref[0]}.l2b {input.ref[0]}.mbw \
+            > /dev/null 2>/dev/null || true
+
+        emit-host-probe pre {params.probe_seconds} > {output.host_probe}
+
+        printf 'label\tmode\trep\twall_s\tcpu_s\tmax_rss_mb\tprocess_s\n' > {output.tsv}
+
+        run_arm() {{
+            # Runs one (label, binary, mode), writing "${{out}}.timing.tsv" /
+            # "${{out}}.stderr.log" / "${{out}}.bam.raw". Returns 1 on a
+            # 0-record (or missing) BAM; the caller reads it under `set +e`,
+            # deliberately suspended around this call -- see the module
+            # docstring's "Never hard-fail on an old binary".
+            local label="$1" binary="$2" mode="$3" rep="$4" out="$5"
+            local cmd
+            case "$binary" in
+                bwa)
+                    cmd="bwa mem -t {threads} {params.batch_flag} {params.mem_flags} {input.ref[0]} {input.fastqs}"
+                    ;;
+                minibwa)
+                    cmd="minibwa map -t {threads} {params.minibwa_flags} {input.ref[0]} {input.fastqs}"
+                    ;;
+                bwa-mem2.fg-labs)
+                    local fast_flag=""
+                    [ "$mode" = "fast" ] && fast_flag="--fast"
+                    cmd="$binary mem -t {threads} {params.batch_flag} {params.mem_flags} {params.fg_labs_flags} $fast_flag {input.ref[0]} {input.fastqs}"
+                    ;;
+                *)
+                    # Historical bwa-mem3 releases and bwa-mem2-upstream: NEVER
+                    # today's candidate's fg_labs_flags -- those are scoped to
+                    # the CURRENT candidate's CLI surface (align.smk's
+                    # _fg_labs_flags), not to an arbitrary older/foreign binary.
+                    cmd="$binary mem -t {threads} {params.batch_flag} {params.mem_flags} {input.ref[0]} {input.fastqs}"
+                    ;;
+            esac
+            tricorder --out "${{out}}.timing.tsv" -- \
+                bash -c "set -o pipefail; $cmd 2>'${{out}}.stderr.log' | samtools view -@4 -u -o '${{out}}.bam.raw' -"
+            if [ "$(samtools view -c "${{out}}.bam.raw" 2>/dev/null || echo 0)" -eq 0 ]; then
+                return 1
+            fi
+        }}
+
+        # One UNMEASURED warmup cycle -- every arm once, discarded -- before
+        # the interleaved measured cycles. See the module docstring.
+        echo "=== warmup cycle ===" >&2
+        for entry in {params.arm_spec}; do
+            IFS='|' read -r label binary mode <<< "$entry"
+            set +e
+            run_arm "$label" "$binary" "$mode" 0 "$OUTDIR/runs/${{label}}.${{mode}}.warmup"
+            status=$?
+            set -e
+            [ $status -ne 0 ] && echo "warmup: $label/$mode failed (exit=$status), ignoring" >&2
+            rm -f "$OUTDIR/runs/${{label}}.${{mode}}.warmup.bam.raw"
+        done
+
+        # Interleaved measured cycles: REP-OUTER / ARM-INNER, so a monotonic
+        # drift across the job's wall-clock lands on every arm equally rather
+        # than biasing whichever ran first or last.
+        for rep in $(seq 1 {params.reps}); do
+            echo "=== measured cycle rep $rep ===" >&2
+            for entry in {params.arm_spec}; do
+                IFS='|' read -r label binary mode <<< "$entry"
+                OUT="$OUTDIR/runs/${{label}}.${{mode}}.rep${{rep}}"
+                set +e
+                run_arm "$label" "$binary" "$mode" "$rep" "$OUT"
+                status=$?
+                set -e
+                if [ $status -ne 0 ]; then
+                    echo "WARNING: arm=$label mode=$mode rep=$rep FAILED (exit=$status) -- likely an unsupported flag/subcommand on an old binary; recording SKIPPED and continuing" >&2
+                    printf '%s\t%s\t%s\tNA\tNA\tNA\tNA\n' "$label" "$mode" "$rep" >> {output.tsv}
+                    rm -f "${{OUT}}.bam.raw"
+                    continue
+                fi
+                WALL=$(mawk 'NR==2{{print $1}}' "${{OUT}}.timing.tsv")
+                RSS=$(mawk 'NR==2{{print $3}}' "${{OUT}}.timing.tsv")
+                CPU=$(mawk 'NR==2{{print $10}}' "${{OUT}}.timing.tsv")
+                PROC=$(grep -oE 'PROCESS\(\).*?:[[:space:]]*[0-9.]+' "${{OUT}}.stderr.log" \
+                       | grep -oE '[0-9.]+$' | head -1 || true)
+                printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                    "$label" "$mode" "$rep" "$WALL" "$CPU" "$RSS" "${{PROC:-NA}}" >> {output.tsv}
+                # Keep the LAST measured rep's BAM for the two arms the
+                # correctness check compares -- default mode only (--fast
+                # prunes the candidate set on purpose, so its BAM is not a
+                # meaningful fgumi comparator -- see CLAUDE.md's vs_default note).
+                if [ "$rep" -eq {params.reps} ] && [ "$mode" = "default" ] \
+                   && {{ [ "$label" = "fg-labs-default" ] || [ "$label" = "{params.prior_label}" ]; }}; then
+                    cp "${{OUT}}.bam.raw" "$OUTDIR/keep.${{label}}.bam"
+                fi
+                rm -f "${{OUT}}.bam.raw"
+            done
+        done
+
+        emit-host-probe post {params.probe_seconds} >> {output.host_probe}
+
+        # Correctness spot-check: today's candidate vs the immediately prior
+        # blessed release, default mode, boolean full-content identity. Never
+        # gates the job -- see the module docstring's "Correctness, narrowly
+        # scoped" for why this is the one pairwise check the arena runs.
+        KEEP_FG="$OUTDIR/keep.fg-labs-default.bam"
+        KEEP_PRIOR="$OUTDIR/keep.{params.prior_label}.bam"
+        if [ -s "$KEEP_FG" ] && [ -s "$KEEP_PRIOR" ]; then
+            set +e
+            fgumi compare bams "$KEEP_FG" "$KEEP_PRIOR" --threads 4 --max-diffs 20 \
+                > {output.fgumi_compare} 2>&1
+            set -e
+        else
+            echo "fgumi correctness check skipped: fg-labs-default or {params.prior_label} BAM missing (see arena.tsv for which rep failed)" \
+                > {output.fgumi_compare}
+        fi
+        rm -f "$KEEP_FG" "$KEEP_PRIOR"
+
+        tar -czf {output.profile} -C "$OUTDIR" runs
+        """

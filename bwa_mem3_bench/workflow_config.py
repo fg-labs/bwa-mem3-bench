@@ -417,6 +417,29 @@ class ThreadScaling:
 
 
 @dataclass(frozen=True)
+class Arena:
+    """Configuration for the release-history "arena" comparison (`--target arena`).
+
+    Interleaves every blessed bwa-mem3 release (baked into the builder base
+    image, see `docker/Dockerfile.base`) plus lh3/bwa, upstream bwa-mem2, and
+    minibwa on ONE fixed host per arch, so a release-over-release wall-time
+    claim never has to trust two builds measured weeks apart on different
+    machines -- see `workflow/rules/arena.smk` for the full rationale.
+
+    Unlike `ThreadScaling`, the arm list itself is NOT config-driven: it is
+    the fixed set of binaries the base image bakes in, hardcoded in
+    `arena.smk`. Only the measurement scope (which sample, which archs, how
+    many reps) lives here.
+    """
+
+    sample: str
+    archs: list[str]
+    reps: int
+    threads: int
+    host_probe_seconds: float = _DEFAULT_HOST_PROBE_SECONDS
+
+
+@dataclass(frozen=True)
 class WorkflowConfig:
     samples: dict[str, Sample]
     archs: dict[str, Arch]
@@ -438,6 +461,7 @@ class WorkflowConfig:
     # function of -t. Deliberately NOT derived from `threads`.
     batch_bases: int
     thread_scaling: ThreadScaling
+    arena: Arena
     references: dict[str, dict[str, str]]
     runs_prefix: str
     baseline_prefix: str
@@ -1042,6 +1066,46 @@ def _thread_scaling_from(
     )
 
 
+def _arena_from(raw: Any, *, samples: dict[str, Sample], archs: dict[str, Arch]) -> Arena:
+    """Validate and build the `arena` block from `defaults.yaml`.
+
+    Fails loudly at load time, same rationale as `_thread_scaling_from`: the
+    arena drives an on-demand Batch job per arch, so a typo here should not
+    surface an hour into a paid run.
+
+    :param raw: the `arena` mapping read from YAML.
+    :param samples: parsed samples, to check the referenced sample exists.
+    :param archs: parsed archs, to check every referenced arch exists.
+    :return: the validated `Arena`.
+    :raises ValueError: on a missing key, unknown sample/arch, an empty
+        `archs` list, or a `reps`/`threads` value that is not an integer >= 1.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError(f"`arena` must be a mapping; got {raw!r}")
+    for key in ("sample", "archs", "reps", "threads"):
+        if key not in raw:
+            raise ValueError(f"`arena` is missing required key {key!r}")
+
+    sample = raw["sample"]
+    if sample not in samples:
+        raise ValueError(f"`arena.sample` {sample!r} is not a configured sample")
+
+    raw_archs = raw["archs"]
+    if not isinstance(raw_archs, list) or not raw_archs:
+        raise ValueError(f"`arena.archs` must be a non-empty list; got {raw_archs!r}")
+    for arch in raw_archs:
+        if arch not in archs:
+            raise ValueError(f"`arena.archs` entry {arch!r} is not a configured arch")
+
+    return Arena(
+        sample=sample,
+        archs=list(raw_archs),
+        reps=_as_positive_int("`arena`", "reps", raw["reps"]),
+        threads=_as_positive_int("`arena`", "threads", raw["threads"]),
+        host_probe_seconds=float(raw.get("host_probe_seconds", _DEFAULT_HOST_PROBE_SECONDS)),
+    )
+
+
 def _sweep_host_probe_seconds_from(defaults: dict[str, Any]) -> float:
     """Validate the top-level `sweep_host_probe_seconds` default.
 
@@ -1126,6 +1190,7 @@ def load_config(config_dir: Path) -> WorkflowConfig:
         thread_scaling=_thread_scaling_from(
             defaults["thread_scaling"], samples=samples, archs=archs
         ),
+        arena=_arena_from(defaults["arena"], samples=samples, archs=archs),
         references=defaults["references"],
         runs_prefix=defaults["runs_prefix"],
         baseline_prefix=defaults["baseline_prefix"],

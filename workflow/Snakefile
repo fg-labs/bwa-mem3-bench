@@ -142,6 +142,11 @@ include: "rules/align_minibwa.smk"
 include: "rules/align_bwa.smk"
 include: "rules/eval.smk"
 include: "rules/scaling.smk"
+# arena.smk calls helpers from align.smk / align_bwa.smk / align_minibwa.smk
+# (_ref_inputs, _bwa_ref_inputs, _minibwa_ref_inputs, _mem_flags, ...) at
+# PARSE time (building its module-level ARENA_* constants), so it must be
+# included after all three.
+include: "rules/arena.smk"
 
 
 # Aggregator targets have no shell body, so they always run on the coordinator.
@@ -168,6 +173,7 @@ localrules:
     fast_meth,
     fast_smoke,
     thread_scaling,
+    arena,
     compat,
     compat_smoke,
     compat_bwa_smoke,
@@ -641,6 +647,16 @@ def _thread_scaling_target() -> str:
     return f"scaling/{FG_LABS_SHA}/{ts.sample}/{ts.arch}/scaling.tsv"
 
 
+def _arena_target() -> list[str]:
+    """The arena's outputs, one set per `arena.archs` (see rules/arena.smk).
+
+    Archs come from `arena` in config/defaults.yaml, not the run's --config
+    archs: like the thread-scaling ladder, this is a fixed measurement on
+    pinned on-demand hosts, not part of the cross-arch spot sweep.
+    """
+    return [f"arena/{FG_LABS_SHA}/{arch}/arena.tsv" for arch in CONFIG.arena.archs]
+
+
 rule bless_release:
     """Full candidate-release validation matrix — run to bless a fg-labs release.
 
@@ -671,6 +687,7 @@ rule bless_release:
         _fast_minibwa_targets(),
         _accuracy_targets(FULL_SIM_SAMPLES, REPS),
         _thread_scaling_target(),
+        _arena_target(),
         _compat_targets(COMPAT_REAL_SAMPLES, REPS),
         _compat_invariance_target(),
         _alt_targets(),
@@ -847,6 +864,24 @@ rule thread_scaling:
     """
     input:
         _thread_scaling_target(),
+
+
+rule arena:
+    """The release-history "arena" on pinned on-demand hosts (see rules/arena.smk).
+
+    Interleaves every blessed bwa-mem3 release plus lh3/bwa, upstream bwa-mem2,
+    and minibwa on ONE fixed host per `arena.archs`, so a release-over-release
+    wall-time claim is answered by one ratio measured under identical
+    conditions rather than by two medians from separate spot runs. Included in
+    `bless_release` — a release cannot be blessed without this comparison
+    having actually run.
+
+    Usage:
+        snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
+            --config fg_labs_sha=<sha> -- arena
+    """
+    input:
+        _arena_target(),
 
 
 rule baseline_all:
