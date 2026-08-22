@@ -101,11 +101,32 @@ def submit(  # noqa: PLR0913
     :param job_name: Batch job name; defaults to ``<target>-<sha>`` (or
         ``<target>-<sha>-<make_target>`` when make_target is set).
     :param dry_run: print the ``aws batch submit-job`` command without executing.
-    :raises ValueError: if ``golden_ref_sha`` cannot be resolved against the
+    :raises ValueError: if ``target`` is ``bless_release`` and ``golden_ref_sha``
+        is empty, or if ``golden_ref_sha`` cannot be resolved against the
         release-allowances registry (ambiguous SHA prefix, or a missing/unreadable
         allowances file). ``defopt`` renders documented raises as a message-only
         CLI error rather than a traceback.
     """
+    if target == "bless_release" and not golden_ref_sha:
+        # Gate #2 (vs-golden concordance against the last blessed release) is
+        # one of the three named gates a release bless exists to check --
+        # `rule bless_release`'s own docstring lists it alongside Gate #1
+        # (vs-upstream) and Gate #3 (thread scaling). Unlike a missing/bad
+        # --archs, an omitted --golden-ref-sha does not fail loudly: `all`'s
+        # GOLDEN_SAMPLES resolves to an empty frozenset and every
+        # compare_vs_golden target simply never gets requested, so the whole
+        # run "succeeds" with zero vs-golden data and no error anywhere in the
+        # Snakefile, the coordinator log, or `bench regression`'s output.
+        # Caught only by noticing the absence after a multi-hour run finished.
+        raise ValueError(
+            "bless_release requires --golden-ref-sha (Gate #2: concordance vs "
+            "the last blessed release). Omitting it does not fail the run -- "
+            "it silently produces a bless run with no vs-golden data at all, "
+            "which is unusable for a release bless. Pass the previous "
+            "release's fg-labs SHA (see docs/release-allowances.yaml for the "
+            "last blessed to_sha), or use --target all if you deliberately "
+            "want a golden-free run."
+        )
     if not archs and target in _FULL_SWEEP_TARGETS:
         archs = ",".join(load_config(Path(REPO_ROOT) / "config").full_archs)
         print(f"[submit] target={target}: auto-set --archs={archs}")
