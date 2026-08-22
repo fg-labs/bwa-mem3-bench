@@ -669,6 +669,13 @@ rule bless_release:
     top without perturbing that invariant. The default-arm targets shared with
     `all` resolve to the same output paths and are computed once.
 
+    Both `--compat` targets are included, not just `--compat=bwa-mem2`: byte
+    identity to both bwa-mem2 AND bwa (lh3/bwa) is a stated guarantee of the
+    tool, so a release bless has to gate both. `_compat_bwa_targets` (see
+    `rule compat_bwa`) joined `bless_release` at the v0.10.0 release; this
+    bless run is its first full-matrix exercise — see git history for the
+    earlier, more cautious version of this rule and its rationale.
+
     Usage:
         snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\
             --config fg_labs_sha=<sha> -- bless_release
@@ -682,6 +689,7 @@ rule bless_release:
         _thread_scaling_target(),
         _compat_targets(COMPAT_REAL_SAMPLES, REPS),
         _compat_invariance_target(),
+        _compat_bwa_targets(COMPAT_BWA_SAMPLES, REPS),
         _alt_targets(),
 
 
@@ -740,8 +748,9 @@ rule compat_bwa_smoke:
     than on the full `compat_bwa` matrix. Run this first after any change to the
     arm's wiring, its index staging, or the `bwa_version` pin.
 
-    Still outside `rule all` and `bless_release`, as is `compat_bwa` itself --
-    see that rule for why the arm has not been folded into the release gate.
+    Still outside `rule all` and `bless_release` -- it is a cheap dev-loop
+    wiring check, not a release gate. The full `compat_bwa` matrix IS in
+    `bless_release` as of v0.10.0; see that rule.
 
     Both arches are load-bearing, and for different reasons than the bwa-mem2
     smoke. c6a proves the arm at all. c8g proves the thing the bwa-mem2 arm
@@ -828,11 +837,11 @@ rule compat_bwa:
     target can: bwa-mem2 v2.2.1 is frozen at bwa 0.7.17, so the whole existing
     matrix says nothing about parity with the bwa people actually install today.
 
-    Kept OUT of `bless_release` for now. The bwa arm is new and its cache is
-    keyed on `bwa_version`, so the first run pays for every cell while later
-    runs are free -- folding it into the release gate before it has a track
-    record would make a bless fail on an arm nobody has watched yet. Promote it
-    once this target has run clean across a release cycle.
+    Included in `bless_release` as of v0.10.0, alongside `rule compat`: byte
+    identity to both upstreams is a stated tool guarantee, so both are gated on
+    every release bless. Its cache is keyed on `bwa_version`, so a re-run for a
+    new fg-labs SHA against an unchanged `bwa_version` reuses the cached bwa
+    BAMs and costs only the fg-labs-side alignments.
 
     Usage:
         snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\

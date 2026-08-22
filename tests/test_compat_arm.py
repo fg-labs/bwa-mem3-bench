@@ -522,17 +522,16 @@ def test_bwa_arm_covers_every_compat_cell_on_every_arch() -> None:
     assert "BASELINE_ARCHS" not in targets
 
 
-def test_bwa_arm_is_not_in_the_release_bless_yet() -> None:
-    """Still out of `bless_release` on purpose.
+def test_bless_release_includes_the_compat_bwa_arm() -> None:
+    """A release blessed without it re-inherits the weaker claim.
 
-    The arm's cache is keyed on `bwa_version`, so the first full run pays for
-    every cell and later runs are free. Folding it into the release gate before
-    it has a track record would fail a bless on an arm nobody has watched.
-    Delete this test in the change that promotes it.
+    Mirrors `test_bless_release_includes_the_compat_arm`: byte identity to
+    bwa-mem2 alone does not establish byte identity to bwa (lh3/bwa), and both
+    are stated tool guarantees. Promoted at v0.10.0, once the bwa arm's cache
+    (keyed on `bwa_version`, not the fg-labs SHA) had run the full matrix once.
     """
     bless = _code_only(SNAKEFILE.split("rule bless_release:")[1].split("\nrule ")[0])
-    assert "bwa-identity" not in bless
-    assert "_compat_bwa_targets" not in bless
+    assert "_compat_bwa_targets(COMPAT_BWA_SAMPLES, REPS)" in bless
 
 
 # ---------------------------------------------------------------------------
