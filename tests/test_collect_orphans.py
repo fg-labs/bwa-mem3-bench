@@ -298,6 +298,56 @@ def test_collect_reports_a_local_artifact_s3_no_longer_has(
     assert "could not reconcile" not in err, "the listing succeeded; nothing to degrade"
 
 
+def test_collect_reports_a_local_arena_artifact_s3_no_longer_has(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`arena/<sha>/` gets the same reconciliation as `runs/<sha>/` -- the gap
+    a real CodeRabbit review caught: `ingest_arena` walks the local mirror the
+    same way `ingest_run` does, so an `arena.tsv` S3 no longer has would be
+    silently re-ingested forever without this.
+
+    Distinguishes the two prefixes in the `_s3_keys` stub (unlike the plain
+    `runs/` test above, which can get away with one fixed return value) so
+    this test cannot pass by accident from the `runs/` side's mirrored set
+    also happening to satisfy the `arena/` side.
+    """
+    mirror = tmp_path / "mirror"
+    run_dir = mirror / "runs" / SHA
+    _build_run(mirror / "runs", SHA, _TWO_WINDOW_OFFSETS[:2])
+    run_mirrored = {
+        path.relative_to(run_dir).as_posix() for path in run_dir.rglob("*") if path.is_file()
+    }
+
+    arena_dir = mirror / "arena" / SHA
+    _touch(arena_dir, "c8g/arena.tsv")
+    _touch(arena_dir, "c7i/arena.tsv")
+    # A leftover from an arch S3 no longer has -- e.g. the arena was re-run
+    # with a narrower `arena.archs` and the old arch's outputs were deleted.
+    orphan = "c6a/arena.tsv"
+    _touch(arena_dir, orphan)
+    arena_mirrored = {"c8g/arena.tsv", "c7i/arena.tsv"}
+
+    def _s3_keys(bucket: str, prefix: str) -> set[str]:
+        if prefix == f"runs/{SHA}/":
+            return run_mirrored
+        if prefix == f"arena/{SHA}/":
+            return arena_mirrored
+        raise AssertionError(f"unexpected prefix: {prefix!r}")
+
+    monkeypatch.setattr(collect_mod, "LOCAL_MIRROR_ROOT", mirror)
+    monkeypatch.setattr(collect_mod, "DB_PATH", tmp_path / "db.sqlite")
+    monkeypatch.setattr(collect_mod, "_sync_prefix", lambda *a, **k: None)
+    monkeypatch.setattr(collect_mod, "_s3_keys", _s3_keys)
+
+    collect_mod.collect(fg_labs_sha=SHA, bucket="b", ingest=False)
+
+    err = capsys.readouterr().err
+    assert f"1 file(s) under {arena_dir}" in err, (
+        "the run's own two mirrored arena.tsv files must not be reported"
+    )
+    assert orphan in err
+
+
 def test_collect_ingests_early_cells(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

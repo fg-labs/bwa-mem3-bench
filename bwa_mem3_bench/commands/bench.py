@@ -8,6 +8,7 @@ from pathlib import Path
 from bwa_mem3_bench import DB_PATH, LOCAL_MIRROR_ROOT, REPO_ROOT
 from bwa_mem3_bench.registry import DEFAULT_REGISTRY_PATH
 from bwa_mem3_bench.report.accuracy import generate_accuracy
+from bwa_mem3_bench.report.arena import generate_arena
 from bwa_mem3_bench.report.compare import generate_compare
 from bwa_mem3_bench.report.docs import generate_docs, parse_releases
 from bwa_mem3_bench.report.full_report import generate_full_report
@@ -136,6 +137,25 @@ def speedup(
         out_md=out,
         minibwa_sha=minibwa_sha,
     )
+    if out is None:
+        print(text)
+    else:
+        print(f"wrote {out}")
+
+
+def arena(*, fg_labs_sha: str, out: Path | None = None) -> None:
+    """Emit the release-history "arena" comparison table.
+
+    Every arm (bwa, upstream bwa-mem2, minibwa, every blessed bwa-mem3
+    release, today's candidate in both modes) ran interleaved on ONE fixed
+    on-demand host per arch — see `workflow/rules/arena.smk`. Markdown is
+    written to stdout by default; pass ``--out path/file.md`` to redirect to
+    a file.
+
+    :param fg_labs_sha: fg-labs SHA whose arena rows to report.
+    :param out: optional path to write the markdown to.
+    """
+    text = generate_arena(db_path=DB_PATH, fg_labs_sha=fg_labs_sha, out_md=out)
     if out is None:
         print(text)
     else:
