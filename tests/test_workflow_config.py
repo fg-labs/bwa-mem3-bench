@@ -25,6 +25,7 @@ from bwa_mem3_bench.workflow_config import (
     compat_sample_suffix,
     load_config,
     parse_ladder_override,
+    resolve_worker_image_sha,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -139,6 +140,53 @@ def test_arch_image_uri_with_baseline_arch_set_appends_suffix() -> None:
     )
     uri = arch.image_uri(ecr_repo_uri=_TEST_ECR, fg_labs_sha=_TEST_SHA)
     assert uri == f"{_TEST_ECR}:{_TEST_SHA}-avx512bw"
+
+
+def test_resolve_worker_image_sha_falls_back_to_fg_labs_sha_when_unset() -> None:
+    """No `--config image_tag=...` override -> the run's own SHA, unchanged.
+
+    This is the common case: `workflow/Snakefile`'s `image_for_arch` must keep
+    deriving every worker's image from `fg_labs_sha` when no override is given,
+    exactly as before this override existed.
+    """
+    assert resolve_worker_image_sha(_TEST_SHA, None) == _TEST_SHA
+
+
+def test_resolve_worker_image_sha_honors_an_explicit_override() -> None:
+    """An explicit `--config image_tag=<sha>` overrides the image SHA.
+
+    docker/coordinator-entrypoint.sh threads this through as IMAGE_TAG, e.g.
+    to pull a manually-tagged debug image while the run still writes outputs
+    under its own `fg_labs_sha` S3 namespace. Before this function existed,
+    `workflow/Snakefile`'s `image_for_arch` computed `IMAGE` from `image_tag`
+    but never consulted it when building the per-rule `container_image` --
+    the override was silently a no-op end to end.
+    """
+    assert resolve_worker_image_sha(_TEST_SHA, "my-custom-tag") == "my-custom-tag"
+
+
+def test_image_for_arch_wires_resolve_worker_image_sha() -> None:
+    """`workflow/Snakefile`'s `image_for_arch` must actually call
+    `resolve_worker_image_sha`, not just `FG_LABS_SHA` directly.
+
+    `resolve_worker_image_sha`'s own unit tests above cannot catch a future
+    revert of `image_for_arch`'s one-line call site back to `fg_labs_sha=
+    FG_LABS_SHA` -- that revert would leave every one of those tests green
+    while silently reintroducing the exact bug they were added for (an
+    explicit `--config image_tag=<sha>` override becoming a no-op). Text-based
+    on the Snakefile source, matching `test_thread_packing.py`'s convention
+    for Snakefile-level logic that snakemake's own machinery keeps out of
+    reach of a normal unit test.
+    """
+    text = (REPO_ROOT / "workflow" / "Snakefile").read_text()
+    start = text.index("def image_for_arch(")
+    end = text.index("\n\n\n", start)
+    body = text[start:end]
+    assert "resolve_worker_image_sha(FG_LABS_SHA, IMAGE_TAG)" in body, (
+        "image_for_arch must pass FG_LABS_SHA through resolve_worker_image_sha "
+        "so an explicit --config image_tag=<sha> actually overrides the "
+        "per-rule worker image; got:\n" + body
+    )
 
 
 def test_load_config_returns_expected_defaults() -> None:

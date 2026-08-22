@@ -13,12 +13,12 @@
 #                    comparison. Empty = vs-golden disabled.
 #   IMAGE_TAG      — Docker image tag passed through to snakemake's
 #                    `image_tag` config. Auto-derived from FG_LABS_SHA only
-#                    when BUILD_VARIANT is set; unset otherwise.
-#                    NOTE: no current worker rule
-#                    consumes this config — per-rule images are derived from
-#                    `fg_labs_sha` via `image_for_arch` in workflow/Snakefile.
-#                    Useful for log inspection / debugging only until
-#                    `image_tag` is wired into the per-rule image fallback.
+#                    when BUILD_VARIANT is set; unset otherwise. Every
+#                    per-rule image (`image_for_arch` in workflow/Snakefile,
+#                    via `resolve_worker_image_sha`) uses this in place of
+#                    `fg_labs_sha` when set, e.g. to pull a manually-tagged
+#                    debug image while the run still writes outputs under
+#                    its own `fg_labs_sha` S3 namespace.
 #   BUILD_VARIANT  — non-default fg-labs/bwa-mem3 Makefile target (e.g.
 #                    `lto-build`). When set, both the image tag and the
 #                    snakemake `fg_labs_sha` config are suffixed
@@ -72,7 +72,7 @@ CONFIG_ARGS=("fg_labs_sha=${FG_LABS_SHA}")
 # Batch job definition (see cdk/stacks/batch_stack.py). Optional
 # BWA_MEM3_BENCH_COST_CENTER adds a CostCenter tag to spawned worker jobs.
 python -m bwa_mem3_bench.cli render-profile \
-    --template /opt/workflow/profiles/aws-batch/config.yaml.template \
+    --template /opt/workflow/profiles/aws-batch.config.yaml.template \
     --output /opt/workflow/profiles/aws-batch/config.yaml
 
 # --cores is REQUIRED here, and must be large. Snakemake clamps every rule's
