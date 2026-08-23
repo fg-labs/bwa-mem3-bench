@@ -18,6 +18,7 @@ reach of a normal unit test.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 from bwa_mem3_bench import REPO_ROOT
@@ -83,3 +84,107 @@ def test_align_arena_is_scheduled_ahead_of_every_other_rule() -> None:
                     f"align_arena's {arena_priority}; the scheduler would no longer "
                     "prefer the arena when both are ready"
                 )
+
+
+# A representative `label|binary|mode` list, matching every distinct case
+# `run_arm`'s `case "$binary" in` dispatches on -- including the SHA-like
+# `394f8f8` label, the least string-like of the historical release names.
+_SAMPLE_ARM_SPEC = (
+    "bwa|bwa|default minibwa|minibwa|default "
+    "bwa-mem2-upstream|bwa-mem2.upstream|default "
+    "v021|bwa-mem3.v021|default 394f8f8|bwa-mem3.394f8f8|default "
+    "fg-labs-default|bwa-mem2.fg-labs|default "
+    "fg-labs-fast|bwa-mem2.fg-labs|fast"
+)
+_SAMPLE_ARM_SPEC_COUNT = 7
+# Every arm-spec-iterating `for` loop the align_arena rule declares (the
+# warmup cycle and the measured cycle) -- both must use the safe form.
+_EXPECTED_ARM_SPEC_LOOP_COUNT = 2
+
+
+def test_arm_spec_for_loop_does_not_trigger_a_bash_syntax_error() -> None:
+    """Regression test for a real bug that killed a live, paid AWS Batch
+    arena job on its very first submission: `for entry in {params.arm_spec};
+    do` bakes the `|`-delimited arm_spec string into the shell script's
+    LITERAL SOURCE TEXT (Snakemake's `.format()` substitutes it before bash
+    ever parses the script -- this is not a runtime shell-variable
+    expansion). `|` is a shell metacharacter anywhere it appears in literal
+    source text, regardless of context, so the rendered line was a bash
+    SYNTAX ERROR: `for entry in bwa|bwa|default ...; do` aborted the entire
+    rule immediately, on the first arm of the warmup cycle -- not a graceful
+    per-arm SKIPPED row, which is what the rule's own "Never hard-fail on an
+    old binary" design assumes every failure looks like. Confirmed live on
+    both the c7i and c8g on-demand jobs for the same submission.
+
+    Fixed by assigning `{params.arm_spec}` to a shell variable first and
+    iterating over `$ARM_SPEC` unquoted: unquoted VARIABLE expansion only
+    word-splits on IFS, it never re-tokenizes shell operators the way
+    parsing literal source text does.
+
+    A text-based "does the right substring appear" check cannot catch this
+    class of bug on its own -- the failure is a property of how BASH's
+    lexer treats `|` in literal vs. expanded text, not of the Python-level
+    template. So this test actually executes the pattern through a real
+    bash subprocess, exactly as arena.smk's own two `for entry in ...` loops
+    do, with a representative arm_spec substituted for `{{params.arm_spec}}`
+    the same way Snakemake's `.format()` would.
+    """
+    text = ARENA_SMK.read_text()
+    assert "for entry in {params.arm_spec}" not in text, (
+        "must not iterate {params.arm_spec} directly -- Snakemake's "
+        "`.format()` bakes its literal `|` characters into the shell "
+        "script's source text, which bash's lexer parses as pipe operators "
+        "regardless of context; thread it through a shell variable first"
+    )
+    assert 'ARM_SPEC="{params.arm_spec}"' in text, (
+        'expected an `ARM_SPEC="{params.arm_spec}"` assignment feeding '
+        "both `for entry in $ARM_SPEC` loops"
+    )
+    assert text.count("for entry in $ARM_SPEC") == _EXPECTED_ARM_SPEC_LOOP_COUNT, (
+        "both the warmup cycle and the measured cycle must iterate the "
+        "safe $ARM_SPEC variable, not {params.arm_spec} directly"
+    )
+
+    script = f"""
+    ARM_SPEC="{_SAMPLE_ARM_SPEC}"
+    count=0
+    for entry in $ARM_SPEC; do
+        IFS='|' read -r label binary mode <<< "$entry"
+        count=$((count + 1))
+    done
+    echo "$count"
+    """
+    result = subprocess.run(  # noqa: S603, S607 -- fixed, test-owned Bash script
+        ["bash", "-c", script], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, (
+        f"the ARM_SPEC for-loop pattern must be valid, executable bash; stderr: {result.stderr}"
+    )
+    assert result.stdout.strip() == str(_SAMPLE_ARM_SPEC_COUNT), (
+        f"expected all {_SAMPLE_ARM_SPEC_COUNT} arm_spec entries to be "
+        f"iterated; got stdout {result.stdout!r}"
+    )
+
+
+def test_arm_spec_literal_substitution_reproduces_the_original_bug() -> None:
+    """Companion to the test above: confirms the bug this all guards against
+    is real by reproducing it directly -- iterating the SAME arm_spec value
+    the old, broken way (baked into literal source text, exactly what
+    `for entry in {params.arm_spec}; do` produced) must fail with bash's
+    actual "unexpected token" syntax error, not some other, unrelated
+    failure.
+    """
+    script = f"""
+    for entry in {_SAMPLE_ARM_SPEC}; do
+        IFS='|' read -r label binary mode <<< "$entry"
+    done
+    """
+    result = subprocess.run(  # noqa: S603, S607 -- fixed, test-owned Bash script
+        ["bash", "-c", script], capture_output=True, text=True, check=False
+    )
+    assert result.returncode != 0
+    assert "unexpected token" in result.stderr, (
+        f"expected the literal-substitution form to fail with bash's "
+        f"'unexpected token' syntax error (confirming this is really the "
+        f"same bug); got: {result.stderr!r}"
+    )
