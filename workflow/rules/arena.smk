@@ -21,6 +21,17 @@ added this rule for why samples are capped to one. This is a
 correctness-anchored progression view ALONGSIDE the cross-arch sweep, not a
 replacement for it.
 
+Scheduled first, not just included. `align_arena` carries `priority: 100`
+(every other rule defaults to 0), so when `bless_release`'s full matrix
+outstrips the profile's `jobs:` cap, snakemake's scheduler prefers to submit
+the arena's jobs over other ready-but-lower-priority ones. It is the newest
+and least battle-tested piece of the bless -- unlike the rest of the matrix,
+it has never run against real historical binaries end to end -- so surfacing
+its result (and its cost) early in a run is worth more than a first-in
+DAG-order or alphabetical position would give it for free. This only affects
+which ready job gets a submission slot next; it cannot make the arena's own
+jobs finish before work the scheduler already started elsewhere.
+
 The arm list. Hardcoded here (NOT config-driven, unlike `thread_scaling`'s
 ladder) because it names literal binaries the builder base image bakes in:
 
@@ -236,6 +247,16 @@ rule align_arena:
         fgumi_compare  = "arena/{sha}/{arch}/fgumi-compare.txt",
     wildcard_constraints:
         arch = ARENA_ARCH_PATTERN,
+    # Highest in the DAG (everything else defaults to 0): the arena is the
+    # newest, least-proven piece of `bless_release` -- it has never run
+    # against real historical binaries end to end. Preferring it whenever the
+    # profile's `jobs:` cap forces a choice among ready jobs means its result
+    # (and cost) lands early in a bless, rather than after hours of the rest
+    # of the matrix have already run. This does not make the arena finish
+    # first (its jobs still queue behind whatever the scheduler already
+    # started), only that it is submitted first among what's ready -- see the
+    # module docstring.
+    priority: 100
     threads: CONFIG.arena.threads
     resources:
         batch_queue = lambda wc: ARENA_QUEUES[wc.arch],
