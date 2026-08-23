@@ -334,10 +334,25 @@ rule align_arena:
             fi
         }}
 
+        # `{{params.arm_spec}}` is a Snakemake `.format()` field -- it is
+        # substituted into this script's LITERAL SOURCE TEXT before bash ever
+        # parses it, not expanded at runtime the way a shell variable is. Its
+        # tokens are `|`-delimited (`label|binary|mode`), and `|` is a shell
+        # metacharacter (pipe) ANYWHERE it appears in literal source text,
+        # regardless of context -- `for entry in bwa|bwa|default ...; do` is
+        # therefore a bash SYNTAX ERROR (confirmed live: this killed the
+        # entire rule immediately, on the very first arm of the warmup cycle,
+        # not a graceful per-arm SKIPPED row). Assigning it to a shell
+        # variable FIRST and iterating over `$ARM_SPEC` unquoted sidesteps
+        # this: unquoted VARIABLE expansion only word-splits on IFS, it never
+        # re-tokenizes shell operators like `|` the way parsing literal
+        # source text does.
+        ARM_SPEC="{params.arm_spec}"
+
         # One UNMEASURED warmup cycle -- every arm once, discarded -- before
         # the interleaved measured cycles. See the module docstring.
         echo "=== warmup cycle ===" >&2
-        for entry in {params.arm_spec}; do
+        for entry in $ARM_SPEC; do
             IFS='|' read -r label binary mode <<< "$entry"
             set +e
             run_arm "$label" "$binary" "$mode" 0 "$OUTDIR/runs/${{label}}.${{mode}}.warmup"
@@ -352,7 +367,7 @@ rule align_arena:
         # than biasing whichever ran first or last.
         for rep in $(seq 1 {params.reps}); do
             echo "=== measured cycle rep $rep ===" >&2
-            for entry in {params.arm_spec}; do
+            for entry in $ARM_SPEC; do
                 IFS='|' read -r label binary mode <<< "$entry"
                 OUT="$OUTDIR/runs/${{label}}.${{mode}}.rep${{rep}}"
                 set +e
