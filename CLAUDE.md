@@ -583,12 +583,24 @@ comparison across architectures.
 ### What's added
 
 - **Submodule**: `vendor/minibwa` pinned at
-  `a8cf4d336613672213dd2df89e9fe9cbc041c31e` (lh3/minibwa master, r387).
-  Populate with `git submodule update --init` (requires lh3/minibwa access —
-  repo is private). The canonical SHA also lives in
+  `d6d9f87d300908622306382cbe17d5ffd2879d2f` (lh3/minibwa's `minibwa-0.7`
+  tagged release, r421). `lh3/minibwa` is public now (it was private when
+  this integration was first added). Populate with
+  `git submodule update --init`. The canonical SHA also lives in
   `docker/build-arg-defaults.env` (`MINIBWA_SHA`) and is read by
   `bwa_mem3_bench.minibwa_sha()` for cache-path keying and ingest; **keep the
   two in sync** (bump the submodule, then the env file).
+
+  Pinned to the latest TAGGED release deliberately, not master tip: as of
+  this bump master carried 3 more commits past `minibwa-0.7`
+  (`c42d875a`..`f0e11743`), one of which (`c42d875a`,
+  `perf(bwt): prefetch the first backward-extension occ blocks after a
+  k-mer lookup`) is a genuine, author-measured perf win (−1.0% WGS / −2.6%
+  WES on Graviton4, byte-identical output) — deliberately left out in favor
+  of pinning to a released tag over unreleased/less-vetted commits. It
+  slightly favors minibwa in our own arena numbers (our comparator is ~1-3%
+  slower than current master), which is the conservative direction for any
+  "bwa-mem3 now beats minibwa" claim. Revisit if `minibwa-0.8`+ ships.
 - **Docker**: builder stage `COPY`s `vendor/minibwa` and `make`s it. Single
   binary `/usr/local/bin/minibwa`; ksw2 uses NEON on arm64 (via `s2n-lite.h`)
   and SSE4.2 on x86 — **minibwa has no AVX path yet** (upstream WIP), so x86
@@ -632,7 +644,7 @@ pixi run python -m bwa_mem3_bench.cli submit --fg-labs-sha <fg-sha> --target min
 pixi run python -m bwa_mem3_bench.cli submit --fg-labs-sha <fg-sha> --target minibwa
 pixi run python -m bwa_mem3_bench.cli collect --fg-labs-sha <fg-sha>
 pixi run python -m bwa_mem3_bench.cli bench speedup --fg-labs-sha <fg-sha> \
-    --minibwa-sha a8cf4d336613672213dd2df89e9fe9cbc041c31e
+    --minibwa-sha d6d9f87d300908622306382cbe17d5ffd2879d2f
 ```
 
 ### Intentionally NOT integrated

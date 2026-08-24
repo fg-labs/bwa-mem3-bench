@@ -496,14 +496,15 @@ def build(  # noqa: PLR0913
     # pushed. `cli build-base --push` does that.
     resolved_base_image = base_image or base_image_uri(image_name)
 
-    # minibwa is vendored as a git submodule (private repo, can't clone in
-    # the Dockerfile). Confirm it has been populated before invoking buildx.
-    # Skipped on --dry-run so the print path works on a fresh clone.
+    # minibwa is vendored as a git submodule (not published as a package,
+    # so this is the reproducible way to build it, not a Dockerfile clone).
+    # Confirm it has been populated before invoking buildx. Skipped on
+    # --dry-run so the print path works on a fresh clone.
     minibwa_makefile = REPO_ROOT / "vendor" / "minibwa" / "Makefile"
     if not dry_run and not minibwa_makefile.is_file():
         raise FileNotFoundError(
             f"vendored minibwa source missing at {minibwa_makefile.parent}; "
-            "run `git submodule update --init` (requires lh3/minibwa access)."
+            "run `git submodule update --init`."
         )
 
     # Authenticate whenever ECR is involved AT ALL, not only when pushing. The
