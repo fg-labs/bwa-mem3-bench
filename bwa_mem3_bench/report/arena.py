@@ -47,6 +47,18 @@ EM_DASH = "—"
 # directly -- they are a stable public contract of the arena.tsv format.
 _NON_BWA_MEM3_LABELS = frozenset({"bwa", "bwa-mem2-upstream", "minibwa"})
 
+# `build_release_speedup_table`'s documented column set -- shared by its two
+# empty-result branches (no arena rows at all for this arch, and arena rows
+# that are all comparators with no bwa-mem3 release among them) so a future
+# column change can't update one branch's schema and silently miss the other.
+_RELEASE_SPEEDUP_COLUMNS = [
+    "label",
+    "stock_median_wall_s",
+    "stock_speedup",
+    "fast_median_wall_s",
+    "fast_speedup",
+]
+
 
 def _arena_rows(db_path: Path, fg_labs_sha: str) -> pd.DataFrame:
     return query_df(
@@ -59,6 +71,38 @@ def _arena_rows(db_path: Path, fg_labs_sha: str) -> pd.DataFrame:
         """,
         params=(fg_labs_sha,),
     )
+
+
+def _bwa_mem3_release_chain(arch_group: pd.DataFrame) -> pd.DataFrame:
+    """Every historical release's default-mode row, plus fg-labs-default's, in
+    chronological order.
+
+    Ordered by `min_id` -- the DB row insertion order -- rather than by label
+    text, so it needs no knowledge of `workflow/rules/arena.smk`'s
+    ARENA_RELEASES list (the report layer reads only the DB; see the module
+    docstring). That order faithfully reflects release chronology because
+    `align_arena`'s shell loop writes each rep's arms in `_arena_arms()` order
+    (oldest release first) and `ingest_arena` parses the TSV top to bottom.
+    fg-labs-default's own arm always runs last in each rep, so it naturally
+    sorts last here too. Shared by `build_arena_table`'s `vs_prior_release`
+    and `build_release_speedup_table`, so the two can never define "release
+    order" differently.
+    """
+    return arch_group[
+        (arch_group["mode"] == "default")
+        & ~arch_group["label"].isin(_NON_BWA_MEM3_LABELS | {"fg-labs-fast"})
+    ].sort_values("min_id")
+
+
+def _fast_sibling_label(label: str) -> str:
+    """The `-fast` arm's label for a given default-mode release label.
+
+    Today's candidate is `fg-labs-default` / `fg-labs-fast` -- two
+    independent labels from arena.smk's own arm list, not `<label>-fast` --
+    every other release's fast arm IS `<label>-fast` on the same binary. Not
+    derivable from one rule, so this names the exception explicitly.
+    """
+    return "fg-labs-fast" if label == "fg-labs-default" else f"{label}-fast"
 
 
 def build_arena_table(*, db_path: Path, fg_labs_sha: str) -> pd.DataFrame:
@@ -106,21 +150,7 @@ def build_arena_table(*, db_path: Path, fg_labs_sha: str) -> pd.DataFrame:
     vs_prior_release: dict[int, float | None] = {}
     vs_fg_labs: dict[int, float | None] = {}
     for _arch, arch_group in grouped.groupby("arch"):
-        # Chronological release chain for this arch: every historical
-        # release's default-mode row, plus fg-labs-default's, ordered by
-        # `min_id` -- the DB row insertion order. That order faithfully
-        # reflects arena.smk's ARENA_RELEASES (oldest first) because
-        # align_arena's shell loop writes each rep's arms in `_arena_arms()`
-        # order and `ingest_arena` parses the TSV top to bottom, so it is
-        # usable WITHOUT the report layer ever importing the Snakefile (see
-        # the module docstring). fg-labs-default's own arm always runs last
-        # in each rep, so it naturally sorts last here too -- one ordering
-        # gives every historical release AND fg-labs-default its own true
-        # predecessor, with no separate case needed for either.
-        chain = arch_group[
-            (arch_group["mode"] == "default")
-            & ~arch_group["label"].isin(_NON_BWA_MEM3_LABELS | {"fg-labs-fast"})
-        ].sort_values("min_id")
+        chain = _bwa_mem3_release_chain(arch_group)
         predecessor_wall: dict[str, float | None] = {}
         last_measured_wall: float | None = None
         for chain_row in chain.itertuples(index=False):
@@ -245,9 +275,140 @@ def generate_arena(*, db_path: Path, fg_labs_sha: str, out_md: Path | None) -> s
     return text
 
 
+def build_release_speedup_table(
+    *, db_path: Path, fg_labs_sha: str, arch: str, baseline_label: str = "bwa"
+) -> pd.DataFrame:
+    """One row per bwa-mem3 release (chronological) for `arch`, feeding the
+    README's release-history speedup table.
+
+    Columns: ``label``, ``stock_median_wall_s``, ``stock_speedup``,
+    ``fast_median_wall_s``, ``fast_speedup``. Speedup is `baseline_label`'s
+    (default ``bwa``, the same comparator `_arena_arms` always runs -- see
+    arena.smk) own median wall on the SAME arena host divided by this row's
+    median wall -- ``>1`` means the release is FASTER than the baseline. A
+    NaN ``fast_*`` pair means the release predates ``--fast`` or its `-fast`
+    arm was recorded SKIPPED (see arena.smk's "Never hard-fail on an old
+    binary"), not a missing measurement.
+    """
+    raw = _arena_rows(db_path, fg_labs_sha)
+    raw = raw[raw["arch"] == arch]
+    if raw.empty:
+        return pd.DataFrame(columns=_RELEASE_SPEEDUP_COLUMNS)
+
+    grouped = raw.groupby(["label", "mode"], as_index=False).agg(
+        median_wall_s=("wall_seconds", "median"),
+        min_id=("id", "min"),
+    )
+
+    baseline_row = grouped[(grouped["label"] == baseline_label) & (grouped["mode"] == "default")]
+    baseline_wall = (
+        float(baseline_row["median_wall_s"].iloc[0])
+        if not baseline_row.empty and pd.notna(baseline_row["median_wall_s"].iloc[0])
+        else None
+    )
+
+    def _wall(label: str, mode: str) -> float | None:
+        row = grouped[(grouped["label"] == label) & (grouped["mode"] == mode)]
+        if row.empty or pd.isna(row["median_wall_s"].iloc[0]):
+            return None
+        return float(row["median_wall_s"].iloc[0])
+
+    def _speedup(wall: float | None) -> float | None:
+        return baseline_wall / wall if wall is not None and baseline_wall is not None else None
+
+    rows: list[dict[str, object]] = []
+    for chain_row in _bwa_mem3_release_chain(grouped).itertuples(index=False):
+        stock_wall = _wall(chain_row.label, "default")
+        fast_wall = _wall(_fast_sibling_label(chain_row.label), "fast")
+        rows.append(
+            {
+                "label": chain_row.label,
+                "stock_median_wall_s": stock_wall,
+                "stock_speedup": _speedup(stock_wall),
+                "fast_median_wall_s": fast_wall,
+                "fast_speedup": _speedup(fast_wall),
+            }
+        )
+    if not rows:
+        return pd.DataFrame(columns=_RELEASE_SPEEDUP_COLUMNS)
+    return pd.DataFrame(rows)
+
+
+def render_release_speedup_markdown(
+    *, db_path: Path, fg_labs_sha: str, arch: str, baseline_label: str = "bwa"
+) -> str:
+    """Return the release-history speedup markdown report as a string."""
+    df = build_release_speedup_table(
+        db_path=db_path, fg_labs_sha=fg_labs_sha, arch=arch, baseline_label=baseline_label
+    )
+
+    lines = [
+        f"# Release-history speedup vs `{baseline_label}`, {arch}, `{fg_labs_sha}`",
+        "",
+    ]
+
+    if df.empty:
+        lines.append(
+            f"_No arena rows for arch `{arch}` and SHA `{fg_labs_sha}`. "
+            "Run `--target arena` first._"
+        )
+        return "\n".join(lines) + "\n"
+
+    lines.extend(
+        [
+            "Every release below ran INTERLEAVED on ONE fixed on-demand host "
+            "(see `workflow/rules/arena.smk`) — a speedup claim here is "
+            "measured under identical conditions, not from two separate spot "
+            "runs' medians.",
+            "",
+            f"- **speedup** — `{baseline_label}`'s own median wall on this "
+            "SAME host, divided by the release's median wall. `>1` means the "
+            f"release is FASTER than `{baseline_label}`.",
+            "- A blank `--fast` pair means the release predates the flag or "
+            "its arm was recorded SKIPPED, not a missing measurement.",
+            "",
+        ]
+    )
+
+    headers = ["release", "stock_wall_s", "stock_speedup", "fast_wall_s", "fast_speedup"]
+    aligners = ["---", "---:", "---:", "---:", "---:"]
+    body_rows: list[str] = []
+    for row in df.itertuples(index=False):
+        cells = [
+            str(row.label),
+            _format_seconds(row.stock_median_wall_s),
+            _format_speedup(row.stock_speedup),
+            _format_seconds(row.fast_median_wall_s),
+            _format_speedup(row.fast_speedup),
+        ]
+        body_rows.append("| " + " | ".join(cells) + " |")
+
+    lines.append("| " + " | ".join(headers) + " |")
+    lines.append("| " + " | ".join(aligners) + " |")
+    lines.extend(body_rows)
+    lines.append("")
+    return "\n".join(lines)
+
+
+def generate_release_speedup(
+    *, db_path: Path, fg_labs_sha: str, arch: str, baseline_label: str = "bwa", out_md: Path | None
+) -> str:
+    """Render the release-history speedup table; write to `out_md` if given."""
+    text = render_release_speedup_markdown(
+        db_path=db_path, fg_labs_sha=fg_labs_sha, arch=arch, baseline_label=baseline_label
+    )
+    if out_md is not None:
+        out_md.parent.mkdir(parents=True, exist_ok=True)
+        out_md.write_text(text)
+    return text
+
+
 __all__ = [
     "EM_DASH",
     "build_arena_table",
+    "build_release_speedup_table",
     "generate_arena",
+    "generate_release_speedup",
     "render_arena_markdown",
+    "render_release_speedup_markdown",
 ]
