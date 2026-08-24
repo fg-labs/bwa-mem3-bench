@@ -15,11 +15,22 @@ conditions -- not by two medians that were never comparable in the first
 place.
 
 Scope, deliberately narrow. ONE sample (`config/defaults.yaml`'s
-`arena.sample`, wgs-5M), TWO archs (c7i, c8g) -- see the CDK on-demand queues
+`arena.sample`, wgs-5M), TWO archs (c8a, c8g) -- see the CDK on-demand queues
 below for why archs are capped, and AskUserQuestion scoping in the PR that
 added this rule for why samples are capped to one. This is a
 correctness-anchored progression view ALONGSIDE the cross-arch sweep, not a
 replacement for it.
+
+Why c8a, not c7i, for the x86 leg. `aws ec2 describe-instance-types` on
+`.4xlarge`: c7i (Intel Sapphire Rapids) and m7i report `DefaultThreadsPerCore:
+2` -- 16 vCPUs is 8 PHYSICAL cores under 2-way SMT. c8a (AMD, next-gen after
+c7a's Genoa) and c8g (Graviton4) both report `DefaultThreadsPerCore: 1` and
+`ValidThreadsPerCore: [1]` -- SMT isn't even an option, so 16 vCPUs IS 16
+physical cores. `-t 16` on the old c7i leg was therefore 16 software threads
+contending for 8 cores' worth of execution ports, while the c8g leg got 16
+independent cores for the same thread count -- not an apples-to-apples core
+count despite matching vCPU/thread numbers. c8a fixes that: both arena legs
+now run `-t 16` on 16 real cores.
 
 Scheduled first, not just included. `align_arena` carries `priority: 100`
 (every other rule defaults to 0), so when `bless_release`'s full matrix
@@ -40,7 +51,7 @@ ladder) because it names literal binaries the builder base image bakes in:
                             scope for a third-party comparator).
   - `bwa-mem2-upstream`  -- upstream bwa-mem2 v2.2.1. x86 ONLY -- upstream has
                             no ARM build (`_has_upstream_baseline`), so c8g's
-                            arm list is one shorter than c7i's.
+                            arm list is one shorter than c8a's.
   - `minibwa`            -- lh3/minibwa (timing only, matches `align_minibwa`).
   - `v021` .. `v090`     -- every prior BLESSED bwa-mem3 release
                             (docs/release-allowances.yaml `to_sha`s), built
