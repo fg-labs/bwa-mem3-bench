@@ -47,21 +47,25 @@ ladder) because it names literal binaries the builder base image bakes in:
                             fresh in `docker/Dockerfile.base` and installed as
                             `bwa-mem3.<label>` -- see that file for why the
                             list lives there, inlined, rather than in a
-                            separate COPY'd file. DEFAULT MODE ONLY: `--fast`
-                            (fg-labs/bwa-mem3 PR #189) postdates several of
-                            these releases, and this rule has no reliable way
-                            to know which ones support it without risking an
-                            expensive on-demand job on an unsupported-flag
-                            crash. See "Never hard-fail on an old binary"
-                            below for how a release that can't even run
-                            default mode (an even older CLI-surface break) is
-                            handled.
+                            separate COPY'd file. Each release also gets a
+                            `<label>-fast` arm attempting `--fast` (fg-labs/
+                            bwa-mem3 PR #189) on the SAME binary. `--fast`
+                            postdates several of these releases, and this rule
+                            has no reliable way to know which ones support it
+                            without risking an expensive on-demand job on an
+                            unsupported-flag crash -- so it does not try to
+                            know: every `-fast` arm is wrapped by "Never
+                            hard-fail on an old binary" below the same way the
+                            default-mode arms already are, and a release that
+                            predates `--fast` entirely just records a SKIPPED
+                            row for its `-fast` arm rather than crashing the
+                            job or needing a hand-maintained support list.
   - `fg-labs-default`,
     `fg-labs-fast`       -- today's candidate (`bwa-mem2.fg-labs`, the name
                             every other rule in this repo already installs it
                             under -- see docker/Dockerfile), in both modes.
-                            The ONLY arm(s) `--fast` is attempted on, since
-                            it is guaranteed to exist on the SHA being blessed.
+                            Guaranteed to exist on the SHA being blessed, so
+                            these two arms are never expected to SKIP.
 
 Never hard-fail on an old binary. A flag or subcommand added after v0.2.1 (or
 even a Makefile/ABI change severe enough to crash) is a real risk across a
@@ -112,7 +116,7 @@ through `samtools view -u` rather than any binary's native BAM writer (which
 `--bam=0` may also not be universal). This trades a little fidelity against
 `align_fg_labs`'s numbers (which use the native writer) for one uniform
 measurement technique every arm here can be compared against — the arena's
-14 rows are compared against EACH OTHER, not against `trials.wall_seconds`.
+rows are compared against EACH OTHER, not against `trials.wall_seconds`.
 """
 
 from collections import namedtuple
@@ -175,10 +179,14 @@ ARENA_BATCH_FLAG = _batch_flag()
 def _arena_arms(arch: str) -> list[tuple[str, str, str]]:
     """Return (label, binary, mode) for every arm `arch` runs.
 
-    `mode` is 'default' or 'fast' -- see the module docstring for why only
-    the run's own candidate ever attempts 'fast'. bwa-mem2-upstream is
-    dropped on ARM (upstream v2.2.1 has no ARM build), matching
-    `_has_upstream_baseline`.
+    `mode` is 'default' or 'fast'. Every historical release gets BOTH a
+    default-mode arm (label `<release>`) and a `--fast` arm (label
+    `<release>-fast`) on the same binary -- see the module docstring for why
+    this needs no hand-maintained "which releases support --fast" list: a
+    release that predates the flag just SKIPs its `-fast` arm via the same
+    "never hard-fail on an old binary" wrapper the default-mode arms already
+    rely on. bwa-mem2-upstream is dropped on ARM (upstream v2.2.1 has no ARM
+    build), matching `_has_upstream_baseline`.
     """
     arms: list[tuple[str, str, str]] = [
         ("bwa", "bwa", "default"),
@@ -186,7 +194,9 @@ def _arena_arms(arch: str) -> list[tuple[str, str, str]]:
     ]
     if _has_upstream_baseline(arch):
         arms.append(("bwa-mem2-upstream", BASELINE_BINARY, "default"))
-    arms += [(label, f"bwa-mem3.{label}", "default") for label, _ in ARENA_RELEASES]
+    for label, _ in ARENA_RELEASES:
+        arms.append((label, f"bwa-mem3.{label}", "default"))
+        arms.append((f"{label}-fast", f"bwa-mem3.{label}", "fast"))
     arms += [
         ("fg-labs-default", "bwa-mem2.fg-labs", "default"),
         ("fg-labs-fast", "bwa-mem2.fg-labs", "fast"),
@@ -324,7 +334,15 @@ rule align_arena:
                     # today's candidate's fg_labs_flags -- those are scoped to
                     # the CURRENT candidate's CLI surface (align.smk's
                     # _fg_labs_flags), not to an arbitrary older/foreign binary.
-                    cmd="$binary mem -t {threads} {params.batch_flag} {params.mem_flags} {input.ref[0]} {input.fastqs}"
+                    # bwa-mem2-upstream never gets a `mode = fast` arm (see
+                    # _arena_arms), so $fast_flag is always empty for it -- this
+                    # branch only ever adds --fast for a historical bwa-mem3
+                    # release's `<label>-fast` arm. A release that predates the
+                    # flag exits non-zero here, which `run_arm`'s caller turns
+                    # into a SKIPPED row, not a job failure.
+                    local fast_flag=""
+                    [ "$mode" = "fast" ] && fast_flag="--fast"
+                    cmd="$binary mem -t {threads} {params.batch_flag} {params.mem_flags} $fast_flag {input.ref[0]} {input.fastqs}"
                     ;;
             esac
             tricorder --out "${{out}}.timing.tsv" -- \

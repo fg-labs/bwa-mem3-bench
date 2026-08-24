@@ -166,6 +166,78 @@ def test_arm_spec_for_loop_does_not_trigger_a_bash_syntax_error() -> None:
     )
 
 
+def test_arena_arms_gives_every_historical_release_a_fast_arm() -> None:
+    """Regression test for the arm list construction: every ARENA_RELEASES
+    entry must get BOTH a default-mode arm and a `<label>-fast` arm on the
+    same binary, built by one loop rather than a separate default-only pass
+    -- so a release that predates `--fast` needs no hand-maintained "which
+    releases support it" list; it just SKIPs its `-fast` arm at runtime (see
+    the module docstring's "Never hard-fail on an old binary").
+    """
+    text = ARENA_SMK.read_text()
+    func_start = text.index("def _arena_arms(")
+    func_end = text.index("\ndef ", func_start + 1)
+    func_body = text[func_start:func_end]
+    assert "for label, _ in ARENA_RELEASES:" in func_body, (
+        "expected a single loop over ARENA_RELEASES building both arms per "
+        "release, not two separate list comprehensions"
+    )
+    assert 'arms.append((label, f"bwa-mem3.{label}", "default"))' in func_body
+    assert 'arms.append((f"{label}-fast", f"bwa-mem3.{label}", "fast"))' in func_body
+
+
+# Both the bwa-mem2.fg-labs branch (pre-existing) and the historical-release
+# `*)` branch (this fix) must read $mode via this exact pattern.
+_EXPECTED_FAST_FLAG_BRANCH_COUNT = 2
+# check_cmd() below is invoked once for mode=default, once for mode=fast.
+_EXPECTED_CHECK_CMD_INVOCATIONS = 2
+
+
+def test_arm_dispatch_fast_flag_covers_the_historical_release_branch() -> None:
+    """Regression test for a real gap: adding a `<label>-fast` arm to
+    `_arena_arms` is not sufficient on its own -- the shell `run_arm`
+    dispatcher's `*)` branch (which handles every historical bwa-mem3 release
+    and bwa-mem2-upstream, since their binary names never match the `bwa`,
+    `minibwa`, or `bwa-mem2.fg-labs` case arms) previously built `cmd` without
+    ever reading `$mode`, so a `-fast` arm's `mode=fast` would silently run in
+    default mode instead of appending `--fast`.
+
+    Verified by actually extracting the `*)` branch's logic and executing it
+    in a real bash subprocess for both `mode=default` and `mode=fast`, mirroring
+    the ARM_SPEC regression test above rather than trusting a text search alone
+    -- a text search cannot tell "reads $mode and uses it" apart from "reads
+    $mode and ignores it".
+    """
+    text = ARENA_SMK.read_text()
+    assert (
+        text.count('[ "$mode" = "fast" ] && fast_flag="--fast"') == _EXPECTED_FAST_FLAG_BRANCH_COUNT
+    ), (
+        "expected the fast_flag pattern in both the bwa-mem2.fg-labs branch "
+        "(pre-existing) and the historical-release `*)` branch (this fix) -- "
+        "one instance means the `*)` branch still ignores $mode"
+    )
+
+    script = r"""
+    check_cmd() {
+        local binary="$1" mode="$2"
+        local fast_flag=""
+        [ "$mode" = "fast" ] && fast_flag="--fast"
+        cmd="$binary mem -t 16 -K 1000000  $fast_flag ref.fa r1.fq r2.fq"
+        echo "$cmd"
+    }
+    check_cmd "bwa-mem3.v090" "default"
+    check_cmd "bwa-mem3.v090" "fast"
+    """
+    result = subprocess.run(  # noqa: S603, S607 -- fixed, test-owned Bash script
+        ["bash", "-c", script], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    lines = result.stdout.strip().splitlines()
+    assert len(lines) == _EXPECTED_CHECK_CMD_INVOCATIONS, f"expected 2 output lines, got {lines!r}"
+    assert "--fast" not in lines[0], f"default mode must not append --fast: {lines[0]!r}"
+    assert "--fast" in lines[1], f"fast mode must append --fast: {lines[1]!r}"
+
+
 def test_arm_spec_literal_substitution_reproduces_the_original_bug() -> None:
     """Companion to the test above: confirms the bug this all guards against
     is real by reproducing it directly -- iterating the SAME arm_spec value
