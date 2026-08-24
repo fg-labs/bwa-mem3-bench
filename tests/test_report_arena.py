@@ -19,7 +19,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from bwa_mem3_bench.report.arena import build_arena_table, render_arena_markdown
+from bwa_mem3_bench.report.arena import (
+    build_arena_table,
+    build_release_speedup_table,
+    render_arena_markdown,
+    render_release_speedup_markdown,
+)
 from bwa_mem3_bench.storage.sqlite import connect, upsert_arena, upsert_run
 
 FG_LABS_SHA = "deadbeef"
@@ -70,6 +75,10 @@ def _seed_db(db_path: Path) -> None:
     _row(conn, label="v040", mode="default", rep=1, wall=80.0)
     _row(conn, label="fg-labs-default", mode="default", rep=1, wall=70.0)
     _row(conn, label="fg-labs-fast", mode="fast", rep=1, wall=65.0)
+    # v040 has a --fast sibling; v021/v022 (predate --fast) and v030 (SKIPPED,
+    # no stock wall at all) deliberately do not -- covers the three release_
+    # speedup cases: both columns populated, --fast blank, both blank.
+    _row(conn, label="v040-fast", mode="fast", rep=1, wall=40.0)
 
 
 def _vs_prior(df: pd.DataFrame, label: str) -> float | None:
@@ -217,3 +226,138 @@ def test_render_arena_markdown_mentions_fg_labs_default_predecessor(tmp_path: Pa
     text = render_arena_markdown(db_path=db_path, fg_labs_sha=FG_LABS_SHA)
     assert "fg-labs-default" in text
     assert f"{80.0 / 70.0:.2f}x" in text
+
+
+def _speedup_row(df: pd.DataFrame, label: str) -> pd.Series:
+    return df[df["label"] == label].iloc[0]
+
+
+def test_release_speedup_reports_stock_and_fast_vs_baseline(tmp_path: Path) -> None:
+    """`bwa` (wall=50.0) is the baseline. Every stock/fast wall in `_seed_db`
+    is chosen so its ratio is distinct and easy to eyeball."""
+    db_path = tmp_path / "benchmark.db"
+    _seed_db(db_path)
+    df = build_release_speedup_table(db_path=db_path, fg_labs_sha=FG_LABS_SHA, arch=ARCH)
+
+    v040 = _speedup_row(df, "v040")
+    assert math.isclose(v040["stock_median_wall_s"], 80.0, rel_tol=TOL)
+    assert math.isclose(v040["stock_speedup"], 50.0 / 80.0, rel_tol=TOL)
+    assert math.isclose(v040["fast_median_wall_s"], 40.0, rel_tol=TOL)
+    assert math.isclose(v040["fast_speedup"], 50.0 / 40.0, rel_tol=TOL)
+
+    candidate = _speedup_row(df, "fg-labs-default")
+    assert math.isclose(candidate["stock_speedup"], 50.0 / 70.0, rel_tol=TOL)
+    # fg-labs-fast, NOT fg-labs-default-fast -- the one label pair arena.smk
+    # does not name `<label>-fast`.
+    assert math.isclose(candidate["fast_median_wall_s"], 65.0, rel_tol=TOL)
+    assert math.isclose(candidate["fast_speedup"], 50.0 / 65.0, rel_tol=TOL)
+
+
+def test_release_speedup_blanks_fast_when_the_release_predates_it(tmp_path: Path) -> None:
+    """v021/v022 have no `-fast` sibling seeded at all (they predate --fast in
+    real release history) -- must read as blank, not zero or an error."""
+    db_path = tmp_path / "benchmark.db"
+    _seed_db(db_path)
+    df = build_release_speedup_table(db_path=db_path, fg_labs_sha=FG_LABS_SHA, arch=ARCH)
+
+    for label in ("v021", "v022"):
+        row = _speedup_row(df, label)
+        assert row["fast_median_wall_s"] is None or math.isnan(row["fast_median_wall_s"])
+        assert row["fast_speedup"] is None or math.isnan(row["fast_speedup"])
+
+
+def test_release_speedup_blanks_both_columns_for_a_skipped_release(tmp_path: Path) -> None:
+    """v030 is SKIPPED (no stock wall at all, per `_seed_db`) -- both stock
+    and fast must read as blank, not crash on a missing baseline lookup."""
+    db_path = tmp_path / "benchmark.db"
+    _seed_db(db_path)
+    df = build_release_speedup_table(db_path=db_path, fg_labs_sha=FG_LABS_SHA, arch=ARCH)
+
+    row = _speedup_row(df, "v030")
+    assert row["stock_median_wall_s"] is None or math.isnan(row["stock_median_wall_s"])
+    assert row["stock_speedup"] is None or math.isnan(row["stock_speedup"])
+    assert row["fast_median_wall_s"] is None or math.isnan(row["fast_median_wall_s"])
+    assert row["fast_speedup"] is None or math.isnan(row["fast_speedup"])
+
+
+def test_release_speedup_excludes_comparators_from_the_release_rows(tmp_path: Path) -> None:
+    """`bwa` is the baseline itself -- it (and minibwa, bwa-mem2-upstream)
+    must not also appear as a "release" row; only bwa-mem3 releases + today's
+    candidate do."""
+    db_path = tmp_path / "benchmark.db"
+    _seed_db(db_path)
+    df = build_release_speedup_table(db_path=db_path, fg_labs_sha=FG_LABS_SHA, arch=ARCH)
+
+    for label in ("bwa", "minibwa", "bwa-mem2-upstream"):
+        assert label not in set(df["label"]), f"{label} is a comparator, not a release row"
+
+
+def test_release_speedup_respects_a_non_default_baseline(tmp_path: Path) -> None:
+    """`baseline_label` selects which arena comparator normalizes the
+    speedup column -- not hardcoded to `bwa`."""
+    db_path = tmp_path / "benchmark.db"
+    _seed_db(db_path)
+    df = build_release_speedup_table(
+        db_path=db_path, fg_labs_sha=FG_LABS_SHA, arch=ARCH, baseline_label="minibwa"
+    )
+
+    v040 = _speedup_row(df, "v040")
+    assert math.isclose(v040["stock_speedup"], 60.0 / 80.0, rel_tol=TOL)
+
+
+def test_release_speedup_empty_for_an_arch_with_no_arena_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "benchmark.db"
+    _seed_db(db_path)
+    df = build_release_speedup_table(db_path=db_path, fg_labs_sha=FG_LABS_SHA, arch="c8g")
+    assert df.empty
+
+
+_EXPECTED_RELEASE_SPEEDUP_COLUMNS = [
+    "label",
+    "stock_median_wall_s",
+    "stock_speedup",
+    "fast_median_wall_s",
+    "fast_speedup",
+]
+
+
+def test_release_speedup_preserves_columns_when_the_arch_has_only_comparators(
+    tmp_path: Path,
+) -> None:
+    """A distinct empty case from the one above: `raw` is NOT empty (the arch
+    has arena rows), but every one of them is a comparator (bwa/minibwa/
+    bwa-mem2-upstream) -- no bwa-mem3 release has run on this arch yet. The
+    `raw.empty` early return doesn't fire, so `_bwa_mem3_release_chain`
+    filters every row out and `rows` ends up `[]`. `pd.DataFrame([])`
+    collapses to zero columns instead of the five documented ones, which
+    would break a caller indexing `df["label"]` even on an empty frame."""
+    db_path = tmp_path / "benchmark.db"
+    conn = connect(db_path)
+    other_sha = "cafef00d"
+    upsert_run(conn, fg_labs_sha=other_sha, status="complete")
+    upsert_arena(
+        conn,
+        fg_labs_sha=other_sha,
+        arch=ARCH,
+        label="bwa",
+        mode="default",
+        rep=1,
+        wall_seconds=50.0,
+        cpu_time=500.0,
+        max_rss_mb=1024.0,
+        process_seconds=45.0,
+    )
+
+    df = build_release_speedup_table(db_path=db_path, fg_labs_sha=other_sha, arch=ARCH)
+
+    assert df.empty
+    assert list(df.columns) == _EXPECTED_RELEASE_SPEEDUP_COLUMNS
+
+
+def test_render_release_speedup_markdown_mentions_every_release(tmp_path: Path) -> None:
+    db_path = tmp_path / "benchmark.db"
+    _seed_db(db_path)
+    text = render_release_speedup_markdown(db_path=db_path, fg_labs_sha=FG_LABS_SHA, arch=ARCH)
+    for label in ("v021", "v022", "v030", "v040", "fg-labs-default"):
+        assert label in text
+    assert f"{50.0 / 40.0:.2f}x" in text

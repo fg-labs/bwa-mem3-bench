@@ -8,7 +8,7 @@ from pathlib import Path
 from bwa_mem3_bench import DB_PATH, LOCAL_MIRROR_ROOT, REPO_ROOT
 from bwa_mem3_bench.registry import DEFAULT_REGISTRY_PATH
 from bwa_mem3_bench.report.accuracy import generate_accuracy
-from bwa_mem3_bench.report.arena import generate_arena
+from bwa_mem3_bench.report.arena import generate_arena, generate_release_speedup
 from bwa_mem3_bench.report.compare import generate_compare
 from bwa_mem3_bench.report.docs import generate_docs, parse_releases
 from bwa_mem3_bench.report.full_report import generate_full_report
@@ -156,6 +156,40 @@ def arena(*, fg_labs_sha: str, out: Path | None = None) -> None:
     :param out: optional path to write the markdown to.
     """
     text = generate_arena(db_path=DB_PATH, fg_labs_sha=fg_labs_sha, out_md=out)
+    if out is None:
+        print(text)
+    else:
+        print(f"wrote {out}")
+
+
+def release_speedup(
+    *,
+    fg_labs_sha: str,
+    arch: str,
+    baseline_label: str = "bwa",
+    out: Path | None = None,
+) -> None:
+    """Emit the release-history speedup table for one arena arch.
+
+    One row per bwa-mem3 release (chronological), with stock and `--fast`
+    columns, each measured against `baseline_label`'s own median wall time on
+    the SAME arena host — see `workflow/rules/arena.smk`. Meant to feed the
+    README's release-history speedup table on every bless. Markdown is
+    written to stdout by default; pass ``--out path/file.md`` to redirect to
+    a file.
+
+    :param fg_labs_sha: fg-labs SHA whose arena rows to report.
+    :param arch: arena arch to report (e.g. ``c7i``, ``c8g``).
+    :param baseline_label: arena arm label to normalize speedups against.
+    :param out: optional path to write the markdown to.
+    """
+    text = generate_release_speedup(
+        db_path=DB_PATH,
+        fg_labs_sha=fg_labs_sha,
+        arch=arch,
+        baseline_label=baseline_label,
+        out_md=out,
+    )
     if out is None:
         print(text)
     else:
