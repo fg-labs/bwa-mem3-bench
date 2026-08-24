@@ -12,18 +12,20 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CDK_DIR = REPO_ROOT / "cdk"
 
-# 7 per-arch queues + 1 coordinator. The per-arch set is the 6 sweep archs
-# (c8g, c7g, c6a, c7i, c7a, m7i) plus c8g64 — the 64-vCPU Graviton4 host the
-# thread-scaling ladder runs on, which is intentionally NOT in `full_archs` —
-# plus the coordinator queue, plus the two on-demand arena queues (c7i-arena,
-# c8g-arena — workflow/rules/arena.smk's ARENA_QUEUES).
-EXPECTED_BATCH_QUEUE_COUNT = 10
+# 8 per-arch queues + 1 coordinator. The per-arch set is the 6 sweep archs
+# (c8g, c7g, c6a, c7i, c7a, m7i) plus c8g64 (the 64-vCPU Graviton4 host the
+# thread-scaling ladder runs on) and c8a (the arena's x86 leg) — both
+# intentionally NOT in `full_archs` — plus the coordinator queue, plus the
+# two on-demand arena queues (c8a-arena, c8g-arena — workflow/rules/
+# arena.smk's ARENA_QUEUES; c8a's regular spot queue above is a separate,
+# unused-for-now queue kept only for config/archs.yaml <-> ARCHS parity).
+EXPECTED_BATCH_QUEUE_COUNT = 11
 
 # A container is one hop further from IMDS than its host, so the default of 1
 # drops the IMDSv2 token PUT; 2 is AWS's documented minimum for containers.
 EXPECTED_IMDS_HOP_LIMIT = 2
 
-# c7i-arena, c8g-arena — workflow/rules/arena.smk's ARENA_QUEUES.
+# c8a-arena, c8g-arena — workflow/rules/arena.smk's ARENA_QUEUES.
 EXPECTED_ARENA_QUEUE_COUNT = 2
 
 # The ONLY GitHub Actions subject allowed to assume the image-build role. Written
@@ -120,7 +122,7 @@ def test_batch_stack_has_a_queue_per_arch(tmp_path: Path) -> None:
 
 
 def test_arena_queues_are_on_demand(tmp_path: Path) -> None:
-    """The two arena queues (c7i-arena, c8g-arena) exist and are ON-DEMAND.
+    """The two arena queues (c8a-arena, c8g-arena) exist and are ON-DEMAND.
 
     A spot reclaim mid-arena-job would corrupt every interleaved arm's timing
     at once (workflow/rules/arena.smk) — the same reasoning that keeps the
@@ -135,11 +137,11 @@ def test_arena_queues_are_on_demand(tmp_path: Path) -> None:
         for r in template["Resources"].values()
         if r["Type"] == "AWS::Batch::JobQueue"
     }
-    assert "bwa-mem3-bench-c7i-arena" in queue_names
+    assert "bwa-mem3-bench-c8a-arena" in queue_names
     assert "bwa-mem3-bench-c8g-arena" in queue_names
 
     # The synthesized resource KEY carries the construct-id chain (e.g.
-    # "ArenaCeC7iArena198E8122" for construct id "ArenaCeC7iArena" + CDK's
+    # "ArenaCeC8aArena198E8122" for construct id "ArenaCeC8aArena" + CDK's
     # address hash) — unlike `ComputeEnvironmentName`, which is left
     # CDK-auto-generated (no `compute_environment_name=` is passed) and so
     # cannot be matched on.
@@ -151,6 +153,30 @@ def test_arena_queues_are_on_demand(tmp_path: Path) -> None:
     assert len(arena_ces) == EXPECTED_ARENA_QUEUE_COUNT, "expected two arena compute environments"
     for ce in arena_ces:
         assert ce["Properties"]["ComputeResources"]["Type"] == "EC2"
+
+    # The checks above only prove an on-demand CE exists SOMEWHERE and that
+    # both queue names exist -- neither proves the two are actually wired
+    # together. A queue's `ComputeEnvironmentOrder` could reference the wrong
+    # (spot) CE and both assertions above would still pass. Resolve each
+    # arena queue's OWN referenced compute environment and check THAT one.
+    arena_queues = {
+        r["Properties"]["JobQueueName"]: r["Properties"]["ComputeEnvironmentOrder"]
+        for r in template["Resources"].values()
+        if r["Type"] == "AWS::Batch::JobQueue"
+        and r["Properties"]["JobQueueName"]
+        in {"bwa-mem3-bench-c8a-arena", "bwa-mem3-bench-c8g-arena"}
+    }
+    assert set(arena_queues) == {"bwa-mem3-bench-c8a-arena", "bwa-mem3-bench-c8g-arena"}
+    for queue_name, order in arena_queues.items():
+        assert len(order) == 1, f"{queue_name}: expected exactly one ComputeEnvironmentOrder entry"
+        ce_ref = order[0]["ComputeEnvironment"]["Fn::GetAtt"][0]
+        ce_resource = template["Resources"][ce_ref]
+        assert ce_resource["Type"] == "AWS::Batch::ComputeEnvironment"
+        assert ce_resource["Properties"]["ComputeResources"]["Type"] == "EC2", (
+            f"{queue_name} is wired to {ce_ref}, which is not an on-demand (EC2) compute "
+            "environment -- a spot reclaim mid-arena-job would corrupt every interleaved "
+            "arm's timing at once"
+        )
 
 
 def test_launch_template_reaches_imds_from_the_container_with_v2_required(tmp_path: Path) -> None:

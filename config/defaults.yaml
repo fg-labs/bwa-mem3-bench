@@ -127,7 +127,10 @@ thread_scaling:
 # hardcoded in arena.smk. Only the measurement scope lives here.
 arena:
   sample: wgs-5M
-  archs: [c7i, c8g]
+  # c8a, not c7i: c7i.4xlarge is 16 vCPU over 8 physical cores (2-way SMT),
+  # while c8a and c8g are both no-SMT (16 vCPU = 16 real cores) -- see
+  # workflow/rules/arena.smk's module docstring.
+  archs: [c8a, c8g]
   reps: 3
   threads: 16
   # Same rationale as thread_scaling.host_probe_seconds -- at ~13-14 arms x

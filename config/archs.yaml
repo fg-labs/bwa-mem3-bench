@@ -52,6 +52,22 @@ archs:
     simd: avx512
     platform: linux/amd64
     baseline_arch: ""
+  # c8a: next-gen AMD after c7a's Genoa (Manufacturer=AMD, 4.5 GHz sustained
+  # per `aws ec2 describe-instance-types`). Registered here (and given a real
+  # spot queue in cdk/stacks/batch_stack.py's ARCHS, `tests/
+  # test_archs_consistency.py` enforces the two stay in lockstep) but
+  # deliberately excluded from `full_archs` -- same pattern as `c8g64` below:
+  # it exists to be `workflow/rules/arena.smk`'s x86 leg, not to join the
+  # regular cross-arch sweep. Picked for the arena over c7i because
+  # c8a.4xlarge has NO SMT (ValidThreadsPerCore=[1], like c8g), so its 16
+  # vCPUs are 16 real cores -- c7i.4xlarge's are 8 physical cores under
+  # 2-way SMT. See arena.smk's module docstring.
+  c8a:
+    instance_type: c8a.4xlarge
+    batch_queue: bwa-mem3-bench-c8a
+    simd: avx512
+    platform: linux/amd64
+    baseline_arch: ""
   # m7i: Sapphire Rapids general-purpose (64 GB, 4 GB/vCPU). Same CPU family /
   # AVX-512BW as c7i (32 GB host is too small for meth FMI). Meth samples run
   # here; non-meth samples also run here so meth-vs-non-meth is apples-to-apples
