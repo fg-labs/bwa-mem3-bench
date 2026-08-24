@@ -7,6 +7,67 @@ the [fg-labs/bwa-mem3](https://github.com/fg-labs/bwa-mem3) repository.
 Runs on AWS spot across WGS, WES, panel, and methylation datasets on hg38,
 on ARM Neon / x86 AVX2 / x86 AVX-512 instances.
 
+## Performance
+
+Wall-clock speedup of every bwa-mem3 release since v0.2.1 against `bwa`,
+`bwa-mem2`, and `minibwa`, as of v0.10.0 (SHA `371a1819`).
+
+> [!WARNING]
+> **`--fast` is not alignment-identical to the default preset.** It prunes
+> the candidate set (`--smem-dedup`, a score-gated chain-extension cap) to
+> get the speedups shown below, which costs some sensitivity and
+> specificity — concentrated at the extremes (repetitive/multi-mapping
+> regions, low-MAPQ reads), not spread uniformly across all reads. Validate
+> `--fast` against your own accuracy tolerance before using it in a
+> production pipeline; don't assume it's a free speedup.
+
+**Graviton4 (c8g, arm64/NEON)**
+
+| release | wall_s | vs bwa | vs bwa-mem2 | vs minibwa |
+|---|---:|---:|---:|---:|
+| bwa | 249.18 | 1.00x | — | 0.24x |
+| bwa-mem2 | — | — | — | — |
+| minibwa | 60.82 | 4.10x | — | 1.00x |
+| v0.2.1 | 146.60 | 1.70x | — | 0.41x |
+| v0.2.2 | 163.82 | 1.52x | — | 0.37x |
+| v0.3.0 | 148.13 | 1.68x | — | 0.41x |
+| v0.4.0 | 131.26 | 1.90x | — | 0.46x |
+| v0.5.0 | 122.20 / 51.60 | 2.04x / 4.83x | — | 0.50x / 1.18x |
+| v0.6.0 | 110.38 / 48.26 | 2.26x / 5.16x | — | 0.55x / 1.26x |
+| v0.7.0 | 101.50 / 46.75 | 2.46x / 5.33x | — | 0.60x / 1.30x |
+| v0.8.0 | 87.63 / 37.37 | 2.84x / 6.67x | — | 0.69x / 1.63x |
+| v0.9.0 | 76.87 / 41.87 | 3.24x / 5.95x | — | 0.79x / 1.45x |
+| **v0.10.0** | **71.41 / 31.34** | **3.49x / 7.95x** | — | **0.85x / 1.94x** |
+
+**Sapphire Rapids (c7i, x86/AVX-512)**
+
+| release | wall_s | vs bwa | vs bwa-mem2 | vs minibwa |
+|---|---:|---:|---:|---:|
+| bwa | 363.42 | 1.00x | 0.52x | 0.23x |
+| bwa-mem2 | 188.69 | 1.93x | 1.00x | 0.45x |
+| minibwa | 84.85 | 4.28x | 2.22x | 1.00x |
+| v0.2.1 | 178.81 | 2.03x | 1.06x | 0.47x |
+| v0.2.2 | 174.46 | 2.08x | 1.08x | 0.49x |
+| v0.3.0 | 165.29 | 2.20x | 1.14x | 0.51x |
+| v0.4.0 | 147.90 | 2.46x | 1.28x | 0.57x |
+| v0.5.0 | 140.61 / 66.22 | 2.58x / 5.49x | 1.34x / 2.85x | 0.60x / 1.28x |
+| v0.6.0 | 130.00 / 67.18 | 2.80x / 5.41x | 1.45x / 2.81x | 0.65x / 1.26x |
+| v0.7.0 | 118.25 / 59.46 | 3.07x / 6.11x | 1.60x / 3.17x | 0.72x / 1.43x |
+| v0.8.0 | 106.16 / 43.90 | 3.42x / 8.28x | 1.78x / 4.30x | 0.80x / 1.93x |
+| v0.9.0 | 100.09 / 43.82 | 3.63x / 8.29x | 1.89x / 4.31x | 0.85x / 1.94x |
+| **v0.10.0** | **99.53 / 46.77** | **3.65x / 7.77x** | **1.90x / 4.03x** | **0.85x / 1.81x** |
+
+> Version pins: `bwa` 0.7.19 · `bwa-mem2` v2.2.1 · `minibwa` commit
+> `b2dcea9b` (private upstream repo, not linkable here). Dataset: the
+> `wgs-5M` sample (paired-end WGS, ~5M read pairs, hg38). Every arm for a
+> given arch ran INTERLEAVED on ONE fixed on-demand host (the "arena", see
+> `workflow/rules/arena.smk`) — 3 reps each, median wall-clock shown — so
+> these are same-host comparisons, not medians pooled across separate spot
+> runs. Cells with two values are `stock / --fast`; `—` means the release
+> predates the comparator (no ARM `bwa-mem2` build) or predates `--fast`.
+
+Regenerate after a bless with `bench release-speedup --fg-labs-sha <sha> --arch <arch>`.
+
 ## Quick start
 
 ```bash
