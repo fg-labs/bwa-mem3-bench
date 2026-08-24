@@ -452,3 +452,96 @@ allowances:
     # vs-golden run pinned to the tag resolves to this golden with no BAM re-copy.
     aliases:
       - 375dfa9a7b948da890bf7d8b255ac44d98dd0d17   # v0.9.0 release tag (squash-merge of #361, tree-identical to 4d341b7)
+
+  - to_sha: 371a1819802c2962b768c3b165f0d1319a6a75b3
+    pr: fg-labs/bwa-mem3#373
+    date: 2026-08-24
+    summary: >-
+      v0.10.0: NO alignment change vs the v0.9.0 golden (4d341b7). Gate #2 is
+      100.0000% on all 190 golden-backed cells. This is a performance release:
+      ten kernel/scheduling changes (banded-SW extension-column fast path #408,
+      NEON sse2neon-overhead removal #378/#381, AVX2 rescue-kernel tightening
+      #401, SMEM lockstep auto-tune #393, dedup permutation sort #399, mate-rescue
+      kernel fusion #406/#407, classA local-opts #387) plus two new options
+      (--huge-pages #405, --hic alias #372) and two memory-safety hardenings
+      (paired-end reader OOB write #395, kvec realloc-failure abort #398) — none
+      of which touch the alignment record stream by construction or by full-run
+      SAM checksum. The one alignment-affecting change, #374 (--compat=bwa-mem's
+      all-chains-dropped path now matches bwa instead of silently reproducing
+      bwa-mem2), is scoped to a --compat target this repo's regular sweep does
+      not exercise on default-mode golden-backed samples, so it does not touch
+      this comparison; #376 (chain-weight clamp) needs a ~134 Mbp read to differ
+      and is unreachable on every benchmarked sample.
+
+      Gate #1 passes on all 344 scored (sample, arch) vs-baseline cells, same
+      budget profile as v0.9.0 (meth is the only budgeted-drift family, unchanged
+      from the v0.9.0 entry). Gate #3 (thread scaling) passes at every rung, no
+      efficiency drop vs the v0.9.0 ladder.
+
+      ARENA (new to the bless workflow this release, workflow/rules/arena.smk):
+      every prior blessed release, replayed on ONE fixed on-demand host per arch
+      so a release-over-release wall-time claim is measured under identical
+      conditions rather than by comparing two separate spot runs' medians
+      weeks apart. fgumi compare bams between this release's default-mode BAM
+      and the v0.9.0 arm is IDENTICAL on both arena archs — 10,030,558 records,
+      0 content diffs, on c7i and c8g alike. Every one of the ten prior releases
+      (v0.2.1 through v0.9.0), plus lh3/bwa, upstream bwa-mem2, and lh3/minibwa,
+      ran with zero SKIPPED arms across both archs — the arena's own
+      "never hard-fail on an old binary" fallback was never needed in its first
+      real run against the full historical binary set.
+
+      PERFORMANCE. The regular sweep's regression gate flagged 8 cells over the
+      5% threshold — sbx-1M-compat/c6a (+5.7%), smoke-1M/c7i (+35.2%),
+      wes-5M/c7i (+41.2%), wgs-5M-alt/c7i (+21.8%, n=1), wgs-5M-alt-compat/c7i
+      (+6.7%, n=1), wgs-5M-alt-compat-bwa-mem/c7i (+5.2%, n=1), smoke-meth/m7i
+      (+6.1%), wgs-5M-alt/m7i (+11.4%, n=1). All eight are refuted, not accepted
+      as regressions:
+
+      (1) 7 of 8 are on c7i/m7i, the two documented noisy AWS Batch spot pools
+      (10-15% CV vs 1-2% on the other four archs; see CLAUDE.md), and 3 of the 8
+      are unreplicated single-rep comparisons. The arena's own interleaved,
+      same-host c7i measurement (immune to this cross-run substrate confound)
+      shows wall-clock is noise-level between v0.9.0 and v0.10.0 on that
+      specific arch/sample (ranges overlap) but the aligner's own internal
+      PROCESS() timer — insulated from OS-level scheduling jitter — resolves a
+      small, real, non-overlapping improvement (90.40-90.89 vs 91.25-91.69 s).
+
+      (2) The arena's own wgs-5M numbers (byte-identical output, above) resolve
+      cleanly on c8g: 71.73 vs 77.20 s, non-overlapping across 3 reps, v0.10.0
+      1.08x faster.
+
+      (3) Independent, fully off-AWS verification on an Apple M3 Ultra (arm64/
+      NEON, bare metal, binaries built from source at the exact pinned SHAs):
+      wgs-5M default mode 47.62 vs 52.16 s (1.10x faster, non-overlapping);
+      --fast mode also improves, v0.9.0 and v0.10.0 producing bit-identical
+      record counts (10,017,290) on every historical release from v0.8.0
+      onward. sbx-1M-compat (single-end, --compat=bwa-mem2) on the same
+      hardware: 16.02 vs 17.56 s, non-overlapping, v0.10.0 1.09x FASTER —
+      directly contradicting the AWS c6a flag's direction, though on a
+      different ISA (NEON vs c6a's AVX2) so only corroborating, not conclusive.
+
+      (4) The c6a flag specifically — the one cell with no "known-noisy-arch"
+      explanation — was then reproduced on a bare-metal c6a.4xlarge (same
+      instance family, same production build recipe: clang 19.1.7,
+      BASELINE_ARCH=avx2, verified `SIMD runtime: avx2`). Result: v0.9.0 20.450
+      vs v0.10.0 20.612 s median, OVERLAPPING ranges across 3 reps — noise, not
+      a regression; delta is 0.79%, nowhere near the reported 5.7%. This is a
+      same-architecture, same-build-recipe refutation, not a cross-ISA
+      corroboration like (3).
+
+      Holodeck truth-based accuracy (sim-wgs-place, fg-labs tool) is BIT-
+      IDENTICAL to v0.9.0 and every prior release back through v0.4.0 (95.17%
+      placement correct, 94.62% MD-concordant, 99.02% NM-concordant, 5 reps
+      each) — placement correctness has not moved since v0.4.0; only wall-clock
+      has. Intentional (release continuity, no output change), accepted.
+    expected_drift_pct: 0.0
+    # Golden lives under 371a1819 — the release-please #373 head benched at
+    # reps=5 (target bless_release) across all six archs, plus the arena
+    # (c7i/c8g) and thread-scaling ladder. #373 squash-merged to the shipped
+    # v0.10.0 tag (bb0e7cf7) on 2026-08-24; its diff vs 371a1819 touches only
+    # .release-please-manifest.json, CHANGELOG.md and version.txt — no src/,
+    # ext/ or Makefile — so the shipped tag is the same binary as 371a1819 and
+    # this golden is the correct v0.10.0 reference. Aliased so a vs-golden run
+    # pinned to the tag resolves here, same pattern as v0.5.0 through v0.9.0.
+    aliases:
+      - bb0e7cf7021c838dcfe8fb262f06dea47300867f   # v0.10.0 release tag (squash-merge of #373, metadata-only diff from 371a1819)
