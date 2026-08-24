@@ -405,6 +405,13 @@ rule align_arena:
                        | grep -oE '[0-9.]+$' | head -1 || true)
                 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
                     "$label" "$mode" "$rep" "$WALL" "$CPU" "$RSS" "${{PROC:-NA}}" >> {output.tsv}
+                # Tee the same row to stderr (-> CloudWatch) so a result is
+                # visible the moment an arm finishes, not just when the whole
+                # job completes and arena.tsv finally reaches S3 -- Snakemake's
+                # storage plugin uploads declared outputs on rule completion,
+                # not incrementally, so without this line there is no way to
+                # see a single number until the entire multi-hour job is done.
+                echo "RESULT: label=$label mode=$mode rep=$rep wall_s=$WALL cpu_s=$CPU max_rss_mb=$RSS process_s=${{PROC:-NA}}" >&2
                 # Keep the LAST measured rep's BAM for the two arms the
                 # correctness check compares -- default mode only (--fast
                 # prunes the candidate set on purpose, so its BAM is not a

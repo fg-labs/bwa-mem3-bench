@@ -260,3 +260,36 @@ def test_arm_spec_literal_substitution_reproduces_the_original_bug() -> None:
         f"'unexpected token' syntax error (confirming this is really the "
         f"same bug); got: {result.stderr!r}"
     )
+
+
+def test_a_successful_measured_arm_tees_its_result_to_stderr() -> None:
+    """Every SUCCESSFUL measured-cycle arm must echo its own result line to
+    stderr (-> CloudWatch), not just write it to the local arena.tsv.
+
+    Before this, the loop was silent on success -- only a FAILED arm produced
+    any live output (the `WARNING: ... FAILED` line) -- because Snakemake's S3
+    storage plugin uploads a rule's declared outputs on rule COMPLETION, not
+    incrementally, so arena.tsv is invisible until the entire multi-hour job
+    finishes. There was no way to see a single number mid-run.
+    """
+    text = ARENA_SMK.read_text()
+    measured_start = text.index("Interleaved measured cycles")
+    printf_idx = text.index("printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n'", measured_start)
+    keep_comment_idx = text.index("# Keep the LAST measured rep's BAM", printf_idx)
+    between = text[printf_idx:keep_comment_idx]
+    assert 'echo "RESULT:' in between and ">&2" in between, (
+        'expected a `echo "RESULT: ..." >&2` line between the printf that '
+        "writes arena.tsv and the keep-BAM step, so a successful arm's result "
+        "is visible in CloudWatch the moment it finishes, not just at job end"
+    )
+    expected_fields = (
+        "label=$label",
+        "mode=$mode",
+        "rep=$rep",
+        "wall_s=$WALL",
+        "cpu_s=$CPU",
+        "max_rss_mb=$RSS",
+        "process_s=${{PROC:-NA}}",
+    )
+    for field in expected_fields:
+        assert field in between, f"RESULT line must report {field}"
