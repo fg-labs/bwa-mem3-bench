@@ -203,16 +203,13 @@ from collections import namedtuple
 # exactly why the list is inlined there rather than in a separate file this
 # module could import -- see that Dockerfile's comment for the full rationale.
 ARENA_RELEASES = [
-    ("v021", "89bd589db9fcb56279912fa6b23e0831f4916a62"),
-    ("v022", "bffae5a09267877fe514c458d4956b717bcefb8f"),
-    ("v030", "a02fcb446574d5b5d03abdbf73c9b129deead2d4"),
-    ("v040", "2681143bb7ab665488cdcd5d46380cc928f5bd05"),
-    ("v050", "9dd30dd0e5e477ddfd33bec752179978ac9f5a1d"),
+    # SCRATCH VALIDATION -- do not merge. Trimmed from the full 10-release
+    # list to the two previously-worst-hit-by-within-label-decay releases
+    # (see bwa-mem3-bench#92) for a fast, cheap confirmation run before
+    # committing to the full ~2hr job. Full list restored before any real
+    # bless/README-update run.
     ("v060", "48cf0a46824e26df2986efe940121d34b2cc7109"),
-    ("v070", "04777b3c3f3c2f18d5838b6f4116015c7f5f2ad9"),
-    ("394f8f8", "394f8f8110f7d15be7ef2ca38c335590aa1e0284"),
     ("v080", "4acb09562b5109e2f26d85b0158fde35d03a4fb8"),
-    ("v090", "4d341b7ba81246509a87680fa569ac3210af540e"),
 ]
 
 # The release immediately preceding today's candidate -- the one arm the
