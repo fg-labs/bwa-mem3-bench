@@ -120,11 +120,36 @@ the job's total drift the fragile metric can accumulate; per-submission
 shuffling stops whichever label is newest from always landing in the same
 (possibly worst) position.
 
-One additional UNMEASURED warmup cycle runs first (every arm once, in the
-same front-loaded/shuffled order, discarded) -- mirrors the project's own
-bare-metal reproduction protocol (CLAUDE.md's "reproduce with interleaved
-runs and discarded warmups"), which caught page-cache and allocator warm-up
-trends masquerading as a binary difference.
+Warmup: per-label, not per-job. One additional UNMEASURED warmup runs
+immediately before EACH label's own measured reps (not once for the whole
+arm list up front) -- mirrors the project's own bare-metal reproduction
+protocol (CLAUDE.md's "reproduce with interleaved runs and discarded
+warmups"), which caught page-cache and allocator warm-up trends
+masquerading as a binary difference.
+
+This replaced an earlier design where ALL arms warmed once, in the
+front-loaded/shuffled order, before ANY measured rep began -- so a label's
+own warmup could be separated from its own measured cycle by every OTHER
+arm's warmup and measured runs happening in between, providing essentially
+no protection against cross-arm page-cache eviction. A real c8a/c8g arena
+run (golden SHA 371a1819, confirmed via the per-label `meminfo.jsonl`
+snapshot -- see Instrumentation below) caught this concretely: `process_s`
+fell nearly monotonically release-over-release on both archs, while `wall_s`
+did not -- e.g. c8a v0.6.0's wall_s (84.58s) was HIGHER than both v0.5.0's
+(66.78s) and v0.7.0's (62.39s) despite `process_s` falling smoothly across
+all three. Within one affected label's own 3 reps, `wall_s` showed a clear
+DECAY (rep1 much higher than rep2, higher than rep3) while `process_s`
+stayed flat -- consistent with rep1 re-faulting-in page-cache-evicted
+reference-index pages that a DIFFERENT tool's index format (or bwa-mem2's
+own doubled index) evicted while running as the immediately preceding arm in
+the shuffled default-mode block. Folding warmup into each label's own loop
+iteration closes that gap: the working set a label's reps need is now warmed
+at most one label-switch away from when it is actually measured, not up to
+~25 arms away. The SMEM-lockstep pin (below) is deliberately NOT derived
+from any label's own warmup any more, for the same reason: front-loading
+means `fg-labs-fast` can now run its own warmup+reps before
+`fg-labs-default`'s turn ever comes up, so the pin is set from a dedicated
+probe invocation instead.
 
 Instrumentation: confirm the mechanism, don't just work around it. Two
 diagnostic-only additions exist to test the host-drift hypothesis above
@@ -471,51 +496,57 @@ rule align_arena:
         # source text does.
         ARM_SPEC="{params.arm_spec}"
 
-        # One UNMEASURED warmup cycle -- every arm once, discarded -- before
-        # the interleaved measured cycles. See the module docstring.
-        echo "=== warmup cycle ===" >&2
-        for entry in $ARM_SPEC; do
-            IFS='|' read -r label binary mode <<< "$entry"
-            set +e
-            run_arm "$label" "$binary" "$mode" 0 "$OUTDIR/runs/${{label}}.${{mode}}.warmup"
-            status=$?
-            set -e
-            [ $status -ne 0 ] && echo "warmup: $label/$mode failed (exit=$status), ignoring" >&2
-            rm -f "$OUTDIR/runs/${{label}}.${{mode}}.warmup.bam.raw"
-        done
-
         # Pin today's candidate's phase-2 SMEM lockstep width (fg-labs/bwa-mem3
-        # #393) from the warmup cycle's own natural probe, instead of re-probing
-        # on every measured invocation. The probe runs once per process during
-        # index setup, before the binary's own PROCESS() timer starts, so it is
-        # invisible to process_s -- but NOT to wall_s, and it costs a much bigger
-        # fraction of a short --fast run's wall time than a long stock run's,
-        # which otherwise makes v0.10.0+'s --fast arm look artificially worse
-        # against an older release with no such probe. Every release before
-        # #393 predates the feature entirely and simply never reads this env
-        # var, so exporting it for the whole rest of the script is a no-op for
-        # every other arm -- safe to set unconditionally, not just around the
-        # fg-labs invocations.
+        # #393) from a DEDICATED probe invocation run once here, instead of
+        # re-probing on every measured invocation. The probe runs once per
+        # process during index setup, before the binary's own PROCESS() timer
+        # starts, so it is invisible to process_s -- but NOT to wall_s, and it
+        # costs a much bigger fraction of a short --fast run's wall time than a
+        # long stock run's, which otherwise makes v0.10.0+'s --fast arm look
+        # artificially worse against an older release with no such probe.
+        # Every release before #393 predates the feature entirely and simply
+        # never reads this env var, so exporting it for the whole rest of the
+        # script is a no-op for every other arm -- safe to set unconditionally,
+        # not just around the fg-labs invocations.
         #
-        # Clear any INHERITED BWA3_SMEM_LOCKSTEP_N before parsing the warmup
+        # This is deliberately a STANDALONE probe, not derived from
+        # `fg-labs-default`'s own per-label warmup below: front-loading puts
+        # `fg-labs-fast` ahead of `fg-labs-default` in $ARM_SPEC, so
+        # `fg-labs-fast`'s own warmup+reps can run to completion before
+        # `fg-labs-default`'s turn ever comes up. Deriving the pin from
+        # whichever label's warmup happens to run first would silently miss
+        # `fg-labs-fast`'s own measured rows, reintroducing the exact
+        # probe-cost inflation this pin exists to avoid. One dedicated
+        # full-alignment probe here (~similar cost to one measured rep) is
+        # simpler than special-casing the loop order below to guarantee
+        # `fg-labs-default` always warms first.
+        #
+        # Clear any INHERITED BWA3_SMEM_LOCKSTEP_N before parsing the probe
         # log. Without this, a value already present in the job's environment
         # (e.g. a worker host that leaked one from a prior invocation) would
         # silently survive into the measured cycles below whenever THIS run's
-        # warmup log is missing or lacks a probe line -- masquerading as a
-        # pin from a probe that never actually ran this time.
+        # probe log is missing or lacks a probe line -- masquerading as a pin
+        # from a probe that never actually ran this time.
         unset BWA3_SMEM_LOCKSTEP_N
-        FG_LABS_WARMUP_LOG="$OUTDIR/runs/fg-labs-default.default.warmup.stderr.log"
-        if [ -f "$FG_LABS_WARMUP_LOG" ]; then
-            FG_LABS_LOCKSTEP_N=$(grep -oE 'phase-2 SMEM lockstep width: [0-9]+' "$FG_LABS_WARMUP_LOG" \
+        PIN_PROBE_OUT="$OUTDIR/runs/fg-labs-default.default.pinprobe"
+        set +e
+        run_arm "fg-labs-default" "bwa-mem2.fg-labs" "default" 0 "$PIN_PROBE_OUT"
+        status=$?
+        set -e
+        [ $status -ne 0 ] && echo "pin probe: fg-labs-default failed (exit=$status), --fast rows will pay the per-invocation probe cost" >&2
+        rm -f "${{PIN_PROBE_OUT}}.bam.raw"
+        PIN_PROBE_LOG="${{PIN_PROBE_OUT}}.stderr.log"
+        if [ -f "$PIN_PROBE_LOG" ]; then
+            FG_LABS_LOCKSTEP_N=$(grep -oE 'phase-2 SMEM lockstep width: [0-9]+' "$PIN_PROBE_LOG" \
                 | grep -oE '[0-9]+$' | tail -1 || true)
             if [ -n "$FG_LABS_LOCKSTEP_N" ]; then
                 export BWA3_SMEM_LOCKSTEP_N="$FG_LABS_LOCKSTEP_N"
-                echo "pinned BWA3_SMEM_LOCKSTEP_N=$FG_LABS_LOCKSTEP_N from the warmup probe" >&2
+                echo "pinned BWA3_SMEM_LOCKSTEP_N=$FG_LABS_LOCKSTEP_N from the pin probe" >&2
             else
-                echo "WARNING: could not find a phase-2 SMEM lockstep width line in $FG_LABS_WARMUP_LOG -- today's candidate's measured --fast rows will pay the per-invocation probe cost" >&2
+                echo "WARNING: could not find a phase-2 SMEM lockstep width line in $PIN_PROBE_LOG -- today's candidate's measured --fast rows will pay the per-invocation probe cost" >&2
             fi
         else
-            echo "WARNING: $FG_LABS_WARMUP_LOG missing -- fg-labs-default's warmup likely failed; today's candidate's measured --fast rows will pay the per-invocation probe cost" >&2
+            echo "WARNING: $PIN_PROBE_LOG missing -- pin probe likely failed; today's candidate's measured --fast rows will pay the per-invocation probe cost" >&2
         fi
 
         # Interleaved measured cycles: LABEL-MAJOR (every rep of one label
@@ -543,6 +574,21 @@ rule align_arena:
         # the newest candidate.
         for entry in $ARM_SPEC; do
             IFS='|' read -r label binary mode <<< "$entry"
+
+            # This label's own UNMEASURED warmup, run immediately before its
+            # own measured reps -- see the module docstring's "Warmup:
+            # per-label, not per-job" rationale. Replaces the old
+            # warmup-every-arm-then-measure-every-arm design, whose warmup
+            # pass could be separated from a label's own measured cycle by
+            # every other arm's warmup AND measured runs happening in
+            # between.
+            set +e
+            run_arm "$label" "$binary" "$mode" 0 "$OUTDIR/runs/${{label}}.${{mode}}.warmup"
+            status=$?
+            set -e
+            [ $status -ne 0 ] && echo "warmup: $label/$mode failed (exit=$status), ignoring" >&2
+            rm -f "$OUTDIR/runs/${{label}}.${{mode}}.warmup.bam.raw"
+
             for rep in $(seq 1 {params.reps}); do
                 OUT="$OUTDIR/runs/${{label}}.${{mode}}.rep${{rep}}"
                 set +e
