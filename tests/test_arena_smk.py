@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -100,9 +101,11 @@ _SAMPLE_ARM_SPEC = (
     "fg-labs-fast|bwa-mem2.fg-labs|fast"
 )
 _SAMPLE_ARM_SPEC_COUNT = 7
-# Every arm-spec-iterating `for` loop the align_arena rule declares (the
-# warmup cycle and the measured cycle) -- both must use the safe form.
-_EXPECTED_ARM_SPEC_LOOP_COUNT = 2
+# The align_arena rule declares exactly one arm-spec-iterating `for` loop --
+# warmup is now folded into each label's own iteration of the measured loop
+# (see the module docstring's "Warmup: per-label, not per-job") rather than
+# running as a separate pass with its own loop. It must use the safe form.
+_EXPECTED_ARM_SPEC_LOOP_COUNT = 1
 
 
 def test_arm_spec_for_loop_does_not_trigger_a_bash_syntax_error() -> None:
@@ -114,7 +117,7 @@ def test_arm_spec_for_loop_does_not_trigger_a_bash_syntax_error() -> None:
     expansion). `|` is a shell metacharacter anywhere it appears in literal
     source text, regardless of context, so the rendered line was a bash
     SYNTAX ERROR: `for entry in bwa|bwa|default ...; do` aborted the entire
-    rule immediately, on the first arm of the warmup cycle -- not a graceful
+    rule immediately, on the first arm of the loop -- not a graceful
     per-arm SKIPPED row, which is what the rule's own "Never hard-fail on an
     old binary" design assumes every failure looks like. Confirmed live on
     both the c7i and c8g on-demand jobs for the same submission.
@@ -141,11 +144,11 @@ def test_arm_spec_for_loop_does_not_trigger_a_bash_syntax_error() -> None:
     )
     assert 'ARM_SPEC="{params.arm_spec}"' in text, (
         'expected an `ARM_SPEC="{params.arm_spec}"` assignment feeding '
-        "both `for entry in $ARM_SPEC` loops"
+        "the `for entry in $ARM_SPEC` loop"
     )
     assert text.count("for entry in $ARM_SPEC") == _EXPECTED_ARM_SPEC_LOOP_COUNT, (
-        "both the warmup cycle and the measured cycle must iterate the "
-        "safe $ARM_SPEC variable, not {params.arm_spec} directly"
+        "the measured/warmup loop must iterate the safe $ARM_SPEC variable, "
+        "not {params.arm_spec} directly"
     )
 
     script = f"""
@@ -357,10 +360,13 @@ def _lockstep_pin_snippet() -> str:
     `align_arena`, unescaping Snakemake's `.format()` `{{`/`}}` literal-brace
     escapes so it can run standalone as valid bash.
 
-    The extraction starts at the production `unset` (not at
-    `FG_LABS_WARMUP_LOG=...`) deliberately: that `unset` is the fix for
-    inherited-environment leakage, and the test harness below must exercise
-    it as written in `align_arena`, not re-implement its own copy."""
+    The extraction starts at the production `unset` deliberately: that
+    `unset` is the fix for inherited-environment leakage, and the test
+    harness below must exercise it as written in `align_arena`, not
+    re-implement its own copy. The block now calls `run_arm` itself (a
+    DEDICATED probe invocation, not a parse of some other loop's warmup log
+    -- see the module docstring's "Warmup: per-label, not per-job"), so
+    callers must supply a stub `run_arm` (see `_stub_run_arm_snippet`)."""
     text = ARENA_SMK.read_text()
     start = text.index("unset BWA3_SMEM_LOCKSTEP_N")
     end = text.index("# Interleaved measured cycles", start)
@@ -370,18 +376,47 @@ def _lockstep_pin_snippet() -> str:
     return text[start:end].replace("{{", "{").replace("}}", "}")
 
 
-def _run_lockstep_pin_snippet(outdir: Path) -> subprocess.CompletedProcess[str]:
-    """Runs `_lockstep_pin_snippet()`'s extracted pin block (which itself
-    unsets any inherited `BWA3_SMEM_LOCKSTEP_N` before parsing the warmup
-    log -- see `_lockstep_pin_snippet`) in a real bash subprocess against
-    `outdir`, echoing the resulting `BWA3_SMEM_LOCKSTEP_N` (or `UNSET`) to
-    stdout so callers can assert on both the pinned value and the block's
-    stderr diagnostics. Deliberately does NOT unset the variable itself
-    beforehand -- that would test the harness's own cleanup instead of
+def _stub_run_arm_snippet() -> str:
+    """A fake `run_arm` matching the real function's I/O contract (writes
+    `${out}.stderr.log`, returns 0/1) but with content and exit code
+    controlled by the `STUB_LOG_CONTENT` / `STUB_EXIT_CODE` / `STUB_WRITE_LOG`
+    env vars the test sets -- lets the pin-probe tests below exercise the
+    REAL pin-probe snippet (which now calls `run_arm` itself to produce its
+    own probe invocation, rather than only parsing a file some other loop
+    already wrote) without a real `bwa-mem2.fg-labs` binary or `tricorder`."""
+    return """
+    run_arm() {
+        local out="$5"
+        mkdir -p "$(dirname "$out")"
+        if [ "${STUB_WRITE_LOG:-1}" = "1" ]; then
+            printf '%s' "${STUB_LOG_CONTENT:-}" > "${out}.stderr.log"
+        fi
+        return "${STUB_EXIT_CODE:-0}"
+    }
+    """
+
+
+def _run_lockstep_pin_snippet(
+    outdir: Path,
+    *,
+    log_content: str = "",
+    exit_code: int = 0,
+    write_log: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    """Runs `_lockstep_pin_snippet()`'s extracted pin block, backed by
+    `_stub_run_arm_snippet()`'s fake `run_arm`, in a real bash subprocess
+    against `outdir`, echoing the resulting `BWA3_SMEM_LOCKSTEP_N` (or
+    `UNSET`) to stdout so callers can assert on both the pinned value and the
+    block's stderr diagnostics. Deliberately does NOT unset the variable
+    itself beforehand -- that would test the harness's own cleanup instead of
     `align_arena`'s production behavior."""
     script = f"""
     set -euo pipefail
     OUTDIR="{outdir}"
+    STUB_LOG_CONTENT={shlex.quote(log_content)}
+    STUB_EXIT_CODE={exit_code}
+    STUB_WRITE_LOG={"1" if write_log else "0"}
+    {_stub_run_arm_snippet()}
     {_lockstep_pin_snippet()}
     echo "RESULT_PIN=${{BWA3_SMEM_LOCKSTEP_N:-UNSET}}"
     """
@@ -390,16 +425,15 @@ def _run_lockstep_pin_snippet(outdir: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_smem_lockstep_width_is_pinned_from_the_warmup_probe(tmp_path: Path) -> None:
-    """A warmup stderr log carrying the "phase-2 SMEM lockstep width: N" line
-    must pin `BWA3_SMEM_LOCKSTEP_N=N` and log a matching confirmation to
-    stderr, so the measured cycles reuse the warmup's own natural probe."""
-    runs_dir = tmp_path / "runs"
-    runs_dir.mkdir()
-    (runs_dir / "fg-labs-default.default.warmup.stderr.log").write_text(
-        "* Ref file: /ref/hs38\n[M::main_mem] phase-2 SMEM lockstep width: 24\n"
+def test_smem_lockstep_width_is_pinned_from_the_dedicated_pin_probe(tmp_path: Path) -> None:
+    """A probe invocation whose stderr carries the "phase-2 SMEM lockstep
+    width: N" line must pin `BWA3_SMEM_LOCKSTEP_N=N` and log a matching
+    confirmation to stderr, so the measured cycles reuse this dedicated
+    probe's own reading."""
+    result = _run_lockstep_pin_snippet(
+        tmp_path,
+        log_content="* Ref file: /ref/hs38\n[M::main_mem] phase-2 SMEM lockstep width: 24\n",
     )
-    result = _run_lockstep_pin_snippet(tmp_path)
     assert result.returncode == 0, result.stderr
     assert "RESULT_PIN=24" in result.stdout
     assert "pinned BWA3_SMEM_LOCKSTEP_N=24" in result.stderr
@@ -411,26 +445,23 @@ def test_smem_lockstep_pin_warns_but_does_not_crash_when_the_probe_line_is_missi
     """A build that predates fg-labs/bwa-mem3#393 (or any unexpected stderr
     shape) must not fail the whole job under `set -euo pipefail` -- it should
     warn and leave the probe unpinned for the measured cycles."""
-    runs_dir = tmp_path / "runs"
-    runs_dir.mkdir()
-    (runs_dir / "fg-labs-default.default.warmup.stderr.log").write_text("* Ref file: /ref/hs38\n")
-    result = _run_lockstep_pin_snippet(tmp_path)
+    result = _run_lockstep_pin_snippet(tmp_path, log_content="* Ref file: /ref/hs38\n")
     assert result.returncode == 0, result.stderr
     assert "RESULT_PIN=UNSET" in result.stdout
     assert "could not find a phase-2 SMEM lockstep width line" in result.stderr
 
 
-def test_smem_lockstep_pin_warns_but_does_not_crash_when_the_warmup_log_is_missing(
+def test_smem_lockstep_pin_warns_but_does_not_crash_when_the_probe_log_is_missing(
     tmp_path: Path,
 ) -> None:
-    """The fg-labs-default warmup arm itself could FAIL (see the "Never
-    hard-fail on an old binary" design) and never write its stderr.log at
-    all -- the pin step must degrade gracefully, not crash the job."""
-    (tmp_path / "runs").mkdir()
-    result = _run_lockstep_pin_snippet(tmp_path)
+    """The dedicated probe invocation itself could FAIL before ever writing
+    its stderr.log (see the "Never hard-fail on an old binary" design) -- the
+    pin step must degrade gracefully, not crash the job."""
+    result = _run_lockstep_pin_snippet(tmp_path, exit_code=1, write_log=False)
     assert result.returncode == 0, result.stderr
     assert "RESULT_PIN=UNSET" in result.stdout
-    assert "fg-labs-default's warmup likely failed" in result.stderr
+    assert "pin probe: fg-labs-default failed" in result.stderr
+    assert "pin probe likely failed" in result.stderr
 
 
 def test_smem_lockstep_pin_snippet_ignores_an_inherited_env_var(
@@ -445,8 +476,7 @@ def test_smem_lockstep_pin_snippet_ignores_an_inherited_env_var(
     what guarantees that; without it the snippet would misreport an unpinned
     run as pinned."""
     monkeypatch.setenv("BWA3_SMEM_LOCKSTEP_N", "999")
-    (tmp_path / "runs").mkdir()
-    result = _run_lockstep_pin_snippet(tmp_path)
+    result = _run_lockstep_pin_snippet(tmp_path, log_content="* Ref file: /ref/hs38\n")
     assert result.returncode == 0, result.stderr
     assert "RESULT_PIN=UNSET" in result.stdout
     assert "RESULT_PIN=999" not in result.stdout
@@ -490,11 +520,35 @@ def test_measured_cycle_is_label_major_not_rep_major() -> None:
         "`for rep in $(seq ...)` (inner) in the measured cycle -- got the "
         "reverse, which is the old rep-major shape this rule moved away from"
     )
-    # Exactly one of each in the measured cycle (the warmup cycle has its own
-    # `for entry in $ARM_SPEC` earlier in the file, outside this slice, and no
-    # rep loop at all).
+    # Exactly one of each: warmup is folded into this same loop (see
+    # `test_per_label_warmup_precedes_its_own_measured_reps` below), not run
+    # as a separate pass with its own `for entry in $ARM_SPEC`.
     assert body.count("for entry in $ARM_SPEC; do") == 1
     assert body.count("for rep in $(seq 1 {params.reps}); do") == 1
+
+
+def test_per_label_warmup_precedes_its_own_measured_reps() -> None:
+    """Regression test for the within-label cache-eviction bug the per-label
+    warmup restructuring fixes: each label's own UNMEASURED warmup call must
+    run INSIDE that label's own `for entry in $ARM_SPEC` iteration, before
+    its `for rep in ...` loop -- not once for the whole arm list up front, in
+    a separate loop whose warmup could be separated from its own label's
+    measured cycle by every other arm's warmup and measured runs happening
+    in between (confirmed via a real arena run's `meminfo.jsonl`: `wall_s`
+    showed a rep1 >> rep2 > rep3 decay on affected labels while `process_s`
+    stayed flat -- see the module docstring)."""
+    body = _measured_cycle_body()
+    entry_idx = body.index("for entry in $ARM_SPEC; do")
+    warmup_idx = body.index('run_arm "$label" "$binary" "$mode" 0 ')
+    rep_idx = body.index("for rep in $(seq 1 {params.reps}); do")
+    assert entry_idx < warmup_idx < rep_idx, (
+        "expected the per-label warmup call (rep=0) to appear inside the "
+        "`for entry in $ARM_SPEC` loop, before its `for rep in ...` loop -- "
+        f"got entry_idx={entry_idx}, warmup_idx={warmup_idx}, rep_idx={rep_idx}"
+    )
+    # Exactly one rep=0 warmup call per label iteration -- a second one would
+    # mean warmup is (again) running as its own separate pass.
+    assert body.count('run_arm "$label" "$binary" "$mode" 0 ') == 1
 
 
 def test_tricorder_records_a_per_tick_trace() -> None:
