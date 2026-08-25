@@ -45,10 +45,11 @@ ARG BASELINE_ARCH=""
 # Used to A/B build-flag perf experiments (LTO, PGO, etc.) against the
 # same fg-labs SHA without re-tagging branches in upstream.
 ARG FG_LABS_MAKE_TARGET=""
-# minibwa is private (lh3); we vendor it as a git submodule at vendor/minibwa
-# instead of cloning at build time. MINIBWA_SHA is recorded for traceability
-# (image label / docs) but is not used by the build itself — the source pin
-# is whatever the submodule commit points at.
+# minibwa (lh3) is not published as a package, so we vendor it as a git
+# submodule at vendor/minibwa for reproducible source pinning instead of
+# cloning at build time. MINIBWA_SHA is recorded for traceability (image
+# label / docs) but is not used by the build itself — the source pin is
+# whatever the submodule commit points at.
 ARG MINIBWA_SHA
 ARG SAMTOOLS_VERSION
 ARG BWA_VERSION
