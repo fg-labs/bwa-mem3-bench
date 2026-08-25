@@ -322,16 +322,24 @@ RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-relea
 
 # Install tricorder (fg-labs/tricord) for benchmarking the alignment subprocess
 # without snakemake's `benchmark:` directive. Tricord requires Rust 1.94+, so
-# install a separate stable toolchain rather than retraining 1.85 above. We
-# pin to a published crates.io version for reproducibility; bump as needed.
-ARG TRICORD_VERSION=0.1.2
+# install a separate stable toolchain rather than retraining 1.85 above.
+#
+# Pinned to a git ref rather than a published crates.io version: the arena's
+# page-cache-eviction instrumentation needs fg-labs/tricord#33's
+# page_cache_start/page_cache_end metric, which landed on main but has not
+# been published to crates.io yet (still sitting in the open release-plz PR).
+# Once tricord ships a crates.io release containing it, prefer reverting to a
+# --version pin (matching tachyon's precedent below) for the same
+# reproducibility reason holodeck/fgumi would if they had tagged releases.
+ARG TRICORD_REPO
+ARG TRICORD_REF
 # Pinned rather than `stable`, for the same reason as the digest above: `stable`
 # floats, so the same content-addressed base tag would otherwise be built with
 # whatever compiler happened to be current that day. Bump deliberately.
 ARG RUST_STABLE_VERSION=1.97.1
 RUN rustup toolchain install "${RUST_STABLE_VERSION}" --profile minimal --no-self-update && \
-    cargo "+${RUST_STABLE_VERSION}" install --locked --root /out \
-        --version "${TRICORD_VERSION}" tricord
+    cargo "+${RUST_STABLE_VERSION}" install --locked --git "${TRICORD_REPO}" --rev "${TRICORD_REF}" \
+        --root /out tricord
 
 # Install holodeck (fg-labs/holodeck) for the truth-based accuracy benchmark:
 # it generates the simulated truth datasets and provides `holodeck eval`. The

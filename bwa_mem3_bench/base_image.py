@@ -18,9 +18,8 @@ contents. Keying it on ``UPSTREAM_TAG`` alone would be a correctness bug: bumpin
 ``HOLODECK_REF`` while ``UPSTREAM_TAG`` stayed at ``v2.2.1`` would silently reuse
 a base image built from the old holodeck, and the resulting benchmark would
 attribute the difference to bwa-mem3. Hashing ``Dockerfile.base`` itself covers
-the pins that live there as ``ARG`` defaults (``LLVM_VERSION``,
-``TRICORD_VERSION``) and the hardcoded Rust toolchain version, so editing the
-recipe also forces a new tag.
+the pins that live there as ``ARG`` defaults (``LLVM_VERSION``) and the
+hardcoded Rust toolchain version, so editing the recipe also forces a new tag.
 """
 
 from __future__ import annotations
@@ -48,6 +47,8 @@ BASE_REPO_SUFFIX = "-base"
 BASE_PIN_NAMES = (
     "UPSTREAM_REPO",
     "UPSTREAM_TAG",
+    "TRICORD_REPO",
+    "TRICORD_REF",
     "HOLODECK_REPO",
     "HOLODECK_REF",
     "FGUMI_REPO",
