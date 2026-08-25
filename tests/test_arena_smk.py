@@ -21,6 +21,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from bwa_mem3_bench import REPO_ROOT
 
 ARENA_SMK = Path(REPO_ROOT) / "workflow" / "rules" / "arena.smk"
@@ -293,3 +295,157 @@ def test_a_successful_measured_arm_tees_its_result_to_stderr() -> None:
     )
     for field in expected_fields:
         assert field in between, f"RESULT line must report {field}"
+
+
+def _fg_labs_case_snippet() -> str:
+    """Extracts the `bwa-mem2.fg-labs)` case body from `run_arm`, unescaping
+    Snakemake's `.format()` `{{`/`}}` literal-brace escapes and standing in
+    plain shell variables/literals for the substituted `{threads}` /
+    `{params.*}` / `{input.*}` fields, so it can run standalone as valid bash.
+    """
+    text = ARENA_SMK.read_text()
+    case_start = text.index("bwa-mem2.fg-labs)")
+    case_end = text.index("*)", case_start)
+    snippet = text[case_start:case_end].replace("{{", "{").replace("}}", "}")
+    return (
+        snippet.replace("{threads}", "16")
+        .replace("{params.batch_flag}", "")
+        .replace("{params.mem_flags}", "")
+        .replace("{params.fg_labs_flags}", "")
+        .replace("{input.ref[0]}", "ref.fa")
+        .replace("{input.fastqs}", "r1.fq r2.fq")
+    )
+
+
+def test_fg_labs_invocation_requests_v3_only_on_the_warmup_rep() -> None:
+    """The fg-labs binary must run with `-v 3` on the warmup rep (rep=0) so
+    that invocation prints the "phase-2 SMEM lockstep width: N" line the pin
+    block below parses -- but MUST NOT carry `-v 3` on any measured rep
+    (rep>=1): the verbose stderr writes happen inside the tricorder-timed
+    region and can perturb the very wall_s values the pin exists to keep
+    clean. Verified by actually extracting the case branch and executing it
+    in a real bash subprocess for rep=0 and rep=1, mirroring
+    `test_arm_dispatch_fast_flag_covers_the_historical_release_branch` --
+    a text search alone cannot tell "reads $rep and gates on it" apart from
+    "always includes -v 3".
+    """
+    case_body = _fg_labs_case_snippet()
+    script = f"""
+    check_cmd() {{
+        local binary="$1" mode="$2" rep="$3"
+        case "$binary" in
+            {case_body}
+        esac
+        echo "$cmd"
+    }}
+    check_cmd "bwa-mem2.fg-labs" "default" 0
+    check_cmd "bwa-mem2.fg-labs" "default" 1
+    """
+    result = subprocess.run(  # noqa: S603, S607 -- fixed, test-owned Bash script
+        ["bash", "-c", script], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    lines = result.stdout.strip().splitlines()
+    assert len(lines) == _EXPECTED_CHECK_CMD_INVOCATIONS, f"expected 2 output lines, got {lines!r}"
+    assert "-v 3" in lines[0], f"warmup (rep=0) must pass -v 3: {lines[0]!r}"
+    assert "-v 3" not in lines[1], f"measured rep (rep=1) must NOT pass -v 3: {lines[1]!r}"
+
+
+def _lockstep_pin_snippet() -> str:
+    """Extracts the `unset BWA3_SMEM_LOCKSTEP_N` ... pin block from
+    `align_arena`, unescaping Snakemake's `.format()` `{{`/`}}` literal-brace
+    escapes so it can run standalone as valid bash.
+
+    The extraction starts at the production `unset` (not at
+    `FG_LABS_WARMUP_LOG=...`) deliberately: that `unset` is the fix for
+    inherited-environment leakage, and the test harness below must exercise
+    it as written in `align_arena`, not re-implement its own copy."""
+    text = ARENA_SMK.read_text()
+    start = text.index("unset BWA3_SMEM_LOCKSTEP_N")
+    end = text.index("# Interleaved measured cycles", start)
+    # `{{`/`}}` are Snakemake .format() escapes for literal `{`/`}` -- none
+    # appear in this slice, but keep the unescape for parity with how
+    # Snakemake would actually render it, in case a future edit adds one.
+    return text[start:end].replace("{{", "{").replace("}}", "}")
+
+
+def _run_lockstep_pin_snippet(outdir: Path) -> subprocess.CompletedProcess[str]:
+    """Runs `_lockstep_pin_snippet()`'s extracted pin block (which itself
+    unsets any inherited `BWA3_SMEM_LOCKSTEP_N` before parsing the warmup
+    log -- see `_lockstep_pin_snippet`) in a real bash subprocess against
+    `outdir`, echoing the resulting `BWA3_SMEM_LOCKSTEP_N` (or `UNSET`) to
+    stdout so callers can assert on both the pinned value and the block's
+    stderr diagnostics. Deliberately does NOT unset the variable itself
+    beforehand -- that would test the harness's own cleanup instead of
+    `align_arena`'s production behavior."""
+    script = f"""
+    set -euo pipefail
+    OUTDIR="{outdir}"
+    {_lockstep_pin_snippet()}
+    echo "RESULT_PIN=${{BWA3_SMEM_LOCKSTEP_N:-UNSET}}"
+    """
+    return subprocess.run(  # noqa: S603, S607 -- fixed, test-owned Bash script
+        ["bash", "-c", script], capture_output=True, text=True, check=False
+    )
+
+
+def test_smem_lockstep_width_is_pinned_from_the_warmup_probe(tmp_path: Path) -> None:
+    """A warmup stderr log carrying the "phase-2 SMEM lockstep width: N" line
+    must pin `BWA3_SMEM_LOCKSTEP_N=N` and log a matching confirmation to
+    stderr, so the measured cycles reuse the warmup's own natural probe."""
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    (runs_dir / "fg-labs-default.default.warmup.stderr.log").write_text(
+        "* Ref file: /ref/hs38\n[M::main_mem] phase-2 SMEM lockstep width: 24\n"
+    )
+    result = _run_lockstep_pin_snippet(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "RESULT_PIN=24" in result.stdout
+    assert "pinned BWA3_SMEM_LOCKSTEP_N=24" in result.stderr
+
+
+def test_smem_lockstep_pin_warns_but_does_not_crash_when_the_probe_line_is_missing(
+    tmp_path: Path,
+) -> None:
+    """A build that predates fg-labs/bwa-mem3#393 (or any unexpected stderr
+    shape) must not fail the whole job under `set -euo pipefail` -- it should
+    warn and leave the probe unpinned for the measured cycles."""
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    (runs_dir / "fg-labs-default.default.warmup.stderr.log").write_text("* Ref file: /ref/hs38\n")
+    result = _run_lockstep_pin_snippet(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "RESULT_PIN=UNSET" in result.stdout
+    assert "could not find a phase-2 SMEM lockstep width line" in result.stderr
+
+
+def test_smem_lockstep_pin_warns_but_does_not_crash_when_the_warmup_log_is_missing(
+    tmp_path: Path,
+) -> None:
+    """The fg-labs-default warmup arm itself could FAIL (see the "Never
+    hard-fail on an old binary" design) and never write its stderr.log at
+    all -- the pin step must degrade gracefully, not crash the job."""
+    (tmp_path / "runs").mkdir()
+    result = _run_lockstep_pin_snippet(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "RESULT_PIN=UNSET" in result.stdout
+    assert "fg-labs-default's warmup likely failed" in result.stderr
+
+
+def test_smem_lockstep_pin_snippet_ignores_an_inherited_env_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`subprocess.run` inherits the calling process's environment, and a
+    real `align_arena` job's environment could equally already have
+    `BWA3_SMEM_LOCKSTEP_N` set (e.g. a worker host that leaked one from a
+    prior invocation). A missing probe line must still report `UNSET` rather
+    than silently echoing back the stale inherited value -- the pin block's
+    own leading `unset BWA3_SMEM_LOCKSTEP_N` (see `_lockstep_pin_snippet`) is
+    what guarantees that; without it the snippet would misreport an unpinned
+    run as pinned."""
+    monkeypatch.setenv("BWA3_SMEM_LOCKSTEP_N", "999")
+    (tmp_path / "runs").mkdir()
+    result = _run_lockstep_pin_snippet(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "RESULT_PIN=UNSET" in result.stdout
+    assert "RESULT_PIN=999" not in result.stdout
