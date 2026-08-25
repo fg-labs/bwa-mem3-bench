@@ -17,6 +17,7 @@ reach of a normal unit test.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -440,3 +441,122 @@ def test_smem_lockstep_pin_snippet_ignores_an_inherited_env_var(
     assert result.returncode == 0, result.stderr
     assert "RESULT_PIN=UNSET" in result.stdout
     assert "RESULT_PIN=999" not in result.stdout
+
+
+def _measured_cycle_body() -> str:
+    """Extracts the LABEL-MAJOR measured-cycle loop (from its introducing
+    comment through the per-label instrumentation block), for the ordering
+    and instrumentation regression tests below."""
+    text = ARENA_SMK.read_text()
+    start = text.index("# Interleaved measured cycles")
+    end = text.index("emit-host-probe post", start)
+    return text[start:end]
+
+
+def test_arm_spec_is_seeded_by_the_fg_labs_sha() -> None:
+    """Regression test for the arena's own host-drift confound (see
+    `bwa_mem3_bench/arena_arms.py`): a FIXED arm order always disadvantages
+    whichever label is newest. `_arena_arm_spec`'s shuffle must vary by
+    candidate, so it needs the fg-labs SHA under measurement as its seed --
+    not a fixed literal, which would just fix a DIFFERENT arm in the worst
+    position forever instead of decorrelating position from identity."""
+    text = ARENA_SMK.read_text()
+    assert "def _arena_arm_spec(arch: str, *, seed: str) -> str:" in text
+    assert "arm_spec = lambda wc: _arena_arm_spec(wc.arch, seed=wc.sha)" in text, (
+        "expected the rule's arm_spec param to pass wc.sha as the shuffle seed"
+    )
+
+
+def test_measured_cycle_is_label_major_not_rep_major() -> None:
+    """Regression test for the fixed-order host-drift confound this rule
+    used to have: the measured cycle must iterate LABEL-outer / rep-inner (one
+    label's reps run back-to-back) so a label's own median is drawn from a
+    narrow slice of the job's wall-clock, not the fixed-order rep-outer shape
+    where the same arm was always measured last, every single rep."""
+    body = _measured_cycle_body()
+    entry_idx = body.index("for entry in $ARM_SPEC; do")
+    rep_idx = body.index("for rep in $(seq 1 {params.reps}); do")
+    assert entry_idx < rep_idx, (
+        "expected `for entry in $ARM_SPEC` (label-major, outer) to precede "
+        "`for rep in $(seq ...)` (inner) in the measured cycle -- got the "
+        "reverse, which is the old rep-major shape this rule moved away from"
+    )
+    # Exactly one of each in the measured cycle (the warmup cycle has its own
+    # `for entry in $ARM_SPEC` earlier in the file, outside this slice, and no
+    # rep loop at all).
+    assert body.count("for entry in $ARM_SPEC; do") == 1
+    assert body.count("for rep in $(seq 1 {params.reps}); do") == 1
+
+
+def test_tricorder_records_a_per_tick_trace() -> None:
+    """`--trace` gives per-tick RSS/IO/page-fault samples per arm -- the most
+    direct test available for the page-cache-eviction hypothesis in the
+    module docstring, since it is measured on the exact process in question
+    rather than inferred from wall_s minus process_s."""
+    text = ARENA_SMK.read_text()
+    assert '--trace "{{out}}.trace.tsv"' in text or '--trace "${{out}}.trace.tsv"' in text, (
+        "expected the tricorder invocation to also request a per-tick --trace file"
+    )
+
+
+def test_per_label_host_probe_and_meminfo_snapshot_are_emitted() -> None:
+    """Regression test for the arena's new per-label instrumentation: a
+    tachyon probe and a page-cache snapshot must both fire once per label,
+    after that label's reps finish, so the host-drift hypothesis in the
+    module docstring is checkable directly rather than only inferred."""
+    body = _measured_cycle_body()
+    assert (
+        'emit-host-probe "label-${{label}}" {params.label_probe_seconds} >> {output.host_probe}'
+        in body
+    )
+    assert 'emit_meminfo_snapshot "label-${{label}}"' in body
+
+    text = ARENA_SMK.read_text()
+    assert 'meminfo        = "arena/{sha}/{arch}/meminfo.jsonl"' in text, (
+        "expected a declared `meminfo` output for the page-cache snapshots"
+    )
+    assert "emit_meminfo_snapshot() {{" in text
+    assert "emit_meminfo_snapshot pre" in text
+    assert "emit_meminfo_snapshot post" in text
+
+
+def test_meminfo_snapshot_reads_the_expected_proc_fields(tmp_path: Path) -> None:
+    """Executes the real `emit_meminfo_snapshot` function against a synthetic
+    `/proc/meminfo`-shaped file, confirming it parses Cached/Dirty/Buffers
+    into a well-formed JSON line -- a text search alone cannot tell "reads
+    the right field" apart from "reads the wrong one and still prints valid
+    JSON"."""
+    text = ARENA_SMK.read_text()
+    func_start = text.index("emit_meminfo_snapshot() {{")
+    func_end = text.index("\n        }}", func_start) + len("\n        }}")
+    func_body = text[func_start:func_end].replace("{{", "{").replace("}}", "}")
+
+    meminfo_out = tmp_path / "meminfo.jsonl"
+    fake_proc_meminfo = tmp_path / "meminfo"
+    fake_proc_meminfo.write_text(
+        "MemTotal:       65000000 kB\nCached:         15728640 kB\n"
+        "Dirty:              1024 kB\nBuffers:            2048 kB\n"
+    )
+
+    script = f"""
+    set -euo pipefail
+    {func_body.replace("/proc/meminfo", str(fake_proc_meminfo))}
+    """
+    # The function as written appends to a literal `{output.meminfo}` --
+    # Snakemake's own `.format()` substitution target -- so stand in the temp
+    # path for it here, the same way `_fg_labs_case_snippet` stands in plain
+    # values for other `{params.*}`/`{input.*}` fields.
+    script = script.replace("{output.meminfo}", str(meminfo_out))
+    script += '\nemit_meminfo_snapshot "test-phase"\n'
+    result = subprocess.run(  # noqa: S603, S607 -- fixed, test-owned Bash script
+        ["bash", "-c", script], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    line = meminfo_out.read_text().strip()
+    record = json.loads(line)
+    assert record == {
+        "phase": "test-phase",
+        "cached_kb": 15728640,
+        "dirty_kb": 1024,
+        "buffers_kb": 2048,
+    }

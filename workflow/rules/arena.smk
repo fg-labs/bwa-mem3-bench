@@ -90,15 +90,54 @@ this codebase's normal fail-fast contract (see e.g. `align_fg_labs`'s
 failure mode is "an ancient binary doesn't understand a flag", which carries
 no ambiguity the way a silent partial output would.
 
-Interleaved, with a discarded warmup cycle. The measured cycles run
-REP-OUTER / ARM-INNER (rep 1 of every arm, then rep 2 of every arm, ...) so a
-monotonic drift across the job's wall-clock (thermal throttling, a neighbour
-arriving) is spread evenly across every arm instead of biasing whichever arm
-happened to run first or last. One additional UNMEASURED warmup cycle runs
-first (every arm once, discarded) -- mirrors the project's own bare-metal
-reproduction protocol (CLAUDE.md's "reproduce with interleaved runs and
-discarded warmups"), which caught page-cache and allocator warm-up trends
-masquerading as a binary difference.
+Interleaved, front-loaded, shuffled, with a discarded warmup cycle. The
+measured cycles run LABEL-MAJOR (every rep of one label back-to-back, then
+the next label) over an arm order that groups every `--fast` arm ahead of
+every `--default` arm and shuffles each block with a seed tied to the
+fg-labs SHA under measurement -- see
+`bwa_mem3_bench.arena_arms.front_load_fast_arms` for the full rationale and
+`_arena_arms`/this rule's `arm_spec` param for where the seed comes from.
+
+This replaced an earlier REP-OUTER / ARM-INNER, FIXED-order design whose
+comment claimed interleaving "spread a monotonic drift evenly across every
+arm instead of biasing whichever arm happened to run first or last" -- true
+only if arm order varies per rep, which it did not: the SAME arm always ran
+last in every rep (today's candidate, `fg-labs-fast`), so it always paid the
+worst accumulated host state, every single rep. A real c8a arena run caught
+this concretely: `process_s` (the aligner's own timer) was flat within noise
+between v0.9.0 and v0.10.0's `--fast` arms (~17.6-17.9s both), while `wall_s`
+grew from a ~1.3s "outside-process" gap in the first measured rep to ~13.5s
+in the third, on EVERY `--fast` label in the run -- `--default` arms
+(43-100+s) were unaffected, since the same fixed/growing overhead is a much
+smaller fraction of a long run. The README's v0.9.0-vs-v0.10.0 `--fast`
+"regression" this produced was a host-drift artifact of the arena's own
+methodology, not a codegen change -- exactly the class of bug the arena
+exists to catch in fg-labs/bwa-mem3 itself (see the module docstring's
+opening), just found here instead. Label-major shrinks the exposure to a
+within-label concern; front-loading the short, drift-sensitive `--fast`
+block ahead of the long, drift-tolerant `--default` block bounds how much of
+the job's total drift the fragile metric can accumulate; per-submission
+shuffling stops whichever label is newest from always landing in the same
+(possibly worst) position.
+
+One additional UNMEASURED warmup cycle runs first (every arm once, in the
+same front-loaded/shuffled order, discarded) -- mirrors the project's own
+bare-metal reproduction protocol (CLAUDE.md's "reproduce with interleaved
+runs and discarded warmups"), which caught page-cache and allocator warm-up
+trends masquerading as a binary difference.
+
+Instrumentation: confirm the mechanism, don't just work around it. Two
+diagnostic-only additions exist to test the host-drift hypothesis above
+directly rather than only mitigate it: a per-label tachyon memory-access-rate
+probe (phase `label-<label>`, appended to `host-probe.jsonl` alongside the
+existing whole-job "pre"/"post" readings -- see `_ingest_host_probes`, which
+needed no changes since `phase` is a free-text row key) and a per-label
+`/proc/meminfo` snapshot (`meminfo.jsonl`, Cached/Dirty/Buffers) that
+directly tracks page-cache SIZE rather than inferring pressure from `wall_s`.
+Neither is ingested into `benchmark.db` (same "diagnostic, never
+load-bearing" status as `fgumi-compare.txt`) -- they exist to be pulled and
+inspected by hand when a `--fast` delta looks surprising, not to feed a
+report column.
 
 Correctness, narrowly scoped. Every arm is a WALL-TIME comparator except one
 pairwise check: the run's own `fg-labs-default` BAM against the immediately
@@ -187,8 +226,8 @@ ARENA_MINIBWA_FLAGS = " ".join(_arena_sample_cfg.minibwa_flags)
 ARENA_BATCH_FLAG = _batch_flag()
 
 
-def _arena_arms(arch: str) -> list[tuple[str, str, str]]:
-    """Return (label, binary, mode) for every arm `arch` runs.
+def _arena_arms(arch: str, *, seed: str) -> list[tuple[str, str, str]]:
+    """Return (label, binary, mode) for every arm `arch` runs, in run order.
 
     `mode` is 'default' or 'fast'. Every historical release gets BOTH a
     default-mode arm (label `<release>`) and a `--fast` arm (label
@@ -198,6 +237,18 @@ def _arena_arms(arch: str) -> list[tuple[str, str, str]]:
     "never hard-fail on an old binary" wrapper the default-mode arms already
     rely on. bwa-mem2-upstream is dropped on ARM (upstream v2.2.1 has no ARM
     build), matching `_has_upstream_baseline`.
+
+    The raw arm list built here is unordered with respect to the job's actual
+    run order -- `front_load_fast_arms` (bwa_mem3_bench/arena_arms.py) is what
+    groups every `--fast` arm ahead of every `--default` arm and shuffles each
+    block by `seed`. See that module's docstring for why: a fixed run order
+    means whichever label is newest is always measured last, under the worst
+    accumulated host state, which is exactly what produced a false
+    v0.9.0-vs-v0.10.0 `--fast` "regression" this fixes.
+
+    :param seed: passed straight through to `front_load_fast_arms` -- the
+        caller supplies the fg-labs SHA under measurement, so a different
+        candidate shuffles differently.
     """
     arms: list[tuple[str, str, str]] = [
         ("bwa", "bwa", "default"),
@@ -212,12 +263,12 @@ def _arena_arms(arch: str) -> list[tuple[str, str, str]]:
         ("fg-labs-default", "bwa-mem2.fg-labs", "default"),
         ("fg-labs-fast", "bwa-mem2.fg-labs", "fast"),
     ]
-    return arms
+    return front_load_fast_arms(arms, seed=seed)
 
 
-def _arena_arm_spec(arch: str) -> str:
+def _arena_arm_spec(arch: str, *, seed: str) -> str:
     """`_arena_arms` as `label|binary|mode` tokens for the shell loop."""
-    return " ".join(f"{label}|{binary}|{mode}" for label, binary, mode in _arena_arms(arch))
+    return " ".join(f"{label}|{binary}|{mode}" for label, binary, mode in _arena_arms(arch, seed=seed))
 
 
 # `_ref_inputs` / `_bwa_ref_inputs` / `_minibwa_ref_inputs` each take a
@@ -265,6 +316,7 @@ rule align_arena:
         profile        = "arena/{sha}/{arch}/runtime-profiles.tar.gz",
         meta           = "arena/{sha}/{arch}/meta.json",
         host_probe     = "arena/{sha}/{arch}/host-probe.jsonl",
+        meminfo        = "arena/{sha}/{arch}/meminfo.jsonl",
         fgumi_compare  = "arena/{sha}/{arch}/fgumi-compare.txt",
     wildcard_constraints:
         arch = ARENA_ARCH_PATTERN,
@@ -288,10 +340,14 @@ rule align_arena:
         # once reps > 3; match the ladder's own bump.
         runtime = 14400,
     params:
-        arm_spec = lambda wc: _arena_arm_spec(wc.arch),
+        # Seeded by the fg-labs SHA under measurement -- see
+        # `_arena_arms`/`front_load_fast_arms` for why the shuffle must vary
+        # per candidate rather than being a fixed literal order.
+        arm_spec = lambda wc: _arena_arm_spec(wc.arch, seed=wc.sha),
         reps = CONFIG.arena.reps,
         prior_label = ARENA_PRIOR_RELEASE_LABEL,
         probe_seconds = CONFIG.arena.host_probe_seconds,
+        label_probe_seconds = CONFIG.arena.label_probe_seconds,
         fg_labs_flags = ARENA_FG_LABS_FLAGS,
         mem_flags = ARENA_MEM_FLAGS,
         minibwa_flags = ARENA_MINIBWA_FLAGS,
@@ -317,8 +373,30 @@ rule align_arena:
             > /dev/null 2>/dev/null || true
 
         emit-host-probe pre {params.probe_seconds} > {output.host_probe}
+        : > {output.meminfo}
 
         printf 'label\tmode\trep\twall_s\tcpu_s\tmax_rss_mb\tprocess_s\n' > {output.tsv}
+
+        # Diagnostic-only page-cache snapshot -- Cached/Dirty/Buffers from
+        # /proc/meminfo, one JSON line per call. Complements the per-label
+        # tachyon probe (which measures memory ACCESS RATE) with the system's
+        # actual page-cache SIZE, so a page-cache-eviction hypothesis for the
+        # arena's `--fast`-only wall_s drift (see the module docstring and
+        # bwa_mem3_bench/arena_arms.py) can be checked directly rather than
+        # inferred. `|| echo null` on each lookup: a missing/unparseable
+        # meminfo field must degrade that one field to `null`, matching
+        # emit-host-probe's own "diagnostic, never load-bearing" contract,
+        # not abort a multi-hour on-demand job over a proc-fs read.
+        emit_meminfo_snapshot() {{
+            local phase="$1"
+            local cached dirty buffers
+            cached=$(mawk '/^Cached:/{{print $2; exit}}' /proc/meminfo || echo null)
+            dirty=$(mawk '/^Dirty:/{{print $2; exit}}' /proc/meminfo || echo null)
+            buffers=$(mawk '/^Buffers:/{{print $2; exit}}' /proc/meminfo || echo null)
+            printf '{{"phase": "%s", "cached_kb": %s, "dirty_kb": %s, "buffers_kb": %s}}\n' \
+                "$phase" "${{cached:-null}}" "${{dirty:-null}}" "${{buffers:-null}}" >> {output.meminfo}
+        }}
+        emit_meminfo_snapshot pre
 
         run_arm() {{
             # Runs one (label, binary, mode), writing "${{out}}.timing.tsv" /
@@ -364,7 +442,14 @@ rule align_arena:
                     cmd="$binary mem -t {threads} {params.batch_flag} {params.mem_flags} $fast_flag {input.ref[0]} {input.fastqs}"
                     ;;
             esac
-            tricorder --out "${{out}}.timing.tsv" -- \
+            # --trace: per-tick RSS/IO/page-fault samples, not just the
+            # aggregate row. Diagnostic-only (folded into runtime-profiles.tar.gz
+            # below, same as every other per-arm file under runs/) -- a rising
+            # major_page_faults / io_in count across a label's own reps is the
+            # most DIRECT test of the page-cache-eviction hypothesis in the
+            # module docstring, since it is measured on the exact process that
+            # (dis)proves it, not inferred from wall_s minus process_s.
+            tricorder --out "${{out}}.timing.tsv" --trace "${{out}}.trace.tsv" -- \
                 bash -c "set -o pipefail; $cmd 2>'${{out}}.stderr.log' | samtools view -@4 -u -o '${{out}}.bam.raw' -"
             if [ "$(samtools view -c "${{out}}.bam.raw" 2>/dev/null || echo 0)" -eq 0 ]; then
                 return 1
@@ -425,13 +510,32 @@ rule align_arena:
             echo "WARNING: $FG_LABS_WARMUP_LOG missing -- fg-labs-default's warmup likely failed; today's candidate's measured --fast rows will pay the per-invocation probe cost" >&2
         fi
 
-        # Interleaved measured cycles: REP-OUTER / ARM-INNER, so a monotonic
-        # drift across the job's wall-clock lands on every arm equally rather
-        # than biasing whichever ran first or last.
-        for rep in $(seq 1 {params.reps}); do
-            echo "=== measured cycle rep $rep ===" >&2
-            for entry in $ARM_SPEC; do
-                IFS='|' read -r label binary mode <<< "$entry"
+        # Interleaved measured cycles: LABEL-MAJOR (every rep of one label
+        # runs back-to-back) over the FRONT-LOADED, PER-SUBMISSION-SEEDED
+        # $ARM_SPEC built above (every `--fast` arm, shuffled, ahead of every
+        # `--default` arm, shuffled -- see `front_load_fast_arms`'s
+        # docstring). This replaced a REP-OUTER / ARM-INNER, FIXED-ORDER loop
+        # whose own comment claimed it "spread a monotonic drift evenly
+        # across every arm instead of biasing whichever ran first or last" --
+        # which does not hold when the arm order inside each rep never
+        # varies: whichever arm is last in that fixed order (always today's
+        # candidate, `fg-labs-fast`) is disadvantaged by BOTH the within-rep
+        # drift (it is always measured latest within every single rep) and
+        # the whole-job drift (nothing here ever resets cache/host state
+        # between reps). Confirmed on a real c8a arena run: `process_s` (the
+        # aligner's own timer) was flat within noise between v0.9.0 and
+        # v0.10.0's `--fast` arms, while `wall_s`'s "outside-process" gap grew
+        # from ~1.3s in the first measured rep to ~13.5s in the third, on
+        # EVERY `--fast` label in the run -- a host-drift artifact that
+        # produced a false release-over-release regression, not a codegen
+        # change. Label-major shrinks that to a within-label concern (each
+        # label's own N reps span a narrower window of the job), and the
+        # front-loaded + shuffled block order (this rule's `arm_spec` param)
+        # is what stops whichever label happens to run last from always being
+        # the newest candidate.
+        for entry in $ARM_SPEC; do
+            IFS='|' read -r label binary mode <<< "$entry"
+            for rep in $(seq 1 {params.reps}); do
                 OUT="$OUTDIR/runs/${{label}}.${{mode}}.rep${{rep}}"
                 set +e
                 run_arm "$label" "$binary" "$mode" "$rep" "$OUT"
@@ -467,9 +571,21 @@ rule align_arena:
                 fi
                 rm -f "${{OUT}}.bam.raw"
             done
+            # Per-LABEL host telemetry, taken once this label's reps are all
+            # done: a cheap tachyon memory-access-rate reading (phase
+            # "label-$label", appended to the SAME host-probe.jsonl the
+            # whole-job "pre"/"post" readings already use -- `phase` is a
+            # free-text row key with no existing ingest changes needed, see
+            # `_ingest_host_probes`) plus a page-cache size snapshot. Together
+            # these turn the drift hypothesis above into something checkable
+            # directly against ~13-14 labels' worth of time-series, not just
+            # inferred from wall_s minus process_s.
+            emit-host-probe "label-${{label}}" {params.label_probe_seconds} >> {output.host_probe}
+            emit_meminfo_snapshot "label-${{label}}"
         done
 
         emit-host-probe post {params.probe_seconds} >> {output.host_probe}
+        emit_meminfo_snapshot post
 
         # Correctness spot-check: today's candidate vs the immediately prior
         # blessed release, default mode, boolean full-content identity. Never

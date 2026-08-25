@@ -138,6 +138,11 @@ arena:
   # (see align_arena's own `resources.runtime = 14400` budget), so two 10s
   # probes are still a small fraction of it.
   host_probe_seconds: 10.0
+  # A SEPARATE, cheaper probe taken once per label (not just twice for the
+  # whole job) -- see bwa_mem3_bench/arena_arms.py's module docstring for the
+  # host-drift confound this diagnoses. ~26 labels x 2s is ~1 minute, still a
+  # small fraction of an hour-plus job.
+  label_probe_seconds: 2.0
 
 references:
   hg38:
