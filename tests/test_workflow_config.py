@@ -1073,6 +1073,25 @@ def test_shipped_config_sets_an_arena_host_probe_budget() -> None:
 
 
 @pytest.mark.parametrize("seconds", [True, "2", 0, -1.0, float("nan"), float("inf")])
+def test_arena_rejects_a_bad_label_probe_budget(seconds: object) -> None:
+    """Same rigour as `arena.host_probe_seconds`, for the same reason: the
+    value is pasted into `align_arena`'s shell body
+    (`emit-host-probe "label-${label}" {params.label_probe_seconds}`), so a
+    malformed one would fail a paid on-demand Batch job rather than the
+    config load."""
+    with pytest.raises(ValueError, match=r"arena\.label_probe_seconds"):
+        _arena(label_probe_seconds=seconds)
+
+
+def test_arena_label_probe_budget_is_optional_and_defaults() -> None:
+    assert _arena().label_probe_seconds > 0
+
+
+def test_shipped_config_sets_an_arena_label_probe_budget() -> None:
+    assert load_config(CONFIG_DIR).arena.label_probe_seconds > 0
+
+
+@pytest.mark.parametrize("seconds", [True, "2", 0, -1.0, float("nan"), float("inf")])
 def test_sweep_host_probe_seconds_rejects_a_bad_budget(seconds: object) -> None:
     """Same rigour as `thread_scaling.host_probe_seconds`, for the same reason:
     the value is pasted into `align_fg_labs`'s shell body, so a malformed one
