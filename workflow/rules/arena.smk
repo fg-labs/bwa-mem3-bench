@@ -338,7 +338,15 @@ rule align_arena:
                 bwa-mem2.fg-labs)
                     local fast_flag=""
                     [ "$mode" = "fast" ] && fast_flag="--fast"
-                    cmd="$binary mem -t {threads} {params.batch_flag} {params.mem_flags} {params.fg_labs_flags} $fast_flag {input.ref[0]} {input.fastqs}"
+                    # -v 3 is needed ONLY on the warmup invocation (rep=0), so
+                    # it prints its resolved "phase-2 SMEM lockstep width"
+                    # line (see the BWA3_SMEM_LOCKSTEP_N pin below). Measured
+                    # reps must NOT get it: the verbose stderr writes happen
+                    # inside the tricorder-timed region and can perturb the
+                    # very wall_s values this pin exists to keep clean.
+                    local verbosity_flag=""
+                    [ "$rep" -eq 0 ] && verbosity_flag="-v 3"
+                    cmd="$binary mem -t {threads} $verbosity_flag {params.batch_flag} {params.mem_flags} {params.fg_labs_flags} $fast_flag {input.ref[0]} {input.fastqs}"
                     ;;
                 *)
                     # Historical bwa-mem3 releases and bwa-mem2-upstream: NEVER
@@ -390,6 +398,32 @@ rule align_arena:
             [ $status -ne 0 ] && echo "warmup: $label/$mode failed (exit=$status), ignoring" >&2
             rm -f "$OUTDIR/runs/${{label}}.${{mode}}.warmup.bam.raw"
         done
+
+        # Pin today's candidate's phase-2 SMEM lockstep width (fg-labs/bwa-mem3
+        # #393) from the warmup cycle's own natural probe, instead of re-probing
+        # on every measured invocation. The probe runs once per process during
+        # index setup, before the binary's own PROCESS() timer starts, so it is
+        # invisible to process_s -- but NOT to wall_s, and it costs a much bigger
+        # fraction of a short --fast run's wall time than a long stock run's,
+        # which otherwise makes v0.10.0+'s --fast arm look artificially worse
+        # against an older release with no such probe. Every release before
+        # #393 predates the feature entirely and simply never reads this env
+        # var, so exporting it for the whole rest of the script is a no-op for
+        # every other arm -- safe to set unconditionally, not just around the
+        # fg-labs invocations.
+        FG_LABS_WARMUP_LOG="$OUTDIR/runs/fg-labs-default.default.warmup.stderr.log"
+        if [ -f "$FG_LABS_WARMUP_LOG" ]; then
+            FG_LABS_LOCKSTEP_N=$(grep -oE 'phase-2 SMEM lockstep width: [0-9]+' "$FG_LABS_WARMUP_LOG" \
+                | grep -oE '[0-9]+$' | tail -1 || true)
+            if [ -n "$FG_LABS_LOCKSTEP_N" ]; then
+                export BWA3_SMEM_LOCKSTEP_N="$FG_LABS_LOCKSTEP_N"
+                echo "pinned BWA3_SMEM_LOCKSTEP_N=$FG_LABS_LOCKSTEP_N from the warmup probe" >&2
+            else
+                echo "WARNING: could not find a phase-2 SMEM lockstep width line in $FG_LABS_WARMUP_LOG -- today's candidate's measured --fast rows will pay the per-invocation probe cost" >&2
+            fi
+        else
+            echo "WARNING: $FG_LABS_WARMUP_LOG missing -- fg-labs-default's warmup likely failed; today's candidate's measured --fast rows will pay the per-invocation probe cost" >&2
+        fi
 
         # Interleaved measured cycles: REP-OUTER / ARM-INNER, so a monotonic
         # drift across the job's wall-clock lands on every arm equally rather
