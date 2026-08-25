@@ -68,6 +68,7 @@ IMAGE_TAG = config.get("image_tag")
 
 from bwa_mem3_bench import aws_config as _aws_config
 from bwa_mem3_bench import minibwa_sha as _minibwa_sha
+from bwa_mem3_bench.arena_arms import front_load_fast_arms
 from bwa_mem3_bench.golden import golden_backed_samples
 
 _AWS = _aws_config.load()

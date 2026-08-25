@@ -395,6 +395,15 @@ class ThreadScalingStep:
 # skipping, long enough that a transient neighbour does not dominate the sample.
 _DEFAULT_HOST_PROBE_SECONDS = 10.0
 
+# Seconds per PER-LABEL host-contention probe the arena takes after every
+# label's reps finish, when `arena.label_probe_seconds` is absent. Shares
+# `sweep_host_probe_seconds`'s "cheap and frequent" rationale, not
+# `host_probe_seconds`'s "two readings total" one: ~13-14 labels x 2 modes
+# means one probe per label instead of one per whole job, so it must stay
+# small enough that a 2 s tax x ~26 labels (~1 minute) stays negligible
+# against an hour-plus arena job.
+_DEFAULT_LABEL_PROBE_SECONDS = 2.0
+
 # Seconds per host-contention probe for the regular per-cell sweep
 # (`align_fg_labs`), when `sweep_host_probe_seconds` is absent. Deliberately far
 # below tachyon's own 10 s default, which is sized for the ladder's ~45-minute
@@ -453,6 +462,12 @@ class Arena:
     reps: int
     threads: int
     host_probe_seconds: float = _DEFAULT_HOST_PROBE_SECONDS
+    # Wall-clock budget for the PER-LABEL tachyon probe `align_arena` takes
+    # once each label's reps are done -- see
+    # `bwa_mem3_bench.arena_arms.front_load_fast_arms`'s module docstring for
+    # the drift this diagnoses. Distinct from `host_probe_seconds`, which
+    # brackets the WHOLE job (one "pre" and one "post" reading only).
+    label_probe_seconds: float = _DEFAULT_LABEL_PROBE_SECONDS
 
 
 @dataclass(frozen=True)
@@ -1095,7 +1110,8 @@ def _arena_from(raw: Any, *, samples: dict[str, Sample], archs: dict[str, Arch])
     :return: the validated `Arena`.
     :raises ValueError: on a missing key, unknown sample/arch, an empty
         `archs` list, a `reps`/`threads` value that is not an integer >= 1, or
-        a `host_probe_seconds` that is not a finite number > 0.
+        a `host_probe_seconds`/`label_probe_seconds` that is not a finite
+        number > 0.
     """
     if not isinstance(raw, dict):
         raise ValueError(f"`arena` must be a mapping; got {raw!r}")
@@ -1129,12 +1145,26 @@ def _arena_from(raw: Any, *, samples: dict[str, Sample], archs: dict[str, Arch])
             f"`arena.host_probe_seconds` must be a finite number > 0; got {raw_probe!r}"
         )
 
+    # Same rigour, same reason: pasted into `align_arena`'s shell body
+    # (`emit-host-probe "label-${label}" {params.label_probe_seconds}`).
+    raw_label_probe = raw.get("label_probe_seconds", _DEFAULT_LABEL_PROBE_SECONDS)
+    if (
+        isinstance(raw_label_probe, bool)
+        or not isinstance(raw_label_probe, (int, float))
+        or not math.isfinite(raw_label_probe)
+        or raw_label_probe <= 0
+    ):
+        raise ValueError(
+            f"`arena.label_probe_seconds` must be a finite number > 0; got {raw_label_probe!r}"
+        )
+
     return Arena(
         sample=sample,
         archs=list(raw_archs),
         reps=_as_positive_int("`arena`", "reps", raw["reps"]),
         threads=_as_positive_int("`arena`", "threads", raw["threads"]),
         host_probe_seconds=float(raw_probe),
+        label_probe_seconds=float(raw_label_probe),
     )
 
 
