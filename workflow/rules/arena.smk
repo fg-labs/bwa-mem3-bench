@@ -120,34 +120,51 @@ the job's total drift the fragile metric can accumulate; per-submission
 shuffling stops whichever label is newest from always landing in the same
 (possibly worst) position.
 
-Warmup: per-label, not per-job. One additional UNMEASURED warmup runs
-immediately before EACH label's own measured reps (not once for the whole
-arm list up front) -- mirrors the project's own bare-metal reproduction
-protocol (CLAUDE.md's "reproduce with interleaved runs and discarded
-warmups"), which caught page-cache and allocator warm-up trends
-masquerading as a binary difference.
+Warmup: per-rep cat, not per-label alignment. An untimed page-cache
+top-off (`prewarm_arm` below: `cat` of that label's own index files + the
+fastqs) runs immediately before EVERY measured rep -- not once per label,
+and not by running a full alignment.
 
-This replaced an earlier design where ALL arms warmed once, in the
-front-loaded/shuffled order, before ANY measured rep began -- so a label's
-own warmup could be separated from its own measured cycle by every OTHER
-arm's warmup and measured runs happening in between, providing essentially
-no protection against cross-arm page-cache eviction. A real c8a/c8g arena
-run (golden SHA 371a1819, confirmed via the per-label `meminfo.jsonl`
-snapshot -- see Instrumentation below) caught this concretely: `process_s`
-fell nearly monotonically release-over-release on both archs, while `wall_s`
-did not -- e.g. c8a v0.6.0's wall_s (84.58s) was HIGHER than both v0.5.0's
-(66.78s) and v0.7.0's (62.39s) despite `process_s` falling smoothly across
-all three. Within one affected label's own 3 reps, `wall_s` showed a clear
-DECAY (rep1 much higher than rep2, higher than rep3) while `process_s`
-stayed flat -- consistent with rep1 re-faulting-in page-cache-evicted
-reference-index pages that a DIFFERENT tool's index format (or bwa-mem2's
-own doubled index) evicted while running as the immediately preceding arm in
-the shuffled default-mode block. Folding warmup into each label's own loop
-iteration closes that gap: the working set a label's reps need is now warmed
-at most one label-switch away from when it is actually measured, not up to
-~25 arms away. The SMEM-lockstep pin (below) is deliberately NOT derived
-from any label's own warmup any more, for the same reason: front-loading
-means `fg-labs-fast` can now run its own warmup+reps before
+This is the second of two fixes layered on top of the original fixed-order
+host-drift bug (front-loading + seeded shuffling + label-major reps, above).
+The FIRST fix folded a full-alignment warmup into each label's own loop
+iteration, immediately before its own measured reps, which closed the
+CROSS-ARM eviction bias: a real c8a/c8g arena run (golden SHA 371a1819)
+confirmed `process_s` fell nearly monotonically release-over-release on both
+archs while `wall_s` did not -- e.g. c8a v0.6.0's wall_s (84.58s) was HIGHER
+than both v0.5.0's (66.78s) and v0.7.0's (62.39s) despite `process_s` falling
+smoothly across all three.
+
+A FOLLOW-UP real arena run with `--trace`'s per-tick `io_in` (real
+disk-read bytes, not just page faults) showed that fix left a residual
+problem: for large-index tools, ONE untimed full-alignment pass does not
+fully populate the page cache on a memory-constrained host (32GB RAM;
+bwa-mem2-format tools reach 15-22GB RSS). `v060`'s own `io_in` DECLINED
+across its own warmup -> rep1 -> rep2 -> rep3 (1.09M -> 0.96M -> 0.375M ->
+0.092M) -- 3-4 full passes to converge, not one. Root cause, confirmed by
+reading `FMI_search.cpp`'s `load_index()` (both bwa-mem2 upstream and every
+bwa-mem3 release `_mm_malloc` a FRESH heap buffer and `pread`/`fread` the
+on-disk index into it, rather than aliasing mmap'd pages -- a deliberate
+tradeoff for transparent-hugepage coverage on the hot Occ-lookup loop, per
+that file's own comment): index LOAD transiently needs close to 2x the
+index's own size (the file's page-cache copy, plus the heap copy being
+built). For bwa-mem2-upstream's ~21GB index that is ~43GB against a 32GB
+swapless host, which the data confirms: its own `io_in` never converges,
+plateauing flat (~2.8M) across every rep -- a structural ceiling no warmup
+design can close (only more RAM or `shm` would, both out of scope here --
+see "Prewarm: cat, not shm" below). `v060` is the marginal case a warmup
+CAN fix (~15-16GB index, right at the edge of that same host).
+
+A full-alignment warmup cannot close this gap efficiently: its own RSS
+(14-22GB) competes with itself for the SAME cache room it is trying to
+populate. A plain `cat` costs none of that -- near-zero RSS, so it can
+spend the whole page-cache budget on the file it is warming -- and
+repeating it before EVERY rep (not once per label) is what actually
+converges: rep 2's pre-cat IS the second pass, rep 3's the third, done
+untimed instead of leaking into `wall_s`.
+
+The SMEM-lockstep pin (below) is deliberately NOT derived from any label's
+own prewarm: front-loading means `fg-labs-fast` can run its own reps before
 `fg-labs-default`'s turn ever comes up, so the pin is set from a dedicated
 probe invocation instead.
 
@@ -180,18 +197,26 @@ question the release bless actually asks: did THIS release change behaviour.
 Best-effort and non-blocking -- a header mismatch is recorded, not fatal.
 
 Prewarm: cat, not shm. `align_fg_labs` excludes index load from the timed
-region via `bwa-mem2 shm`, but `shm` may postdate some of the older releases
-just as plausibly as `--fast` and `--bam=0` do (see above), and upstream
-bwa-mem2 has never had it at all (`align_baseline`'s own docstring). So every
-arm here -- bwa-mem3 (every release), bwa-mem2.upstream, bwa, and minibwa
-alike -- is warmed the SAME way `align_baseline`/`align_bwa`/`align_minibwa`
-already do: an untimed `cat` of each index family's sidecars into
-`/dev/null` before the loop starts, and every timed run emits SAM piped
-through `samtools view -u` rather than any binary's native BAM writer (which
-`--bam=0` may also not be universal). This trades a little fidelity against
-`align_fg_labs`'s numbers (which use the native writer) for one uniform
-measurement technique every arm here can be compared against — the arena's
-rows are compared against EACH OTHER, not against `trials.wall_seconds`.
+region via `bwa-mem2 shm`, but `shm` support is not uniform across every arm
+here: `bwa` and every tracked bwa-mem3 release support it, but `minibwa` and
+upstream bwa-mem2 do not (confirmed directly against their sources -- no
+`shm`-related symbol exists in either). Using it selectively would change
+what the cross-tool ratios (`vs bwa`, `vs bwa-mem2`, `vs minibwa`) actually
+measure -- "pure compute under identical conditions" vs. "best achievable
+performance per tool's own capabilities" -- for exactly the two tools
+(bwa-mem3, bwa) that would benefit, muddying a codegen claim with a
+measurement-technique difference. So every arm here -- bwa-mem3 (every
+release), bwa-mem2.upstream, bwa, and minibwa alike -- is warmed the SAME
+way `align_baseline`/`align_bwa`/`align_minibwa` already do: an untimed
+`cat` of that arm's own index family's sidecars (plus the fastqs) into
+`/dev/null`, immediately before EVERY measured rep (see `prewarm_arm` and
+"Warmup: per-rep cat, not per-label alignment" above for why per-rep, not
+once per job). Every timed run emits SAM piped through `samtools view -u`
+rather than any binary's native BAM writer (which `--bam=0` may also not be
+universal). This trades a little fidelity against `align_fg_labs`'s numbers
+(which use the native writer) for one uniform measurement technique every
+arm here can be compared against — the arena's rows are compared against
+EACH OTHER, not against `trials.wall_seconds`.
 """
 
 from collections import namedtuple
@@ -383,17 +408,6 @@ rule align_arena:
 
         emit-host-meta "{wildcards.sha}" "{params.sample}" "{wildcards.arch}" 0 > {output.meta}
 
-        # Untimed page-cache prewarm across all three index families -- see the
-        # module docstring for why this replaces `bwa-mem2 shm` here. `|| true`
-        # on each: a missing sidecar (e.g. no upstream .bwt/.sa on an arch that
-        # never stages them) must not fail the whole job over a warm-cache nicety.
-        cat {input.ref[0]}.0123 {input.ref[0]}.bwt.2bit.64 {input.ref[0]}.pac \
-            > /dev/null 2>/dev/null || true
-        cat {input.ref[0]}.bwt {input.ref[0]}.sa {input.ref[0]}.pac \
-            > /dev/null 2>/dev/null || true
-        cat {input.ref[0]}.l2b {input.ref[0]}.mbw \
-            > /dev/null 2>/dev/null || true
-
         emit-host-probe pre {params.probe_seconds} > {output.host_probe}
         : > {output.meminfo}
 
@@ -478,6 +492,33 @@ rule align_arena:
             fi
         }}
 
+        # Untimed page-cache top-off of ONE arm's own index family + the
+        # fastqs, run immediately before EVERY measured rep -- see the module
+        # docstring's "Prewarm: cat, not shm" (per-rep, not once per job).
+        # Same three file lists, same technique, as the job's own index
+        # files: a plain `cat ... > /dev/null` populates the page cache
+        # identically whether it is read via mmap (minibwa) or fread'd into
+        # a heap buffer (bwa, bwa-mem2, every bwa-mem3 release) at `mem`
+        # time -- it is the SAME underlying file, and the kernel's page
+        # cache does not care which syscall touches it. `|| true` on each:
+        # a missing sidecar must not fail the whole job over a warm-cache
+        # nicety.
+        prewarm_arm() {{
+            local binary="$1"
+            case "$binary" in
+                bwa)
+                    cat {input.ref[0]}.bwt {input.ref[0]}.sa {input.ref[0]}.pac
+                    ;;
+                minibwa)
+                    cat {input.ref[0]}.l2b {input.ref[0]}.mbw
+                    ;;
+                *)
+                    cat {input.ref[0]}.0123 {input.ref[0]}.bwt.2bit.64 {input.ref[0]}.pac
+                    ;;
+            esac > /dev/null 2>/dev/null || true
+            cat {input.fastqs} > /dev/null 2>/dev/null || true
+        }}
+
         # `{{params.arm_spec}}` is a Snakemake `.format()` field -- it is
         # substituted into this script's LITERAL SOURCE TEXT before bash ever
         # parses it, not expanded at runtime the way a shell variable is. Its
@@ -506,17 +547,20 @@ rule align_arena:
         # script is a no-op for every other arm -- safe to set unconditionally,
         # not just around the fg-labs invocations.
         #
-        # This is deliberately a STANDALONE probe, not derived from
-        # `fg-labs-default`'s own per-label warmup below: front-loading puts
-        # `fg-labs-fast` ahead of `fg-labs-default` in $ARM_SPEC, so
-        # `fg-labs-fast`'s own warmup+reps can run to completion before
-        # `fg-labs-default`'s turn ever comes up. Deriving the pin from
-        # whichever label's warmup happens to run first would silently miss
-        # `fg-labs-fast`'s own measured rows, reintroducing the exact
-        # probe-cost inflation this pin exists to avoid. One dedicated
-        # full-alignment probe here (~similar cost to one measured rep) is
-        # simpler than special-casing the loop order below to guarantee
-        # `fg-labs-default` always warms first.
+        # This is deliberately a STANDALONE probe. The per-rep prewarm
+        # (`prewarm_arm`, above) is a plain `cat`, not an alignment, so it
+        # never prints the "phase-2 SMEM lockstep width" line this pin
+        # parses -- this probe is the ONLY rep=0 alignment invocation left
+        # in the whole job. Even if something else did run an early
+        # fg-labs-default alignment: front-loading puts `fg-labs-fast` ahead
+        # of `fg-labs-default` in $ARM_SPEC, so `fg-labs-fast`'s own reps can
+        # run to completion before `fg-labs-default`'s turn ever comes up,
+        # and deriving the pin from whichever label happened to run first
+        # would silently miss `fg-labs-fast`'s own measured rows,
+        # reintroducing the exact probe-cost inflation this pin exists to
+        # avoid. One dedicated full-alignment probe here (~similar cost to
+        # one measured rep) is simpler than special-casing the loop order
+        # below to guarantee `fg-labs-default` always runs first.
         #
         # Clear any INHERITED BWA3_SMEM_LOCKSTEP_N before parsing the probe
         # log. Without this, a value already present in the job's environment
@@ -572,21 +616,25 @@ rule align_arena:
         for entry in $ARM_SPEC; do
             IFS='|' read -r label binary mode <<< "$entry"
 
-            # This label's own UNMEASURED warmup, run immediately before its
-            # own measured reps -- see the module docstring's "Warmup:
-            # per-label, not per-job" rationale. Replaces the old
-            # warmup-every-arm-then-measure-every-arm design, whose warmup
-            # pass could be separated from a label's own measured cycle by
-            # every other arm's warmup AND measured runs happening in
-            # between.
-            set +e
-            run_arm "$label" "$binary" "$mode" 0 "$OUTDIR/runs/${{label}}.${{mode}}.warmup"
-            status=$?
-            set -e
-            [ $status -ne 0 ] && echo "warmup: $label/$mode failed (exit=$status), ignoring" >&2
-            rm -f "$OUTDIR/runs/${{label}}.${{mode}}.warmup.bam.raw"
-
             for rep in $(seq 1 {params.reps}); do
+                # Untimed per-rep page-cache top-off, run immediately before
+                # THIS rep -- see `prewarm_arm` above and the module
+                # docstring's "Prewarm: cat, not shm". Replaces the old
+                # per-label full-alignment warmup: a `cat` is far cheaper,
+                # covers the whole index file regardless of read count (no
+                # coverage gap the way a smaller-read-count run would have),
+                # and -- being near-zero RSS itself -- does not compete with
+                # its own working set for the cache room it is trying to
+                # populate the way a full alignment does. Doing this every
+                # rep (not just once per label) is what actually closes the
+                # gap: for a large-index label, ONE untimed pass does not
+                # fully populate cache on a memory-constrained host, so
+                # repeating the cat before each rep is the second/third
+                # convergence pass, done untimed instead of leaking into
+                # wall_s.
+                CAT_T0=$SECONDS
+                prewarm_arm "$binary"
+                echo "prewarm: label=$label mode=$mode rep=$rep cat_s=$((SECONDS - CAT_T0))" >&2
                 OUT="$OUTDIR/runs/${{label}}.${{mode}}.rep${{rep}}"
                 set +e
                 run_arm "$label" "$binary" "$mode" "$rep" "$OUT"
