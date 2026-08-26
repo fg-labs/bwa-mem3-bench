@@ -528,12 +528,19 @@ rule align_arena:
         # probe log is missing or lacks a probe line -- masquerading as a pin
         # from a probe that never actually ran this time.
         unset BWA3_SMEM_LOCKSTEP_N
+        # As of fg-labs/bwa-mem3 #414 the startup MLP probe is OPT-IN (default
+        # off); the pin probe must explicitly request it, or a #414+ candidate
+        # would echo its compiled default width here instead of measuring one.
+        # No-op on #393..#413 builds (probe on by default, this var unread) and
+        # on pre-#393 builds (feature absent). Unset again after the probe (see
+        # below) so the measured cycles never re-probe on the unpinned fallback.
+        export BWA3_SMEM_LOCKSTEP_PROBE=1
         PIN_PROBE_OUT="$OUTDIR/runs/fg-labs-default.default.pinprobe"
         set +e
         run_arm "fg-labs-default" "bwa-mem2.fg-labs" "default" 0 "$PIN_PROBE_OUT"
         status=$?
         set -e
-        [ $status -ne 0 ] && echo "pin probe: fg-labs-default failed (exit=$status), --fast rows will pay the per-invocation probe cost" >&2
+        [ $status -ne 0 ] && echo "pin probe: fg-labs-default failed (exit=$status); a parsed width will be used if available, otherwise --fast rows will run unpinned (the build's own default width resolution)" >&2
         rm -f "${{PIN_PROBE_OUT}}.bam.raw"
         PIN_PROBE_LOG="${{PIN_PROBE_OUT}}.stderr.log"
         if [ -f "$PIN_PROBE_LOG" ]; then
@@ -543,11 +550,16 @@ rule align_arena:
                 export BWA3_SMEM_LOCKSTEP_N="$FG_LABS_LOCKSTEP_N"
                 echo "pinned BWA3_SMEM_LOCKSTEP_N=$FG_LABS_LOCKSTEP_N from the pin probe" >&2
             else
-                echo "WARNING: could not find a phase-2 SMEM lockstep width line in $PIN_PROBE_LOG -- today's candidate's measured --fast rows will pay the per-invocation probe cost" >&2
+                echo "WARNING: could not find a phase-2 SMEM lockstep width line in $PIN_PROBE_LOG -- today's candidate's measured --fast rows will run unpinned (the build's own default width resolution)" >&2
             fi
         else
-            echo "WARNING: $PIN_PROBE_LOG missing -- pin probe likely failed; today's candidate's measured --fast rows will pay the per-invocation probe cost" >&2
+            echo "WARNING: $PIN_PROBE_LOG missing -- pin probe likely failed; today's candidate's measured --fast rows will run unpinned (the build's own default width resolution)" >&2
         fi
+        # Probe requested only for the dedicated pin invocation above; clear it so
+        # the measured cycles never re-probe -- on the unpinned fallback path a
+        # lingering opt-in would make a #414+ candidate pay the probe cost on
+        # every measured rep, the exact inflation this pin exists to avoid.
+        unset BWA3_SMEM_LOCKSTEP_PROBE
 
         # Interleaved measured cycles: LABEL-MAJOR (every rep of one label
         # runs back-to-back) over the FRONT-LOADED, PER-SUBMISSION-SEEDED

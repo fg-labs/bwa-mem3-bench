@@ -388,6 +388,9 @@ def _stub_run_arm_snippet() -> str:
     run_arm() {
         local out="$5"
         mkdir -p "$(dirname "$out")"
+        # Record whether the probe opt-in was live for THIS invocation, so the
+        # pin-probe test can assert the dedicated probe requested it.
+        printf '%s' "${BWA3_SMEM_LOCKSTEP_PROBE:-UNSET}" > "${out}.probe_env"
         if [ "${STUB_WRITE_LOG:-1}" = "1" ]; then
             printf '%s' "${STUB_LOG_CONTENT:-}" > "${out}.stderr.log"
         fi
@@ -419,6 +422,7 @@ def _run_lockstep_pin_snippet(
     {_stub_run_arm_snippet()}
     {_lockstep_pin_snippet()}
     echo "RESULT_PIN=${{BWA3_SMEM_LOCKSTEP_N:-UNSET}}"
+    echo "PROBE_AFTER=${{BWA3_SMEM_LOCKSTEP_PROBE:-UNSET}}"
     """
     return subprocess.run(  # noqa: S603, S607 -- fixed, test-owned Bash script
         ["bash", "-c", script], capture_output=True, text=True, check=False
@@ -439,6 +443,25 @@ def test_smem_lockstep_width_is_pinned_from_the_dedicated_pin_probe(tmp_path: Pa
     assert "pinned BWA3_SMEM_LOCKSTEP_N=24" in result.stderr
 
 
+def test_pin_probe_opts_into_the_probe_and_clears_it_afterward(tmp_path: Path) -> None:
+    """As of fg-labs/bwa-mem3#414 the startup MLP probe is opt-in (default off),
+    so the dedicated pin probe must export `BWA3_SMEM_LOCKSTEP_PROBE=1` for its
+    own invocation -- otherwise a #414+ candidate would echo its compiled
+    default width instead of measuring one. It must then clear the var before the
+    measured cycles, or the unpinned fallback path would make a #414+ build
+    re-probe on every measured rep (the inflation the pin exists to avoid)."""
+    result = _run_lockstep_pin_snippet(
+        tmp_path,
+        log_content="* Ref file: /ref/hs38\n[M::main_mem] phase-2 SMEM lockstep width: 24\n",
+    )
+    assert result.returncode == 0, result.stderr
+    probe_env = (tmp_path / "runs" / "fg-labs-default.default.pinprobe.probe_env").read_text()
+    assert probe_env == "1", f"pin probe must run with the probe opt-in set, got {probe_env!r}"
+    assert "PROBE_AFTER=UNSET" in result.stdout, (
+        "probe opt-in must be cleared before the measured cycles"
+    )
+
+
 def test_smem_lockstep_pin_warns_but_does_not_crash_when_the_probe_line_is_missing(
     tmp_path: Path,
 ) -> None:
@@ -449,6 +472,9 @@ def test_smem_lockstep_pin_warns_but_does_not_crash_when_the_probe_line_is_missi
     assert result.returncode == 0, result.stderr
     assert "RESULT_PIN=UNSET" in result.stdout
     assert "could not find a phase-2 SMEM lockstep width line" in result.stderr
+    assert "PROBE_AFTER=UNSET" in result.stdout, (
+        "probe opt-in must be cleared before the measured cycles even when no width line was found"
+    )
 
 
 def test_smem_lockstep_pin_warns_but_does_not_crash_when_the_probe_log_is_missing(
@@ -462,6 +488,33 @@ def test_smem_lockstep_pin_warns_but_does_not_crash_when_the_probe_log_is_missin
     assert "RESULT_PIN=UNSET" in result.stdout
     assert "pin probe: fg-labs-default failed" in result.stderr
     assert "pin probe likely failed" in result.stderr
+    assert "PROBE_AFTER=UNSET" in result.stdout, (
+        "probe opt-in must be cleared before the measured cycles even when the "
+        "probe invocation itself failed to write a log"
+    )
+
+
+def test_smem_lockstep_pin_still_pins_a_parsed_width_after_a_nonzero_run_arm_exit(
+    tmp_path: Path,
+) -> None:
+    """`run_arm` can exit nonzero after still writing a usable stderr.log (e.g.
+    a late-stage failure after the probe line was already emitted) -- parsing
+    below does not gate on `$status`, so the width is pinned regardless. The
+    failure warning printed immediately after `run_arm` returns must not claim
+    the rows "will run unpinned" in that case, since they will not be."""
+    result = _run_lockstep_pin_snippet(
+        tmp_path,
+        log_content="* Ref file: /ref/hs38\n[M::main_mem] phase-2 SMEM lockstep width: 24\n",
+        exit_code=1,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "RESULT_PIN=24" in result.stdout
+    assert "pinned BWA3_SMEM_LOCKSTEP_N=24" in result.stderr
+    assert "pin probe: fg-labs-default failed" in result.stderr
+    assert "a parsed width will be used if available" in result.stderr, (
+        "the failure warning must hedge on a still-parseable width rather than "
+        "unconditionally claiming an unpinned fallback"
+    )
 
 
 def test_smem_lockstep_pin_snippet_ignores_an_inherited_env_var(
