@@ -102,9 +102,9 @@ _SAMPLE_ARM_SPEC = (
 )
 _SAMPLE_ARM_SPEC_COUNT = 7
 # The align_arena rule declares exactly one arm-spec-iterating `for` loop --
-# warmup is now folded into each label's own iteration of the measured loop
-# (see the module docstring's "Warmup: per-label, not per-job") rather than
-# running as a separate pass with its own loop. It must use the safe form.
+# the per-rep cat prewarm runs inside it (see the module docstring's
+# "Warmup: per-rep cat, not per-label alignment") rather than as a separate
+# pass with its own loop. It must use the safe form.
 _EXPECTED_ARM_SPEC_LOOP_COUNT = 1
 
 
@@ -520,35 +520,144 @@ def test_measured_cycle_is_label_major_not_rep_major() -> None:
         "`for rep in $(seq ...)` (inner) in the measured cycle -- got the "
         "reverse, which is the old rep-major shape this rule moved away from"
     )
-    # Exactly one of each: warmup is folded into this same loop (see
-    # `test_per_label_warmup_precedes_its_own_measured_reps` below), not run
-    # as a separate pass with its own `for entry in $ARM_SPEC`.
+    # Exactly one of each: the per-rep cat prewarm runs inside this same
+    # loop (see `test_per_rep_prewarm_precedes_each_measured_rep` below),
+    # not as a separate pass with its own `for entry in $ARM_SPEC`.
     assert body.count("for entry in $ARM_SPEC; do") == 1
     assert body.count("for rep in $(seq 1 {params.reps}); do") == 1
 
 
-def test_per_label_warmup_precedes_its_own_measured_reps() -> None:
-    """Regression test for the within-label cache-eviction bug the per-label
-    warmup restructuring fixes: each label's own UNMEASURED warmup call must
-    run INSIDE that label's own `for entry in $ARM_SPEC` iteration, before
-    its `for rep in ...` loop -- not once for the whole arm list up front, in
-    a separate loop whose warmup could be separated from its own label's
-    measured cycle by every other arm's warmup and measured runs happening
-    in between (confirmed via a real arena run's `meminfo.jsonl`: `wall_s`
-    showed a rep1 >> rep2 > rep3 decay on affected labels while `process_s`
-    stayed flat -- see the module docstring)."""
+def test_per_rep_prewarm_precedes_each_measured_rep() -> None:
+    """Regression test for the residual within-label decay the per-rep cat
+    prewarm fixes: `prewarm_arm` must run INSIDE the `for rep in ...` loop,
+    before `run_arm`, for EVERY rep -- not once per label via a full
+    alignment (the design this replaced). A real arena run's `--trace`
+    `io_in` data showed one untimed full-alignment pass does not fully
+    populate the page cache for large-index tools on a memory-constrained
+    host; repeating a cheap `cat` before every rep is what actually
+    converges -- see the module docstring's "Warmup: per-rep cat, not
+    per-label alignment"."""
     body = _measured_cycle_body()
     entry_idx = body.index("for entry in $ARM_SPEC; do")
-    warmup_idx = body.index('run_arm "$label" "$binary" "$mode" 0 ')
     rep_idx = body.index("for rep in $(seq 1 {params.reps}); do")
-    assert entry_idx < warmup_idx < rep_idx, (
-        "expected the per-label warmup call (rep=0) to appear inside the "
-        "`for entry in $ARM_SPEC` loop, before its `for rep in ...` loop -- "
-        f"got entry_idx={entry_idx}, warmup_idx={warmup_idx}, rep_idx={rep_idx}"
+    prewarm_idx = body.index('prewarm_arm "$binary"')
+    run_arm_idx = body.index('run_arm "$label" "$binary" "$mode" "$rep" ')
+    assert entry_idx < rep_idx < prewarm_idx < run_arm_idx, (
+        "expected prewarm_arm to run inside the `for rep in ...` loop, "
+        "before run_arm for that rep -- got "
+        f"entry_idx={entry_idx}, rep_idx={rep_idx}, "
+        f"prewarm_idx={prewarm_idx}, run_arm_idx={run_arm_idx}"
     )
-    # Exactly one rep=0 warmup call per label iteration -- a second one would
-    # mean warmup is (again) running as its own separate pass.
-    assert body.count('run_arm "$label" "$binary" "$mode" 0 ') == 1
+    # Exactly one call site -- the rep loop itself (running `reps` times) is
+    # what gives multiple passes, not multiple calls within one rep.
+    assert body.count('prewarm_arm "$binary"') == 1
+
+
+def test_no_per_label_full_alignment_warmup_remains() -> None:
+    """Regression guard against reintroducing the per-label full-alignment
+    warmup (rep=0) this fix replaced with a cheap per-rep `cat`. The ONLY
+    `run_arm` call with a literal `0` rep argument left in the file must be
+    the standalone SMEM-lockstep pin probe (`fg-labs-default`, explicitly
+    named), not a generic per-label warmup keyed off `$label`/`$binary`."""
+    text = ARENA_SMK.read_text()
+    assert 'run_arm "$label" "$binary" "$mode" 0 ' not in text, (
+        "found a per-label rep=0 warmup call -- this was replaced by the "
+        "per-rep prewarm_arm cat; see the module docstring's "
+        '"Warmup: per-rep cat, not per-label alignment"'
+    )
+    assert text.count('run_arm "fg-labs-default" "bwa-mem2.fg-labs" "default" 0 ') == 1
+
+
+def test_global_one_time_index_cat_prewarm_is_removed() -> None:
+    """Regression guard: the OLD job-start-only `cat` prewarm (all three
+    index families, once, before any arm ran) must not reappear alongside
+    the per-rep one -- it was superseded, not supplemented, since it could
+    not protect a label running later in a ~14-22-arm job from intervening
+    arms' eviction (the same gap the per-label full-alignment warmup left
+    for large indices)."""
+    text = ARENA_SMK.read_text()
+    preamble_start = text.index('mkdir -p "$OUTDIR/runs"')
+    preamble_end = text.index("emit-host-probe pre", preamble_start)
+    preamble = text[preamble_start:preamble_end]
+    assert "cat {input.ref[0]}" not in preamble, (
+        "expected the once-per-job index cat prewarm to be gone from the "
+        "job preamble -- it is now per-rep via prewarm_arm"
+    )
+
+
+def _prewarm_arm_snippet() -> str:
+    """Extracts the `prewarm_arm() { ... }` function body from `align_arena`,
+    unescaping Snakemake's `.format()` `{{`/`}}` literal-brace escapes and
+    standing in plain paths for the substituted `{input.*}` fields, so it can
+    run standalone as valid bash."""
+    text = ARENA_SMK.read_text()
+    start = text.index("prewarm_arm() {{")
+    end = text.index("\n        }}", start) + len("\n        }}")
+    snippet = text[start:end].replace("{{", "{").replace("}}", "}")
+    return snippet.replace("{input.ref[0]}", "ref").replace("{input.fastqs}", "r1.fq r2.fq")
+
+
+def _run_prewarm_arm(binary: str) -> list[str]:
+    """Runs `prewarm_arm(binary)` with `cat` replaced by a stub that logs its
+    file arguments to a side file (not stdout, since the production case
+    block redirects stdout/stderr to `/dev/null` -- a side-file log survives
+    that redirect since it is the stub's own explicit target, not FD 1/2).
+    Returns the file arguments every `cat` invocation received, in order,
+    letting the dispatch tests below assert on exactly which files each
+    binary case touches without needing real index files on disk."""
+    script = f"""
+    set -euo pipefail
+    LOGFILE=$(mktemp)
+    cat() {{
+        for f in "$@"; do printf '%s\\n' "$f" >> "$LOGFILE"; done
+    }}
+    {_prewarm_arm_snippet()}
+    prewarm_arm {binary}
+    unset -f cat
+    cat "$LOGFILE"
+    """
+    result = subprocess.run(  # noqa: S603, S607 -- fixed, test-owned Bash script
+        ["bash", "-c", script], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    return result.stdout.strip().splitlines()
+
+
+def test_prewarm_arm_cats_bwas_own_index_files() -> None:
+    assert _run_prewarm_arm("bwa") == ["ref.bwt", "ref.sa", "ref.pac", "r1.fq", "r2.fq"]
+
+
+def test_prewarm_arm_cats_minibwas_own_index_files() -> None:
+    assert _run_prewarm_arm("minibwa") == ["ref.l2b", "ref.mbw", "r1.fq", "r2.fq"]
+
+
+def test_prewarm_arm_cats_the_bwa_mem2_format_index_for_every_other_binary() -> None:
+    """Covers `bwa-mem2.fg-labs`, every `bwa-mem3.<label>`, and
+    `bwa-mem2.upstream` -- all three share the SAME on-disk index files, so
+    the `*)` branch is correct for all of them, not just the fg-labs one."""
+    expected = ["ref.0123", "ref.bwt.2bit.64", "ref.pac", "r1.fq", "r2.fq"]
+    for binary in ("bwa-mem2.fg-labs", "bwa-mem3.v060", "bwa-mem2.upstream"):
+        assert _run_prewarm_arm(binary) == expected, binary
+
+
+def test_prewarm_arm_tolerates_missing_index_files(tmp_path: Path) -> None:
+    """A missing sidecar (e.g. no upstream .bwt/.sa on an arch that never
+    stages them) must not fail the job over a warm-cache nicety -- the same
+    `|| true` contract the old global prewarm already relied on. Uses the
+    REAL `cat` (not the logging stub) against files that don't exist, so
+    this actually exercises the fallback rather than assuming it."""
+    script = f"""
+    set -euo pipefail
+    cd {tmp_path}
+    {_prewarm_arm_snippet()}
+    prewarm_arm bwa
+    echo DONE
+    """
+    result = subprocess.run(  # noqa: S603, S607 -- fixed, test-owned Bash script
+        ["bash", "-c", script], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "DONE" in result.stdout
 
 
 def test_tricorder_records_a_per_tick_trace() -> None:
