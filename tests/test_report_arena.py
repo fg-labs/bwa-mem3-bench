@@ -47,38 +47,47 @@ def _row(conn: sqlite3.Connection, *, label: str, mode: str, rep: int, wall: flo
     )
 
 
-def _seed_db(db_path: Path) -> None:
-    """One arch, the full arm shape: 3 comparators, 4 historical releases (one
-    SKIPPED), fg-labs-default, fg-labs-fast -- inserted in the SAME order
-    `align_arena`'s shell loop and `ingest_arena` produce it in (arm_spec
-    order: comparators, then historical releases oldest-first, then today's
-    candidate), since `build_arena_table` derives release order from DB
-    insertion order (`id`), not from the label text.
+# The full arm shape as (label, mode, rep, wall) rows: 3 comparators, 4
+# historical releases (one SKIPPED), fg-labs-default, fg-labs-fast. The four
+# release labels are REAL `ARENA_RELEASES` entries in real chronological order
+# (v021 < v022 < v030 < v040), because `build_arena_table` now ranks releases
+# by that canonical ladder (`_release_chronology`), not by DB insertion order.
+# Wall times are chosen so every ratio is distinct and easy to eyeball:
+#   v021: 100.0   (oldest tracked -- no predecessor)
+#   v022:  90.0   predecessor v021 -> 100/90
+#   v030: SKIPPED (no wall time at all)
+#   v040:  80.0   predecessor v022 (v030 skipped) -> 90/80
+#   fg-labs-default: 70.0   predecessor v040 (latest measured) -> 80/70
+#   fg-labs-fast:    65.0   never gets a vs_prior_release
+# v040 has a --fast sibling; v021/v022 (predate --fast) and v030 (SKIPPED, no
+# stock wall) deliberately do not -- covers the three release_speedup cases:
+# both columns populated, --fast blank, both blank.
+_FIXTURE_ROWS: list[tuple[str, str, int, float | None]] = [
+    ("bwa", "default", 1, 50.0),
+    ("minibwa", "default", 1, 60.0),
+    ("bwa-mem2-upstream", "default", 1, 55.0),
+    ("v021", "default", 1, 100.0),
+    ("v022", "default", 1, 90.0),
+    ("v030", "default", 1, None),
+    ("v040", "default", 1, 80.0),
+    ("fg-labs-default", "default", 1, 70.0),
+    ("fg-labs-fast", "fast", 1, 65.0),
+    ("v040-fast", "fast", 1, 40.0),
+]
 
-    Wall times are chosen so every ratio is distinct and easy to eyeball:
-      v021: 100.0   (oldest tracked -- no predecessor)
-      v022:  90.0   predecessor v021 -> 100/90
-      v030: SKIPPED (no wall time at all)
-      v040:  80.0   predecessor v022 (v030 skipped) -> 90/80
-      fg-labs-default: 70.0   predecessor v040 (latest measured) -> 80/70
-      fg-labs-fast:    65.0   never gets a vs_prior_release
-    """
+
+def _seed_rows(db_path: Path, rows: list[tuple[str, str, int, float | None]]) -> None:
+    """Insert `rows` in the given order, so a test can control DB insertion
+    order (`arena.id`) independently of chronology."""
     conn = connect(db_path)
     upsert_run(conn, fg_labs_sha=FG_LABS_SHA, status="complete")
+    for label, mode, rep, wall in rows:
+        _row(conn, label=label, mode=mode, rep=rep, wall=wall)
 
-    _row(conn, label="bwa", mode="default", rep=1, wall=50.0)
-    _row(conn, label="minibwa", mode="default", rep=1, wall=60.0)
-    _row(conn, label="bwa-mem2-upstream", mode="default", rep=1, wall=55.0)
-    _row(conn, label="v021", mode="default", rep=1, wall=100.0)
-    _row(conn, label="v022", mode="default", rep=1, wall=90.0)
-    _row(conn, label="v030", mode="default", rep=1, wall=None)
-    _row(conn, label="v040", mode="default", rep=1, wall=80.0)
-    _row(conn, label="fg-labs-default", mode="default", rep=1, wall=70.0)
-    _row(conn, label="fg-labs-fast", mode="fast", rep=1, wall=65.0)
-    # v040 has a --fast sibling; v021/v022 (predate --fast) and v030 (SKIPPED,
-    # no stock wall at all) deliberately do not -- covers the three release_
-    # speedup cases: both columns populated, --fast blank, both blank.
-    _row(conn, label="v040-fast", mode="fast", rep=1, wall=40.0)
+
+def _seed_db(db_path: Path) -> None:
+    """Seed the standard fixture in chronological / arm-spec order."""
+    _seed_rows(db_path, _FIXTURE_ROWS)
 
 
 def _vs_prior(df: pd.DataFrame, label: str) -> float | None:
@@ -107,6 +116,46 @@ def test_vs_prior_release_walks_each_releases_own_predecessor(tmp_path: Path) ->
         90.0 / 80.0,
         "v040's predecessor must be v022 (the last release that actually measured), "
         "not v030 (SKIPPED, no wall time) and not a fixed 'last historical label'",
+    )
+
+
+def test_vs_prior_release_survives_shuffled_insertion_order(tmp_path: Path) -> None:
+    """The bug this guards: `align_arena` writes arms to arena.tsv in an order
+    that `arena_arms.front_load_fast_arms` SHUFFLES per run (seeded by the SHA),
+    so `arena.id` insertion order is NOT chronological. The report used to sort
+    the release chain by `min_id` and so divided each release by whatever label
+    happened to precede it in the shuffle -- a real, silent corruption seen in
+    the 0.11.0 arena (c8a v090 reported v030/v090, its shuffled neighbour).
+
+    Insert the SAME fixture rows in a deliberately anti-chronological order; the
+    ratios must be identical to the in-order `_seed_db` case. Under the old
+    `min_id` sort this fails on at least v040 and fg-labs-default.
+    """
+    db_path = tmp_path / "benchmark.db"
+    scrambled = [
+        _FIXTURE_ROWS[7],  # fg-labs-default (newest) inserted FIRST
+        _FIXTURE_ROWS[6],  # v040
+        _FIXTURE_ROWS[3],  # v021
+        _FIXTURE_ROWS[9],  # v040-fast
+        _FIXTURE_ROWS[5],  # v030 (SKIPPED)
+        _FIXTURE_ROWS[0],  # bwa
+        _FIXTURE_ROWS[4],  # v022
+        _FIXTURE_ROWS[8],  # fg-labs-fast
+        _FIXTURE_ROWS[1],  # minibwa
+        _FIXTURE_ROWS[2],  # bwa-mem2-upstream
+    ]
+    assert sorted(scrambled) == sorted(_FIXTURE_ROWS), "scramble must be a permutation"
+    _seed_rows(db_path, scrambled)
+    df = build_arena_table(db_path=db_path, fg_labs_sha=FG_LABS_SHA)
+
+    assert _vs_prior(df, "v021") is None, "the oldest tracked release has no predecessor"
+    _assert_vs_prior_close(df, "v022", 100.0 / 90.0, "chronology must ignore insertion order")
+    assert _vs_prior(df, "v030") is None, "a SKIPPED release has nothing to compare"
+    _assert_vs_prior_close(
+        df, "v040", 90.0 / 80.0, "v040's predecessor is v022 by ladder order, not by min_id"
+    )
+    _assert_vs_prior_close(
+        df, "fg-labs-default", 80.0 / 70.0, "the candidate's predecessor is the newest release"
     )
 
 

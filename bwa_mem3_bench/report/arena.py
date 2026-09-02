@@ -36,15 +36,16 @@ from pathlib import Path
 
 import pandas as pd
 
+from bwa_mem3_bench.arena_ladder import arena_releases
 from bwa_mem3_bench.storage.queries import query_df
 
 EM_DASH = "—"
 
 # Arm labels never compared against the prior release (they aren't a bwa-mem3
-# build at all) or against fg-labs (they ARE the fg-labs build). Kept here
-# rather than imported from workflow/rules/arena.smk: the report layer reads
-# only the DB, never the Snakefile, so the three non-bwa-mem3 labels are named
-# directly -- they are a stable public contract of the arena.tsv format.
+# build at all) or against fg-labs (they ARE the fg-labs build). Named directly
+# rather than derived -- they are a stable public contract of the arena.tsv
+# format, unlike the release labels (which DO come from arena.smk via
+# `_release_chronology`, because that is where their chronological ORDER lives).
 _NON_BWA_MEM3_LABELS = frozenset({"bwa", "bwa-mem2-upstream", "minibwa"})
 
 # `build_release_speedup_table`'s documented column set -- shared by its two
@@ -64,7 +65,7 @@ def _arena_rows(db_path: Path, fg_labs_sha: str) -> pd.DataFrame:
     return query_df(
         db_path,
         """
-        SELECT id, arch, label, mode, wall_seconds, process_seconds
+        SELECT arch, label, mode, wall_seconds, process_seconds
         FROM arena
         WHERE fg_labs_sha = ?
         ORDER BY arch, label, mode
@@ -73,25 +74,51 @@ def _arena_rows(db_path: Path, fg_labs_sha: str) -> pd.DataFrame:
     )
 
 
+def _release_chronology() -> dict[str, int]:
+    """Chronological rank for every bwa-mem3 default-mode arm label.
+
+    ``0`` is the oldest tracked release, increasing to today's candidate
+    (``fg-labs-default``), which is always the newest. The order is
+    ``ARENA_RELEASES`` (``workflow/rules/arena.smk``), read via
+    ``arena_ladder.arena_releases()`` -- the SAME oldest-first ledger the base
+    image builds every release binary from.
+
+    Chronology MUST come from that canonical list, NOT from arena.tsv / DB row
+    order: ``arena_arms.front_load_fast_arms`` deliberately SHUFFLES the arm
+    order every run (seeded by the SHA under measurement) to defeat a
+    ``--fast``-vs-host-drift confound, so ``arena.id`` insertion order carries
+    no chronology whatsoever. Ordering the release chain by ``min_id`` -- as
+    this module did until that shuffle landed -- divided each release by a
+    RANDOM predecessor (e.g. c8a v090 reported as v030/v090, its shuffled
+    neighbour, not v080/v090).
+    """
+    ranks = {label: rank for rank, (label, _sha) in enumerate(arena_releases())}
+    ranks["fg-labs-default"] = len(ranks)  # today's candidate is newest of all
+    return ranks
+
+
 def _bwa_mem3_release_chain(arch_group: pd.DataFrame) -> pd.DataFrame:
     """Every historical release's default-mode row, plus fg-labs-default's, in
-    chronological order.
+    chronological order (oldest first).
 
-    Ordered by `min_id` -- the DB row insertion order -- rather than by label
-    text, so it needs no knowledge of `workflow/rules/arena.smk`'s
-    ARENA_RELEASES list (the report layer reads only the DB; see the module
-    docstring). That order faithfully reflects release chronology because
-    `align_arena`'s shell loop writes each rep's arms in `_arena_arms()` order
-    (oldest release first) and `ingest_arena` parses the TSV top to bottom.
-    fg-labs-default's own arm always runs last in each rep, so it naturally
-    sorts last here too. Shared by `build_arena_table`'s `vs_prior_release`
-    and `build_release_speedup_table`, so the two can never define "release
-    order" differently.
+    Ordered by `_release_chronology()` -- the canonical ARENA_RELEASES order --
+    NOT by DB insertion order, which `front_load_fast_arms` shuffles per run
+    (see that helper and `_release_chronology` for why the DB carries no
+    chronology). Shared by `build_arena_table`'s `vs_prior_release` and
+    `build_release_speedup_table`, so the two can never define "release order"
+    differently.
     """
-    return arch_group[
+    chronology = _release_chronology()
+    chain = arch_group[
         (arch_group["mode"] == "default")
         & ~arch_group["label"].isin(_NON_BWA_MEM3_LABELS | {"fg-labs-fast"})
-    ].sort_values("min_id")
+    ].copy()
+    # An unmapped label (not in ARENA_RELEASES and not fg-labs-default) sorts
+    # last via NaN, rather than raising -- but that shouldn't happen: the
+    # filter above leaves only default-mode bwa-mem3 arms, all of which are
+    # blessed releases or the candidate. `test_arena_ladder` guards the ladder.
+    chain["_chronological_rank"] = chain["label"].map(chronology)
+    return chain.sort_values("_chronological_rank")
 
 
 def _fast_sibling_label(label: str) -> str:
@@ -128,11 +155,6 @@ def build_arena_table(*, db_path: Path, fg_labs_sha: str) -> pd.DataFrame:
         median_process_s=("process_seconds", "median"),
         n_reps=("wall_seconds", lambda s: int(s.notna().sum())),
         n_skipped=("wall_seconds", lambda s: int(s.isna().sum())),
-        # The row's DB insertion order (SQLite `id`, autoincrement) --
-        # NOT a data value in its own right, used only to recover each
-        # release's true chronological position. See the comment on `chain`
-        # below for why this is the only order the report layer can use.
-        min_id=("id", "min"),
     )
 
     def _fg_labs_default_wall(arch_group: pd.DataFrame) -> float | None:
@@ -297,7 +319,6 @@ def build_release_speedup_table(
 
     grouped = raw.groupby(["label", "mode"], as_index=False).agg(
         median_wall_s=("wall_seconds", "median"),
-        min_id=("id", "min"),
     )
 
     baseline_row = grouped[(grouped["label"] == baseline_label) & (grouped["mode"] == "default")]
