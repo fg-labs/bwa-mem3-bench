@@ -11,6 +11,7 @@ from bwa_mem3_bench.commands import bench as bench_module
 from bwa_mem3_bench.commands import (
     bless_baseline,
     bless_golden,
+    bless_release,
     build,
     build_base,
     collect,
@@ -34,6 +35,7 @@ def main(argv: list[str] | None = None) -> None:
             "collect": collect,
             "bless-baseline": bless_baseline,
             "bless-golden": bless_golden,
+            "bless-release": bless_release,
             "upload-data": upload_data,
             "render-profile": render_profile,
             "sync-local": sync_local,

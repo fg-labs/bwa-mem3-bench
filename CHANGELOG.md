@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `cli bless-release --fg-labs-sha <candidate> --golden-ref-sha <prev>` — a
+  fail-fast preflight for a candidate-release bless. Checks that the candidate
+  is a well-formed, not-already-blessed SHA, that the golden is the most
+  recently blessed release, and that the arena ladder is consistent across
+  `docs/release-allowances.yaml`, `docker/Dockerfile.base`, and
+  `ARENA_RELEASES`; then prints the ordered plan. Launches and promotes
+  nothing. `docs/RELEASE.md` is the accompanying authoritative runbook.
+- v0.10.0 (`371a1819`) added to the arena release ladder (`ARENA_RELEASES` +
+  a `docker/Dockerfile.base` build block), backfilling a release that was
+  blessed but never benched by the arena. `bwa_mem3_bench/arena_ladder.py` +
+  `tests/test_arena_ladder.py` now guard the three representations against
+  drift. Requires a `cli build-base --push` before the v0.10.0 arm runs.
 - Per-arch Docker image selection. Each Batch worker can now pull a
   different ECR image based on its arch's `baseline_arch` field in
   `config/archs.yaml`, derived via `Arch.image_uri(...)` on the
