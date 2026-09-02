@@ -58,6 +58,8 @@ _RELEASE_SPEEDUP_COLUMNS = [
     "stock_speedup",
     "fast_median_wall_s",
     "fast_speedup",
+    "stock_vs_prev_speedup",
+    "fast_vs_prev_speedup",
 ]
 
 
@@ -215,6 +217,18 @@ def _format_speedup(value: float | None) -> str:
     return f"{float(value):.2f}x"
 
 
+def _format_vs_prev(value: float | None) -> str:
+    """Format the release-over-release speedup ratio (blank for None).
+
+    Three decimals, since consecutive releases are often within ~1% and a
+    2-decimal ``x`` would collapse many rows to the same value. ``>1`` means
+    faster than the previous release shown, ``<1`` slower.
+    """
+    if value is None or pd.isna(value):
+        return EM_DASH
+    return f"{float(value):.3f}x"
+
+
 def render_arena_markdown(*, db_path: Path, fg_labs_sha: str) -> str:
     """Return the arena markdown report as a string."""
     df = build_arena_table(db_path=db_path, fg_labs_sha=fg_labs_sha)
@@ -304,13 +318,25 @@ def build_release_speedup_table(
     README's release-history speedup table.
 
     Columns: ``label``, ``stock_median_wall_s``, ``stock_speedup``,
-    ``fast_median_wall_s``, ``fast_speedup``. Speedup is `baseline_label`'s
-    (default ``bwa``, the same comparator `_arena_arms` always runs -- see
-    arena.smk) own median wall on the SAME arena host divided by this row's
-    median wall -- ``>1`` means the release is FASTER than the baseline. A
-    NaN ``fast_*`` pair means the release predates ``--fast`` or its `-fast`
-    arm was recorded SKIPPED (see arena.smk's "Never hard-fail on an old
-    binary"), not a missing measurement.
+    ``fast_median_wall_s``, ``fast_speedup``, ``stock_vs_prev_speedup``,
+    ``fast_vs_prev_speedup``. Speedup is `baseline_label`'s (default ``bwa``, the
+    same comparator `_arena_arms` always runs -- see arena.smk) own median wall
+    on the SAME arena host divided by this row's median wall -- ``>1`` means the
+    release is FASTER than the baseline. A NaN ``fast_*`` pair means the release
+    predates ``--fast`` or its `-fast` arm was recorded SKIPPED (see arena.smk's
+    "Never hard-fail on an old binary"), not a missing measurement.
+
+    ``*_vs_prev_speedup`` is the release-over-release speedup vs the PREVIOUS
+    release in this chronological table -- ``prev_wall / this_wall``, so ``>1``
+    is faster (shorter wall) and ``<1`` slower. "Previous" is the last release
+    ABOVE this one that actually measured in that mode, so a SKIPPED release
+    does not create a gap. The FIRST bwa-mem3 release's stock predecessor is
+    upstream ``bwa-mem2`` -- bwa-mem3 is the bwa-mem2 successor, so its lineage
+    "previous version" is bwa-mem2 (absent on ARM, where upstream has no build,
+    so the first release reads blank there). ``--fast`` has no bwa-mem2
+    counterpart, so the first release with a ``--fast`` arm still has no fast
+    predecessor. Because the chain is chronological (`_bwa_mem3_release_chain`)
+    and every arm ran on one fixed host, this is a real same-host delta.
     """
     raw = _arena_rows(db_path, fg_labs_sha)
     raw = raw[raw["arch"] == arch]
@@ -337,7 +363,18 @@ def build_release_speedup_table(
     def _speedup(wall: float | None) -> float | None:
         return baseline_wall / wall if wall is not None and baseline_wall is not None else None
 
+    def _vs_prev(prev: float | None, cur: float | None) -> float | None:
+        # prev / cur -- the release-over-release speedup ratio (>1 = faster).
+        return prev / cur if prev is not None and cur is not None else None
+
     rows: list[dict[str, object]] = []
+    # Seed the stock chain with upstream bwa-mem2: bwa-mem3 is the bwa-mem2
+    # successor, so the FIRST bwa-mem3 release's "previous version" is bwa-mem2,
+    # not a blank. Absent on ARM (upstream has no NEON build), where the first
+    # release then has no predecessor and reads blank. `--fast` has no bwa-mem2
+    # counterpart, so the fast chain is not seeded.
+    prev_stock: float | None = _wall("bwa-mem2-upstream", "default")
+    prev_fast: float | None = None
     for chain_row in _bwa_mem3_release_chain(grouped).itertuples(index=False):
         stock_wall = _wall(chain_row.label, "default")
         fast_wall = _wall(_fast_sibling_label(chain_row.label), "fast")
@@ -348,8 +385,16 @@ def build_release_speedup_table(
                 "stock_speedup": _speedup(stock_wall),
                 "fast_median_wall_s": fast_wall,
                 "fast_speedup": _speedup(fast_wall),
+                "stock_vs_prev_speedup": _vs_prev(prev_stock, stock_wall),
+                "fast_vs_prev_speedup": _vs_prev(prev_fast, fast_wall),
             }
         )
+        # Advance "previous" only past a release that measured, so a SKIPPED
+        # release does not become a phantom predecessor for the next row.
+        if stock_wall is not None:
+            prev_stock = stock_wall
+        if fast_wall is not None:
+            prev_fast = fast_wall
     if not rows:
         return pd.DataFrame(columns=_RELEASE_SPEEDUP_COLUMNS)
     return pd.DataFrame(rows)
@@ -385,14 +430,27 @@ def render_release_speedup_markdown(
             f"- **speedup** — `{baseline_label}`'s own median wall on this "
             "SAME host, divided by the release's median wall. `>1` means the "
             f"release is FASTER than `{baseline_label}`.",
+            "- **vs_prev** — release-over-release speedup vs the PREVIOUS "
+            "release, on the same host: `prev_wall / this_wall`, `>1` faster, "
+            "`<1` slower. The first release's stock predecessor is upstream "
+            "`bwa-mem2` (bwa-mem3's ancestor); blank where absent (ARM) or for "
+            "the first `--fast` arm.",
             "- A blank `--fast` pair means the release predates the flag or "
             "its arm was recorded SKIPPED, not a missing measurement.",
             "",
         ]
     )
 
-    headers = ["release", "stock_wall_s", "stock_speedup", "fast_wall_s", "fast_speedup"]
-    aligners = ["---", "---:", "---:", "---:", "---:"]
+    headers = [
+        "release",
+        "stock_wall_s",
+        "stock_speedup",
+        "fast_wall_s",
+        "fast_speedup",
+        "stock_vs_prev",
+        "fast_vs_prev",
+    ]
+    aligners = ["---", "---:", "---:", "---:", "---:", "---:", "---:"]
     body_rows: list[str] = []
     for row in df.itertuples(index=False):
         cells = [
@@ -401,6 +459,8 @@ def render_release_speedup_markdown(
             _format_speedup(row.stock_speedup),
             _format_seconds(row.fast_median_wall_s),
             _format_speedup(row.fast_speedup),
+            _format_vs_prev(row.stock_vs_prev_speedup),
+            _format_vs_prev(row.fast_vs_prev_speedup),
         ]
         body_rows.append("| " + " | ".join(cells) + " |")
 
