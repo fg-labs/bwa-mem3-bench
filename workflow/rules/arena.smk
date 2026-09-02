@@ -53,7 +53,7 @@ ladder) because it names literal binaries the builder base image bakes in:
                             no ARM build (`_has_upstream_baseline`), so c8g's
                             arm list is one shorter than c8a's.
   - `minibwa`            -- lh3/minibwa (timing only, matches `align_minibwa`).
-  - `v021` .. `v100`     -- every prior BLESSED bwa-mem3 release
+  - `v021` .. `v110`     -- every prior BLESSED bwa-mem3 release
                             (docs/release-allowances.yaml `to_sha`s), built
                             fresh in `docker/Dockerfile.base` and installed as
                             `bwa-mem3.<label>` -- see that file for why the
@@ -239,6 +239,7 @@ ARENA_RELEASES = [
     ("v080", "4acb09562b5109e2f26d85b0158fde35d03a4fb8"),
     ("v090", "4d341b7ba81246509a87680fa569ac3210af540e"),
     ("v100", "371a1819802c2962b768c3b165f0d1319a6a75b3"),
+    ("v110", "3c355b854e3180b1d8a0745a91a8b72716009ef5"),
 ]
 
 # The release immediately preceding today's candidate -- the one arm the
