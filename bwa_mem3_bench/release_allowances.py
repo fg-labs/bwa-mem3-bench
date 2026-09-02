@@ -98,7 +98,7 @@ def load_allowances(path: Path) -> list[ReleaseAllowance]:
     return entries
 
 
-def _sha_prefix_match(a: str, b: str) -> bool:
+def sha_prefix_match(a: str, b: str) -> bool:
     """True when non-empty ``a`` and ``b`` are prefix-compatible (either is a
     prefix of the other) — mirrors the CLI's tolerance of abbreviated SHAs."""
     return bool(a) and bool(b) and (a.startswith(b) or b.startswith(a))
@@ -106,8 +106,8 @@ def _sha_prefix_match(a: str, b: str) -> bool:
 
 def _entry_matches(entry: ReleaseAllowance, query: str) -> bool:
     """True when ``query`` prefix-matches the entry's ``to_sha`` or any alias."""
-    return _sha_prefix_match(entry.to_sha, query) or any(
-        _sha_prefix_match(a, query) for a in entry.aliases
+    return sha_prefix_match(entry.to_sha, query) or any(
+        sha_prefix_match(a, query) for a in entry.aliases
     )
 
 
