@@ -64,17 +64,27 @@ _MIN_REPS_FOR_CV = 2
 # The tolerance exists because efficiency divides two measured timings, so a
 # hair over 100% is ordinary noise. The effective rejection boundary is therefore
 # 100 + 2 = 102%, and only a baseline reading STRICTLY above that is refused.
-# Beyond it, the ladder's T(1) is not a fact worth dividing by, and REJECTING the
-# baseline is the honest response: gating
-# against an inflated bar demands the new release also scale superlinearly,
-# which no release can do.
+# Beyond it, the ladder's T(1) is not a fact worth dividing by, so gating on
+# EFFICIENCY against an inflated bar — which would demand the new release also
+# scale superlinearly, which no release can do — is refused. But refusing the
+# efficiency bar is not the same as declining to gate: the rung still carries two
+# measured absolute times, T(n)_new and T(n)_prev, and neither depends on T(1).
+# So the gate falls back to comparing those directly (`basis=absolute`, see
+# `_scaling_gate`) — the new release's per-rung PROCESS() time (the same compute
+# basis efficiency uses, NOT end-to-end wall) may rise at most
+# `PERF_REGRESSION_THRESHOLD_PCT` over the previous release's. A release faster at
+# every rung passes; one slower at any rung fails; the inflated T(1) never enters
+# the arithmetic. Punting the whole ladder with no verdict, as an earlier version
+# did, let a real per-rung slowdown ride through unnoticed.
 #
 # Not hypothetical. The v0.8.0 golden recorded 101-104% at five rungs off a
 # single unreplicated T(1); re-measured it came back 8.4% faster (1341.22 ->
-# 1228.33 s, 3 reps, 1.3% spread). Against that bar a v0.9.0 that was faster at
-# every rung in absolute terms reported a 9.81 pp REGRESSION. bwa-mem3-bench#52
-# replicates every rung so T(1) is no longer a single draw; this is the second
-# half of that fix, for baselines already recorded under the old ladder.
+# 1228.33 s, 3 reps, 1.3% spread). Against that EFFICIENCY bar a v0.9.0 that was
+# faster at every rung in absolute terms reported a 9.81 pp REGRESSION — exactly
+# the false positive the absolute fallback now converts into the pass it should
+# always have been. bwa-mem3-bench#52 replicates every rung so T(1) is no longer a
+# single draw; the absolute fallback is the second half of that fix, for baselines
+# already recorded under the old ladder.
 _PERFECT_EFFICIENCY_PCT = 100.0
 _SUPERLINEAR_TOLERANCE_PP = 2.0
 
@@ -300,6 +310,16 @@ def _scaling_efficiency(db_path: Path, sha: str) -> pd.DataFrame:
                     "arch": arch,
                     "threads": n,
                     "efficiency_pct": t1 / (n * float(row["t"])) * 100.0,
+                    # The rung's own median T(n) on the SAME compute basis the
+                    # efficiency above uses (`t` = PROCESS() time, wall only as a
+                    # fallback when PROCESS() is unparseable), carried so the gate
+                    # can fall back to an absolute per-rung comparison when the
+                    # baseline's efficiency is too inflated to divide by. Grading
+                    # the fallback on PROCESS() (not wall) keeps it measuring the
+                    # same quantity as the efficiency basis it substitutes for; a
+                    # wall-only regression is out of scope for the scaling gate,
+                    # exactly as it is for the efficiency metric. See `_scaling_gate`.
+                    "t_s": float(row["t"]),
                 }
             )
     return pd.DataFrame(out)
@@ -329,8 +349,14 @@ def _unusable_baselines(prev: pd.DataFrame) -> set[tuple[str, str]]:
     }
 
 
-def _scaling_gate(db_path: Path, new_sha: str, prev_sha: str, max_drop_pp: float) -> pd.DataFrame:
-    """Gate #3: thread-scaling efficiency must not regress vs the last release.
+def _scaling_gate(
+    db_path: Path,
+    new_sha: str,
+    prev_sha: str,
+    max_drop_pp: float,
+    perf_threshold_pct: float = PERF_REGRESSION_THRESHOLD_PCT,
+) -> pd.DataFrame:
+    """Gate #3: thread-scaling must not regress vs the last release.
 
     Gated release-over-release rather than against absolute targets: an absolute
     floor would be a guess, while the previous release is a measured fact. Same
@@ -340,9 +366,26 @@ def _scaling_gate(db_path: Path, new_sha: str, prev_sha: str, max_drop_pp: float
     run after this gate is introduced, which has no predecessor to compare
     against and must not fail closed for that reason alone.
 
-    A baseline whose efficiency exceeds 100% by more than
-    `_SUPERLINEAR_TOLERANCE_PP` — i.e. reads above 102% — is REJECTED rather than
-    used as a bar, and the whole ladder goes with it. See `_unusable_baselines`.
+    Two comparison BASES, chosen per ladder:
+
+    - `efficiency`: the default. `E(n) = T(1)/(n*T(n))` may drop at most
+      `max_drop_pp` vs the previous release.
+    - `absolute`: the fallback when the baseline's efficiency exceeds 100% by
+      more than `_SUPERLINEAR_TOLERANCE_PP` (reads above 102%). Such a ladder's
+      `T(1)` is inconsistent with the `T(n)` beside it, so its efficiency is not
+      a bar worth dividing by (see `_unusable_baselines`). Rather than punt the
+      whole ladder with no verdict — which lets a genuine per-rung slowdown pass
+      unnoticed — the gate compares ABSOLUTE per-rung times: the new release's
+      `T(n)` may exceed the previous release's by at most `perf_threshold_pct`
+      at each shared rung. `T(n)` is PROCESS() time (the same compute basis the
+      efficiency metric uses), NOT end-to-end wall — so the fallback measures the
+      same quantity as the efficiency bar it stands in for, and a wall-only
+      regression is out of scope for the scaling gate just as it is for the
+      efficiency metric. This is the honest comparison an inflated efficiency
+      hides: a release faster at every rung passes, and one slower at any rung
+      fails, without either side's `T(1)` entering the arithmetic.
+
+    The `basis` column records which rule graded each rung.
     """
     new = _scaling_efficiency(db_path, new_sha)
     prev = _scaling_efficiency(db_path, prev_sha)
@@ -352,15 +395,26 @@ def _scaling_gate(db_path: Path, new_sha: str, prev_sha: str, max_drop_pp: float
     if merged.empty:
         return merged
     merged["drop_pp"] = merged["efficiency_pct_prev"] - merged["efficiency_pct_new"]
+    # Absolute per-rung slowdown: positive means the new release is slower.
+    merged["abs_delta_pct"] = (merged["t_s_new"] - merged["t_s_prev"]) / merged["t_s_prev"] * 100.0
     unusable = _unusable_baselines(prev)
-    merged["verdict"] = [
-        "unusable_baseline"
-        if (sample, arch) in unusable
-        else ("REGRESSION" if drop > max_drop_pp else "ok")
-        for sample, arch, drop in zip(
-            merged["sample"], merged["arch"], merged["drop_pp"], strict=True
-        )
-    ]
+    bases: list[str] = []
+    verdicts: list[str] = []
+    for sample, arch, drop, abs_delta in zip(
+        merged["sample"],
+        merged["arch"],
+        merged["drop_pp"],
+        merged["abs_delta_pct"],
+        strict=True,
+    ):
+        if (sample, arch) in unusable:
+            bases.append("absolute")
+            verdicts.append("REGRESSION" if abs_delta > perf_threshold_pct else "ok")
+        else:
+            bases.append("efficiency")
+            verdicts.append("REGRESSION" if drop > max_drop_pp else "ok")
+    merged["basis"] = bases
+    merged["verdict"] = verdicts
     return merged.sort_values(["sample", "arch", "threads"]).reset_index(drop=True)
 
 
@@ -371,28 +425,44 @@ def _scaling_section(scaling: pd.DataFrame) -> list[str]:
     rejected = sorted(
         {
             f"{s}/{a}"
-            for s, a, v in zip(scaling["sample"], scaling["arch"], scaling["verdict"], strict=True)
-            if v == "unusable_baseline"
+            for s, a, b in zip(scaling["sample"], scaling["arch"], scaling["basis"], strict=True)
+            if b == "absolute"
         }
     )
+    reject_pct = _PERFECT_EFFICIENCY_PCT + _SUPERLINEAR_TOLERANCE_PP
     note = (
         [
             "",
-            f"> **Baseline rejected for {', '.join(rejected)}.** The previous release's "
-            f"ladder reads above {_PERFECT_EFFICIENCY_PCT + _SUPERLINEAR_TOLERANCE_PP:.0f}% "
+            f"> **Efficiency baseline rejected for {', '.join(rejected)}.** The previous "
+            f"release's ladder reads above {reject_pct:.0f}% "
             "efficiency, i.e. more than n-fold faster on n threads. That means its T(1) is "
-            "inconsistent with the T(n) beside it, and since T(1) is the divisor at every "
-            "rung it inflates the whole ladder — so these rungs are reported, not gated. "
-            "Compare the absolute per-rung times instead, or re-measure the baseline's T(1).",
+            "inconsistent with the T(n) beside it, and since T(1) is the divisor at every rung "
+            "it inflates the whole ladder — so its efficiency is not a bar worth dividing by. "
+            "These rungs are gated on `basis=absolute` instead: the new release's per-rung "
+            "PROCESS() time (`new_s`, the same compute basis the efficiency metric uses — NOT "
+            "end-to-end wall) may exceed the previous release's (`prev_s`) by at most the "
+            "performance-regression threshold, with neither side's T(1) in the arithmetic.",
         ]
         if rejected
         else []
     )
     return [
-        "## Gate #3 — thread-scaling efficiency vs last release",
+        "## Gate #3 — thread-scaling vs last release",
         "",
         md_table(
-            ["sample", "arch", "threads", "prev_eff_%", "new_eff_%", "drop_pp", "verdict"],
+            [
+                "sample",
+                "arch",
+                "threads",
+                "prev_eff_%",
+                "new_eff_%",
+                "drop_pp",
+                "prev_s",
+                "new_s",
+                "abs_Δ_%",
+                "basis",
+                "verdict",
+            ],
             scaling[
                 [
                     "sample",
@@ -401,6 +471,10 @@ def _scaling_section(scaling: pd.DataFrame) -> list[str]:
                     "efficiency_pct_prev",
                     "efficiency_pct_new",
                     "drop_pp",
+                    "t_s_prev",
+                    "t_s_new",
+                    "abs_delta_pct",
+                    "basis",
                     "verdict",
                 ]
             ]
@@ -509,7 +583,13 @@ def check_regression(
     # non-failing) when either run has no ladder — including the first run after
     # this gate lands, which has no predecessor and must not fail for that.
     scaling_cfg = load_config(Path(REPO_ROOT) / "config").thread_scaling
-    scaling = _scaling_gate(db_path, new_sha, prev_sha, scaling_cfg.max_efficiency_drop_pp)
+    scaling = _scaling_gate(
+        db_path,
+        new_sha,
+        prev_sha,
+        scaling_cfg.max_efficiency_drop_pp,
+        PERF_REGRESSION_THRESHOLD_PCT,
+    )
     scaling_fails = (
         scaling[scaling["verdict"] == "REGRESSION"] if not scaling.empty else pd.DataFrame()
     )
@@ -530,7 +610,10 @@ def check_regression(
         f"per-sample registry budget (margin {DRIFT_MARGIN_PCT}%).",
         f"- Gate #2 (vs golden / last release): concordance ≥ {CONCORDANCE_THRESHOLD}%.",
         f"- Gate #3 (thread scaling): efficiency may drop at most "
-        f"{scaling_cfg.max_efficiency_drop_pp} pp vs the last release.",
+        f"{scaling_cfg.max_efficiency_drop_pp} pp vs the last release; when the "
+        f"baseline's efficiency is unusable (super-linear), per-rung PROCESS() time "
+        f"(the same compute basis the efficiency metric uses) may rise at most "
+        f"{PERF_REGRESSION_THRESHOLD_PCT}% instead.",
         f"- Performance regression threshold: ≤ {PERF_REGRESSION_THRESHOLD_PCT}%",
         "- Reps aggregated by median; perf verdict is `REGRESSION` /",
         "  `improvement` only when the new and prev wall_s ranges do **not**",
