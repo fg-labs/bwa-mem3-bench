@@ -545,3 +545,37 @@ allowances:
     # pinned to the tag resolves here, same pattern as v0.5.0 through v0.9.0.
     aliases:
       - bb0e7cf7021c838dcfe8fb262f06dea47300867f   # v0.10.0 release tag (squash-merge of #373, metadata-only diff from 371a1819)
+  - to_sha: 3c355b854e3180b1d8a0745a91a8b72716009ef5
+    pr: fg-labs/bwa-mem3#413
+    date: 2026-09-02
+    summary: >-
+      v0.11.0: NO alignment change vs the v0.10.0 golden (371a1819). Gate #2 is
+      100.0000% on every golden-backed cell, and the arena's fgumi full-content
+      check is byte-identical (0 diffs) against v0.10.0 on both c8a and c8g. This
+      is a performance + hardening release: every speed change is byte-identical
+      by construction — adaptive extension band default-on (#420), a vectorized
+      byte-identical ksw_global2 SIMD kernel (#418), certified 8/16-bit
+      adaptive-band probe rungs (#427/#428/#429), extension-DP job dedup (#415),
+      per-read chaining B-tree reuse (#416), K-only SMEM backward extension
+      (#432), CIGAR/occ prefetches (#425/#190), and a NEON-specific SYM 16-bit
+      prepass (#411). The only output-touching changes are padded-lane zeroing
+      fixes (AVX-512 #439, AVX2 #434, mate-rescue #436) plus MSan gates (#437) —
+      they correct uninitialized-but-never-read padding, so the record stream is
+      unchanged. Measured on the arena (interleaved, one host per arch, wgs-5M,
+      3 reps): Graviton4 (c8g) −10.0% wall / −9.6% PROCESS() default and −5.3%
+      --fast; AVX-512 (c8a) flat (−0.9% wall — already the tighter build). The
+      apparent +2% on c8a --fast is host-drift, not codegen: its PROCESS() timer
+      is flat (−0.2%) while wall moved. The full regression gate (concordance +
+      perf + thread scaling) PASSES.
+    expected_drift_pct: 0.0
+    # Golden lives under 3c355b85 — the release-please #413 head, benched at
+    # reps=5 (target bless_release) across the six sweep archs, plus the arena
+    # (c8a/c8g) and the thread-scaling ladder. #413 squash-merged to the shipped
+    # v0.11.0 tag (2ba7fd7) on 2026-09-02; that tag's tree is 082cd90's code plus
+    # a metadata-only version/CHANGELOG bump — no src/, ext/ or Makefile change —
+    # so the shipped tag is the same binary as 3c355b85 and this golden is the
+    # correct v0.11.0 reference. 3c355b85 stays fetchable via refs/pull/413/head,
+    # so the arena's Dockerfile.base can still `git fetch` and build it. Aliased
+    # so a vs-golden run pinned to the tag resolves here, same pattern as v0.5.0+.
+    aliases:
+      - 2ba7fd7d5be80ff7bafdae933047a87a7f799c95   # v0.11.0 release tag (squash-merge of #413, metadata-only diff from 3c355b85)
