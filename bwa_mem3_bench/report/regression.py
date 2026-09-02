@@ -14,6 +14,15 @@ and explicitly do not fail the gate. This keeps Sapphire Rapids spot-pool
 noise (m7i / c7i, ~10-50% CV per CLAUDE.md) from masquerading as a real
 SHA-vs-SHA regression while still catching clean signals on the low-CV
 archs (c6a / c7a / c7g / c8g, ~1% CV).
+
+Two kinds of cell never carry a hard perf verdict, by two DIFFERENT mechanisms.
+Cells with < 2 reps on either side (a single point has no range — see
+`_MIN_REPS_FOR_PERF_GATE`) are classified `noisy`: they still appear in the perf
+table, but a `noisy` verdict never fails the gate. `truth: true` accuracy
+samples (graded by holodeck, run one rep by design, and already excluded from
+Gate #1) are dropped from the perf table entirely by `_build_perf_cells` — they
+get no perf row and no verdict at all, not a `noisy` one. Neither can fail the
+gate.
 """
 
 from __future__ import annotations
@@ -51,6 +60,14 @@ DRIFT_MARGIN_PCT = 0.001
 # Sample-stdev (ddof=1) is undefined for a single sample; report 0% CV
 # instead of NaN so the markdown table stays tidy.
 _MIN_REPS_FOR_CV = 2
+
+# A perf REGRESSION verdict rests on a range-overlap test (`new_min > prev_max`),
+# which needs a real range -- i.e. >= 2 reps -- on BOTH sides. With one rep a
+# "range" collapses to a single point, so the overlap test degenerates into a
+# bare point comparison that can never come out `noisy`: a lone draw on a high-CV
+# pool (m7i / c7i) would auto-fail the gate. Cells below this on either side are
+# graded `noisy` (non-gating) -- one measurement cannot separate signal from noise.
+_MIN_REPS_FOR_PERF_GATE = 2
 
 # Gate #3: the efficiency a perfectly-scaling run achieves, and how far past it
 # a BASELINE may read before the gate refuses to use it as a bar.
@@ -115,18 +132,55 @@ def _aggregate_perf(df: pd.DataFrame) -> pd.DataFrame:
 
 def _classify(
     delta_pct: float,
-    new_min: float,
-    new_max: float,
-    prev_min: float,
-    prev_max: float,
+    new_stats: tuple[float, float, float],
+    prev_stats: tuple[float, float, float],
 ) -> str:
+    """Classify a perf cell. Each ``*_stats`` is ``(min, max, n_reps)``."""
     if math.isnan(delta_pct):
         return "new_only"
+    new_min, new_max, n_new = new_stats
+    prev_min, prev_max, n_prev = prev_stats
+    # A hard REGRESSION / improvement verdict rests on a range-overlap test, which
+    # is only meaningful with >= 2 reps on both sides (see _MIN_REPS_FOR_PERF_GATE).
+    # Under-sampled cells -- e.g. a compat/accuracy sample that runs one rep, or a
+    # cell where spot scarcity landed only one -- are `noisy` (non-gating).
+    if n_new < _MIN_REPS_FOR_PERF_GATE or n_prev < _MIN_REPS_FOR_PERF_GATE:
+        return "noisy"
     if abs(delta_pct) <= PERF_REGRESSION_THRESHOLD_PCT:
         return "flat"
     if delta_pct > 0:
         return "REGRESSION" if new_min > prev_max else "noisy"
     return "improvement" if new_max < prev_min else "noisy"
+
+
+def _build_perf_cells(
+    new_df: pd.DataFrame, prev_df: pd.DataFrame, truth_samples: set[str]
+) -> pd.DataFrame:
+    """Per-(sample, arch) perf cells with medians, ranges, delta, and a `verdict`.
+
+    ``truth: true`` accuracy samples are dropped -- they are graded by holodeck,
+    not timed (see `check_regression`). Returned sorted by (arch, sample).
+    """
+    new_perf = _aggregate_perf(new_df[~new_df["sample"].isin(truth_samples)])
+    prev_perf = _aggregate_perf(prev_df[~prev_df["sample"].isin(truth_samples)])
+    cells = new_perf.merge(prev_perf, on=["sample", "arch"], suffixes=("_new", "_prev"), how="left")
+    cells["delta_pct"] = (
+        (cells["median_new"] - cells["median_prev"]) / cells["median_prev"]
+    ) * 100.0
+    cells["verdict"] = [
+        _classify(d, (nmn, nmx, nn), (pmn, pmx, pn))
+        for d, nmn, nmx, pmn, pmx, nn, pn in zip(
+            cells["delta_pct"],
+            cells["min_new"],
+            cells["max_new"],
+            cells["min_prev"],
+            cells["max_prev"],
+            cells["n_new"],
+            cells["n_prev"],
+            strict=False,
+        )
+    ]
+    return cells.sort_values(["arch", "sample"]).reset_index(drop=True)
 
 
 def _baseline_budget(conc_df: pd.DataFrame, registry: list[DivergenceEntry]) -> pd.DataFrame:
@@ -523,30 +577,14 @@ def check_regression(
     if new_df.empty:
         return False, f"# Regression gate: FAIL\n\n_No trials for {new_sha}._\n"
 
-    new_perf = _aggregate_perf(new_df)
-    prev_perf = _aggregate_perf(prev_df)
-
-    cells = new_perf.merge(
-        prev_perf,
-        on=["sample", "arch"],
-        suffixes=("_new", "_prev"),
-        how="left",
-    )
-    cells["delta_pct"] = (
-        (cells["median_new"] - cells["median_prev"]) / cells["median_prev"]
-    ) * 100.0
-    cells["verdict"] = [
-        _classify(d, nmn, nmx, pmn, pmx)
-        for d, nmn, nmx, pmn, pmx in zip(
-            cells["delta_pct"],
-            cells["min_new"],
-            cells["max_new"],
-            cells["min_prev"],
-            cells["max_prev"],
-            strict=False,
-        )
-    ]
-    cells = cells.sort_values(["arch", "sample"]).reset_index(drop=True)
+    # `truth: true` samples (sim-*) are ACCURACY benchmarks graded by holodeck
+    # against simulated truth, not wall-time perf targets -- they run one rep by
+    # design and are already excluded from Gate #1 (`_missing_baseline_cells`).
+    # Exclude them from the perf gate too, for the same reason: a noisy single-rep
+    # wall on m7i would otherwise fail a bless on a sample never meant to be timed.
+    config = load_config(Path(REPO_ROOT) / "config")
+    truth_samples = {name for name, s in config.samples.items() if s.truth}
+    cells = _build_perf_cells(new_df, prev_df, truth_samples)
 
     conc = (
         new_df[new_df["golden_concordance"].notna()]
@@ -617,7 +655,10 @@ def check_regression(
         f"- Performance regression threshold: ≤ {PERF_REGRESSION_THRESHOLD_PCT}%",
         "- Reps aggregated by median; perf verdict is `REGRESSION` /",
         "  `improvement` only when the new and prev wall_s ranges do **not**",
-        "  overlap (otherwise `noisy`, which does not fail the gate).",
+        "  overlap (otherwise `noisy`, which does not fail the gate). Cells with",
+        f"  < {_MIN_REPS_FOR_PERF_GATE} reps on either side are `noisy` (no range to",
+        "  test); `truth:` accuracy samples are excluded from this table and the",
+        "  gate entirely (not a perf target). Neither fails the gate.",
         "",
         "## Per-cell summary",
         "",

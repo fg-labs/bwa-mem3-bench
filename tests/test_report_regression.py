@@ -80,11 +80,17 @@ def test_regression_fails_on_concordance_below_threshold(tmp_path: Path) -> None
 
 
 def test_regression_fails_on_perf_regression_over_5_percent(tmp_path: Path) -> None:
+    """A real >5% regression fails -- but only with enough reps to form a range.
+
+    Uses multiple, non-overlapping reps (~7% over): a single-rep delta is now
+    correctly `noisy`, see `test_single_rep_cell_is_noisy_not_regression`.
+    """
     db = tmp_path / "b.db"
-    _seed(db, golden_pct=99.9999, perf_delta_pct=7.0)
+    _seed_multi(db, new_walls=[107, 108, 109], prev_walls=[100, 100.5, 101])
     ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old")
     assert ok is False
     assert "FAIL" in report
+    assert "REGRESSION" in report
 
 
 def _seed_multi(
@@ -185,6 +191,92 @@ def test_regression_reports_improvement_when_ranges_strictly_better(tmp_path: Pa
     assert ok is True
     assert "PASS" in report
     assert "improvement" in report
+
+
+def test_single_rep_cell_is_noisy_not_regression(tmp_path: Path) -> None:
+    """A cell with one rep per side cannot support a range-overlap test, so a big
+    delta must read `noisy`, not `REGRESSION`.
+
+    The old classifier compared single points (`new_min > prev_max`), so a lone
+    +20% draw on a high-CV pool (m7i / c7i) auto-failed the bless -- exactly the
+    0.11.0 false FAIL on the 1-rep `wgs-5M-alt-compat` c7i/m7i cells (spot
+    scarcity had landed only one rep). Same walls at >= 2 reps DO fail, per
+    `test_regression_fails_on_clean_multi_rep_regression`.
+    """
+    db = tmp_path / "b.db"
+    _seed_multi(db, new_walls=[120], prev_walls=[100])  # 1 rep each, +20%
+    ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old")
+    assert ok is True, "a single-rep delta is not evidence of a regression"
+    assert "PASS" in report
+    assert "noisy" in report
+    assert "REGRESSION" not in report.replace("`REGRESSION`", "")  # only the legend
+
+
+def _seed_sample_cell(
+    db: Path, *, sample: str, arch: str, new_walls: list[float], prev_walls: list[float]
+) -> None:
+    """Seed one (sample, arch) cell's wall_seconds on each SHA, no comparisons
+    (truth samples have no vs-golden row -- they're graded by holodeck)."""
+    conn = connect(db)
+    upsert_run(conn, fg_labs_sha="new", status="complete")
+    upsert_run(conn, fg_labs_sha="old", status="complete")
+    for sha, walls in (("old", prev_walls), ("new", new_walls)):
+        for rep, wall in enumerate(walls, start=1):
+            upsert_trial(
+                conn,
+                fg_labs_sha=sha,
+                sample=sample,
+                arch=arch,
+                rep=rep,
+                wall_seconds=wall,
+                max_rss_mb=1.0,
+                cpu_time=1.0,
+                io_read_mb=1.0,
+                io_write_mb=1.0,
+                mean_load=1.0,
+                reads_processed=1,
+                instance_type=None,
+                availability_zone=None,
+                spot_price=None,
+                status="ok",
+            )
+    conn.close()
+
+
+def test_truth_sample_is_excluded_from_the_perf_gate(tmp_path: Path) -> None:
+    """A `truth: true` accuracy sample (graded by holodeck, run one rep by design)
+    must not perf-gate: a clean, multi-rep, non-overlapping regression on it does
+    NOT fail the bless, and it does not appear in the perf table at all.
+
+    This is the 0.11.0 `sim-meth-place`/m7i false FAIL: a +33% m7i pool-shift on
+    an accuracy sample that is not a wall-time target. Truth samples are already
+    excluded from Gate #1 (`_missing_baseline_cells`); this extends that to perf.
+    """
+    db = tmp_path / "b.db"
+    # A delta that WOULD fail on a perf sample (non-overlapping ranges, +50%).
+    _seed_sample_cell(
+        db,
+        sample="sim-meth-place",
+        arch="m7i",
+        new_walls=[150, 155, 160],
+        prev_walls=[100, 101, 102],
+    )
+    ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old")
+    assert ok is True, "truth (accuracy) samples are not perf targets"
+    assert "sim-meth-place" not in report, "truth sample must not appear in the perf table"
+
+
+def test_non_truth_sample_with_the_same_delta_still_fails(tmp_path: Path) -> None:
+    """Control for the truth-exclusion test: the identical clean regression on a
+    NON-truth perf sample DOES fail, so the exclusion above is what spares the
+    truth sample -- not an accidentally-forgiving delta."""
+    db = tmp_path / "b.db"
+    _seed_sample_cell(
+        db, sample="wgs-5M", arch="c6a", new_walls=[150, 155, 160], prev_walls=[100, 101, 102]
+    )
+    ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old")
+    assert ok is False
+    assert "REGRESSION" in report
 
 
 # ── Gate #1: vs-upstream drift vs registry budget ──────────────────────────
