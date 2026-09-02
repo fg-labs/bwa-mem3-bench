@@ -302,6 +302,76 @@ def test_release_speedup_reports_stock_and_fast_vs_baseline(tmp_path: Path) -> N
     assert math.isclose(candidate["fast_speedup"], 50.0 / 65.0, rel_tol=TOL)
 
 
+def _vs_prev(row: pd.Series, col: str) -> float | None:
+    value = row[col]
+    return None if value is None or (isinstance(value, float) and math.isnan(value)) else value
+
+
+def test_release_speedup_vs_prev_walks_the_previous_measured_release(tmp_path: Path) -> None:
+    """`*_vs_prev_speedup` is prev_wall/this_wall vs the previous release row, and
+    a SKIPPED release is skipped so the next row compares to the last that
+    measured -- mirroring `vs_prior_release` in the arena table."""
+    db_path = tmp_path / "benchmark.db"
+    _seed_db(db_path)
+    df = build_release_speedup_table(db_path=db_path, fg_labs_sha=FG_LABS_SHA, arch=ARCH)
+
+    # v021 is the first release; its stock predecessor is upstream bwa-mem2
+    # (55.0 in the fixture) -> 55/100 = 0.55x.
+    assert math.isclose(
+        _vs_prev(_speedup_row(df, "v021"), "stock_vs_prev_speedup"), 55.0 / 100.0, rel_tol=TOL
+    )
+    # v022 stock 90 vs v021 100 -> 100/90 (faster)
+    assert math.isclose(
+        _vs_prev(_speedup_row(df, "v022"), "stock_vs_prev_speedup"), 100.0 / 90.0, rel_tol=TOL
+    )
+    # v030 is SKIPPED -> no value, and does not become v040's predecessor
+    assert _vs_prev(_speedup_row(df, "v030"), "stock_vs_prev_speedup") is None
+    # v040 stock 80 vs v022 90 (v030 skipped) -> 90/80
+    assert math.isclose(
+        _vs_prev(_speedup_row(df, "v040"), "stock_vs_prev_speedup"), 90.0 / 80.0, rel_tol=TOL
+    )
+    # candidate stock 70 vs v040 80 -> 80/70
+    assert math.isclose(
+        _vs_prev(_speedup_row(df, "fg-labs-default"), "stock_vs_prev_speedup"),
+        80.0 / 70.0,
+        rel_tol=TOL,
+    )
+
+
+def test_release_speedup_vs_prev_first_release_uses_bwa_mem2_as_predecessor(tmp_path: Path) -> None:
+    """The first bwa-mem3 release's stock `vs_prev` is upstream bwa-mem2 (its
+    lineage predecessor) -- and blank when no bwa-mem2 arm exists (e.g. ARM)."""
+    db_path = tmp_path / "benchmark.db"
+    _seed_db(db_path)
+    df = build_release_speedup_table(db_path=db_path, fg_labs_sha=FG_LABS_SHA, arch=ARCH)
+    # bwa-mem2-upstream (55.0) / v021 (100.0) = 0.55x -- same as v021's vs-bwa-mem2.
+    row = _speedup_row(df, "v021")
+    assert math.isclose(_vs_prev(row, "stock_vs_prev_speedup"), 55.0 / 100.0, rel_tol=TOL)
+
+    # Without a bwa-mem2 arm (as on ARM), the first release has no predecessor.
+    db2 = tmp_path / "no_upstream.db"
+    _seed_rows(db2, [r for r in _FIXTURE_ROWS if r[0] != "bwa-mem2-upstream"])
+    df2 = build_release_speedup_table(db_path=db2, fg_labs_sha=FG_LABS_SHA, arch=ARCH)
+    assert _vs_prev(_speedup_row(df2, "v021"), "stock_vs_prev_speedup") is None
+
+
+def test_release_speedup_vs_prev_reports_a_slower_fast_arm_below_one(tmp_path: Path) -> None:
+    """The first release with a `--fast` arm has no fast predecessor (blank); a
+    slower successor reports a speedup < 1, not a blank or a crash."""
+    db_path = tmp_path / "benchmark.db"
+    _seed_db(db_path)
+    df = build_release_speedup_table(db_path=db_path, fg_labs_sha=FG_LABS_SHA, arch=ARCH)
+
+    # v040-fast (40.0) is the first measured fast arm -> no fast predecessor.
+    assert _vs_prev(_speedup_row(df, "v040"), "fast_vs_prev_speedup") is None
+    # fg-labs-fast (65.0) vs v040-fast (40.0) -> 40/65 = 0.615x (slower, < 1)
+    assert math.isclose(
+        _vs_prev(_speedup_row(df, "fg-labs-default"), "fast_vs_prev_speedup"),
+        40.0 / 65.0,
+        rel_tol=TOL,
+    )
+
+
 def test_release_speedup_blanks_fast_when_the_release_predates_it(tmp_path: Path) -> None:
     """v021/v022 have no `-fast` sibling seeded at all (they predate --fast in
     real release history) -- must read as blank, not zero or an error."""
@@ -367,6 +437,8 @@ _EXPECTED_RELEASE_SPEEDUP_COLUMNS = [
     "stock_speedup",
     "fast_median_wall_s",
     "fast_speedup",
+    "stock_vs_prev_speedup",
+    "fast_vs_prev_speedup",
 ]
 
 
