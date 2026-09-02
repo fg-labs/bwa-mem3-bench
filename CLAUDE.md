@@ -24,6 +24,10 @@ design overview and `docs/data-setup.md` for input data sources.
 
 ## Running a benchmark end-to-end
 
+For blessing a release specifically, `docs/RELEASE.md` is the authoritative
+runbook (and `cli bless-release` runs its preflight); the steps below are the
+general benchmark flow.
+
 All commands are `pixi run python -m bwa_mem3_bench.cli <subcommand>`.
 
 1. **Deploy infrastructure (once)**: `cd cdk && cdk deploy --all`.
