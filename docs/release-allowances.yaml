@@ -586,3 +586,11 @@ allowances:
     # so a vs-golden run pinned to the tag resolves here, same pattern as v0.5.0+.
     aliases:
       - 2ba7fd7d5be80ff7bafdae933047a87a7f799c95   # v0.11.0 release tag (squash-merge of #413, metadata-only diff from 3c355b85)
+    # ADDENDUM (2026-09-03): the panel-twist-5M golden BAMs under this SHA were
+    # REGENERATED after this bless. panel-twist was found to be a mislabeled cat
+    # sample (SRR34589119, Felis catus) and replaced with human SRR37186773
+    # (MCF10A). The regenerated human panel is byte-identical to upstream bwa-mem2
+    # (Gate #1 drift 0.0000%, vs 0.0586% on the cat) with 8,016,716 records (was
+    # 7,913,324); the cat golden BAMs are archived under archive/. The Gate #2
+    # "100.0000% vs v0.10.0" in the summary above refers to the OLD cat panel
+    # (cat-vs-cat) and is not meaningful for the current human golden.
