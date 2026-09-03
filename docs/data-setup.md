@@ -83,7 +83,7 @@ The four production samples in `config/samples.yaml`:
 | ------------------- | ------------------------------------------------------------ | ----- |
 | `wgs-5M`            | 1000 Genomes WGS HG00096 (downsampled)                       | 5M    |
 | `wes-5M`            | 1000 Genomes WES HG00100 (downsampled)                       | 5M    |
-| `panel-twist-5M`    | Twist hybridization-panel UMI dataset, provided by Twist     | 5M    |
+| `panel-twist-5M`    | Human Twist-UMI panel (SRR37186773, MCF10A) — public SRA     | 5M    |
 | `meth-twist-emseq-5M` | Twist EM-seq dataset, provided by Twist                    | 5M    |
 
 The two smoke samples (`smoke-1M` and `smoke-meth`) are heavy downsamples
@@ -131,23 +131,31 @@ samtools fastq \
 `upload-data` will further downsample to 5M pairs (every-Nth-pair via
 `mawk`) when staging to S3.
 
-### Twist Bioscience samples
+### Twist samples
 
-`twist-umi` (hybridization-capture panel with UMIs) and `twist-emseq`
-(enzymatic methylation sequencing) are vendor-distributed example datasets.
-The specific FASTQs used in this benchmark were **provided to us by Twist
-Bioscience** and are not redistributed in this repository. To obtain the
-equivalent inputs, contact Twist directly and request the example QC dataset
-for the kit you are interested in:
+**`twist-umi`** — a human Twist UMI Adapter System capture panel. Public SRA
+run **`SRR37186773`** (BioProject `PRJNA1422021`, MCF10A cell line, *Homo
+sapiens*), 2×151 targeted-capture, read structure `5M2S+T`. The full run is
+~168M pairs; it is family-downsampled (UMI-family-aware, via the public
+`fgumi downsample`) to ~8M pairs, which `upload-data` then decimates to the
+benchmark's ~4M pairs.
 
-- Twist hybridization-capture panel with UMIs (e.g. Twist Comprehensive
-  Exome with the UMI Adapter System)
-- Twist NGS Methylation Detection Kit (EM-seq workflow)
+> **Provenance note.** This replaced a *mislabeled* `twist-umi`: the previous
+> `SRR34589119` is *Felis catus* (a domestic-cat liver-tumour sample) that
+> merely used the Twist UMI kit. Aligned to hg38 it mapped only 0.79%
+> on-target / 17% unmapped / 47% MAPQ-0, so its "panel" behaviour was
+> cross-species misalignment, not panel biology. When choosing any vendor
+> sample, verify the **organism / taxon id** — not just the library kit.
 
-If you cannot obtain the exact files we used, substitute any paired-end
-FASTQ pair from an equivalent kit — the benchmark measures relative
-throughput between bwa-mem2 builds, not sample-specific behaviour, so the
-exact provenance does not affect the comparison.
+**`twist-emseq`** (enzymatic methylation sequencing) is a Twist Bioscience
+example QC dataset, provided to us by Twist and not redistributed here. To
+obtain an equivalent, contact Twist and request the example QC dataset for the
+NGS Methylation Detection Kit (EM-seq workflow).
+
+If you cannot obtain the exact files, substitute any **human** paired-end panel
+FASTQ pair — the benchmark measures relative throughput between builds on a
+fixed sample, but the sample must be genuinely human and on-target to represent
+the panel workload (see the cat mislabel above).
 
 ### `hic-1M` — HG002 Hi-C (Zenodo)
 

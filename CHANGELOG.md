@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `panel-twist-5M` and `smoke-1M` were the mislabeled *Felis catus* run
+  `SRR34589119` — a domestic-cat target-capture sample that merely used the
+  Twist UMI kit (0.79% on-target / 17% unmapped / 47% MAPQ-0 to hg38), so their
+  "panel" behaviour was cross-species misalignment, not panel biology. Replaced
+  with the human Twist-UMI run `SRR37186773` (PRJNA1422021, MCF10A, taxon 9606);
+  S3 data re-staged and the cat archived under `archive/`. All prior
+  `panel-twist-5M*` and `smoke-1M` figures are invalid — see the errata in
+  `docs/release-allowances.yaml`, `docs/expected-divergences.yaml`, and
+  `docs/0.6.0-release-validation.md`.
+
 ### Added
 
 - `cli bless-release --fg-labs-sha <candidate> --golden-ref-sha <prev>` — a

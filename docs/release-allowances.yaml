@@ -1,5 +1,12 @@
 # Release-to-release alignment-change allowances (Gate #2 sign-off).
 #
+# ERRATA (2026-09-03): every `panel-twist-5M` figure in this file dated before
+# 2026-09-03 was measured on a MISLABELED sample — `SRR34589119` is Felis catus
+# (a domestic cat), not a human Twist panel (0.79% on-target to hg38). Those
+# numbers are an accurate record of what was measured but are NOT a valid
+# baseline for panel-twist expectations. The sample was replaced with human
+# `SRR37186773` (MCF10A); panel-twist entries are being regenerated.
+#
 # bwa-mem3's output is gated tightly against the last blessed release. Moving the
 # golden forward to a SHA whose alignments differ is a deliberate act: it
 # requires BOTH re-blessing (`bench bless-golden`) AND an entry here recording

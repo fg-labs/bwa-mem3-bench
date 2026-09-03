@@ -1,5 +1,12 @@
 # Expected divergences between fg-labs/bwa-mem3 and upstream/bwa-mem2.
 #
+# ERRATA (2026-09-03): any `panel-twist-5M` drift figure recorded before
+# 2026-09-03 was measured on a MISLABELED sample — `SRR34589119` is Felis catus
+# (a cat), not a human Twist panel (0.79% on-target to hg38). The FG-PRIMARY-DRIFT
+# budget was calibrated against that cat drift; real human panel data may drift
+# differently and the budget may need recalibration once regenerated. The sample
+# was replaced with human `SRR37186773` (MCF10A).
+#
 # Each entry documents an intentional fg-labs behavior change that produces a
 # classifiable drift in aligned-BAM output vs bwa-mem2 v2.2.1. The regression
 # gate (`bench regression`) sums the `expected_drift_pct` of the entries scoped

@@ -4,9 +4,10 @@ Source paths are configured per-host via env vars:
 
 * ``BWA_MEM3_BENCH_VENDOR_ROOT`` — directory holding raw vendor FASTQs (e.g.
   ``twist-umi_{1,2}.fastq.gz``). Defaults to ``./vendor-fastqs`` under the
-  repo root if unset. The ``twist-*`` files are example QC datasets
-  provided by Twist Bioscience; OSS users should request equivalent files
-  directly from Twist (see ``docs/data-setup.md``).
+  repo root if unset. ``twist-umi`` is a public human Twist-UMI panel
+  (``SRR37186773`` / ``PRJNA1422021``, MCF10A); ``twist-emseq`` is a Twist
+  Bioscience example QC dataset (request from Twist). See
+  ``docs/data-setup.md`` for how to obtain each.
 * ``BWA_MEM3_BENCH_STAGE_ROOT`` — scratch directory for downsampled FASTQs
   written by ``upload-data``. Defaults to ``./data-stage`` under the repo
   root.
@@ -82,7 +83,9 @@ def sample_sources(bucket: str) -> dict[str, DataSource]:
             source_r1=vendor / "twist-umi_1.fastq.gz",
             source_r2=vendor / "twist-umi_2.fastq.gz",
             dest_prefix="data/panel/twist-umi/downsampled-5M/",
-            downsample_every_nth=2,  # 7.9M pairs / 2 ≈ 3.95M (source is smaller than nominal)
+            # SRR37186773 (MCF10A, human) family-downsampled to 8.0M pairs; /2 ≈ 4.0M.
+            # (Replaced the mislabeled cat SRR34589119 — see docs/data-setup.md.)
+            downsample_every_nth=2,
         ),
         "meth-twist-emseq-5M": DataSource(
             sample="meth-twist-emseq-5M",
@@ -96,7 +99,7 @@ def sample_sources(bucket: str) -> dict[str, DataSource]:
             source_r1=vendor / "twist-umi_1.fastq.gz",
             source_r2=vendor / "twist-umi_2.fastq.gz",
             dest_prefix="data/smoke/1M/",
-            downsample_every_nth=250,
+            downsample_every_nth=250,  # human twist-umi (SRR37186773, MCF10A); ~32K pairs
         ),
         "smoke-meth": DataSource(
             sample="smoke-meth",
