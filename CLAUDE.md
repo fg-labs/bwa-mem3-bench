@@ -346,8 +346,8 @@ from `arch.baseline_arch` in `config/archs.yaml`:
   update both; otherwise `kill-all` will silently skip the new queue.
 - **Count pairs from the FASTQ, not from `samtools view -c -f 64` on an
   aligned BAM.** The aligned BAM's first-of-pair count is inflated by
-  supplementary alignments. `twist-umi.aligned.bam` shows 31.1M but the
-  source twist-umi_1.fastq.gz is actually 7.9M pairs.
+  supplementary alignments — a multi-mapping panel can report far more
+  first-of-pair records than the FASTQ has pairs.
 - **`vs_default` is a same-*binary* comparison, NOT a same-*behaviour* one —
   do not reason about it by analogy to `vs_golden` / `vs_x86`.** All three
   compare bwa-mem3 against bwa-mem3, but `--fast` prunes the candidate set on

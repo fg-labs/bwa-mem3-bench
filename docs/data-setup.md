@@ -83,11 +83,11 @@ The four production samples in `config/samples.yaml`:
 | ------------------- | ------------------------------------------------------------ | ----- |
 | `wgs-5M`            | 1000 Genomes WGS HG00096 (downsampled)                       | 5M    |
 | `wes-5M`            | 1000 Genomes WES HG00100 (downsampled)                       | 5M    |
-| `panel-twist-5M`    | Twist hybridization-panel UMI dataset, provided by Twist     | 5M    |
+| `panel-agilent-qxt-5M` | Agilent SureSelect QXT hereditary-cancer panel — SRR15497869 (PRJNA755485), human germline, public | 5M |
 | `meth-twist-emseq-5M` | Twist EM-seq dataset, provided by Twist                    | 5M    |
 
 The two smoke samples (`smoke-1M` and `smoke-meth`) are heavy downsamples
-of the panel-twist and meth-twist-emseq sources respectively.
+of the panel-agilent-qxt and meth-twist-emseq sources respectively.
 
 ### 1000 Genomes (HG00096 WGS, HG00100 WES)
 
@@ -131,23 +131,34 @@ samtools fastq \
 `upload-data` will further downsample to 5M pairs (every-Nth-pair via
 `mawk`) when staging to S3.
 
-### Twist Bioscience samples
+### `panel-agilent-qxt-5M` — Agilent SureSelect QXT cancer panel (public)
 
-`twist-umi` (hybridization-capture panel with UMIs) and `twist-emseq`
-(enzymatic methylation sequencing) are vendor-distributed example datasets.
-The specific FASTQs used in this benchmark were **provided to us by Twist
-Bioscience** and are not redistributed in this repository. To obtain the
-equivalent inputs, contact Twist directly and request the example QC dataset
-for the kit you are interested in:
+`agilent-qxt` is a **public** human germline dataset: run **SRR15497869**
+(BioProject **PRJNA755485**), an Agilent SureSelect QXT 93-gene
+hereditary/colorectal-cancer panel (2×151 bp, non-UMI, blood), from Beltrami
+et al., *Cancer Commun* 2022 (PMID 35029067). Fetch it from SRA:
 
-- Twist hybridization-capture panel with UMIs (e.g. Twist Comprehensive
-  Exome with the UMI Adapter System)
-- Twist NGS Methylation Detection Kit (EM-seq workflow)
+```sh
+prefetch SRR15497869
+fasterq-dump --split-files --skip-technical SRR15497869
+gzip -c SRR15497869_1.fastq > agilent-qxt_1.fastq.gz
+gzip -c SRR15497869_2.fastq > agilent-qxt_2.fastq.gz
+```
 
-If you cannot obtain the exact files we used, substitute any paired-end
-FASTQ pair from an equivalent kit — the benchmark measures relative
-throughput between bwa-mem2 builds, not sample-specific behaviour, so the
-exact provenance does not affect the comparison.
+Place the two `agilent-qxt_{1,2}.fastq.gz` files under
+`$BWA_MEM3_BENCH_VENDOR_ROOT/data/raw/vendor/`. This replaces the previous panel
+sample, which was found to be a mislabeled non-human sample (see CHANGELOG).
+
+### Twist Bioscience sample (EM-seq)
+
+`twist-emseq` (enzymatic methylation sequencing) is a vendor-distributed
+example dataset, **provided to us by Twist Bioscience** and not redistributed
+in this repository. To obtain the equivalent input, contact Twist directly and
+request the Twist NGS Methylation Detection Kit (EM-seq workflow) example QC
+dataset. If you cannot obtain the exact files, substitute any paired-end FASTQ
+pair from an equivalent kit — the benchmark measures relative throughput
+between builds, not sample-specific behaviour, so the exact provenance does not
+affect the comparison.
 
 ### `hic-1M` — HG002 Hi-C (Zenodo)
 
@@ -177,15 +188,15 @@ exact provenance does not affect the comparison.
 
 `bwa_mem3_bench.cli upload-data` deterministically downsamples the source
 FASTQs (every-Nth-pair via `mawk`) and uploads to
-`s3://<your-bucket>/data/<sample>/`. Source files are read from the
-`BWA_MEM3_BENCH_VENDOR_ROOT` directory (defaults to `./vendor-fastqs`).
+`s3://<your-bucket>/data/<sample>/`. Source files are read from
+`$BWA_MEM3_BENCH_VENDOR_ROOT/data/raw/vendor/` (root defaults to `./vendor-fastqs`).
 
-Place the source FASTQs into `BWA_MEM3_BENCH_VENDOR_ROOT` with these names:
+Place the source FASTQs into `$BWA_MEM3_BENCH_VENDOR_ROOT/data/raw/vendor/` with these names:
 
 | Filename                | Contents                            |
 | ----------------------- | ----------------------------------- |
-| `twist-umi_1.fastq.gz`  | Twist UMI panel R1                  |
-| `twist-umi_2.fastq.gz`  | Twist UMI panel R2                  |
+| `agilent-qxt_1.fastq.gz`| Agilent QXT panel R1 (SRR15497869)  |
+| `agilent-qxt_2.fastq.gz`| Agilent QXT panel R2 (SRR15497869)  |
 | `twist-emseq_1.fastq.gz`| Twist EM-seq R1                     |
 | `twist-emseq_2.fastq.gz`| Twist EM-seq R2                     |
 

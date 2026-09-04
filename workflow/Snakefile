@@ -347,7 +347,7 @@ def _accuracy_targets(samples: list, reps: int) -> list:
 FAST_REAL_BASES = [
     "wgs-5M",
     "wes-5M",
-    "panel-twist-5M",
+    "panel-agilent-qxt-5M",
     "hic-1M",
     "sbx-1M",
     "meth-twist-emseq-5M",
@@ -523,7 +523,7 @@ def _alt_targets(arches: list | None = None) -> list:
 COMPAT_BASE_SAMPLES = (
     "wgs-5M",
     "wes-5M",
-    "panel-twist-5M",
+    "panel-agilent-qxt-5M",
     "hic-1M",
     "sbx-1M",
     # Simulated (holodeck) siblings: the only non-meth datasets that lacked a
@@ -1012,7 +1012,7 @@ rule minibwa:
     Sample × arch × rep matrix:
       - smoke-1M, 1 rep, all non-meth archs (build / sanity)
       - every non-meth bench sample, REPS each, all non-meth archs: wgs-5M +
-        wes-5M (standard PE), panel-twist-5M (hybrid panel), hic-1M (Hi-C PE),
+        wes-5M (standard PE), panel-agilent-qxt-5M (hybrid panel), hic-1M (Hi-C PE),
         and sbx-1M (Roche SBX single-end). Together these give minibwa a row
         against bwa-mem3/bwa-mem2 on every dataset it can align. The meth
         samples are excluded — minibwa has no bisulfite path.
@@ -1043,7 +1043,7 @@ rule minibwa:
             # paired-end pair (wgs/wes), the hybrid panel, Hi-C PE, and Roche
             # SBX (single-end — handled by `align_minibwa` via `_query_fastqs`).
             # minibwa has no bisulfite path, so the meth samples are excluded.
-            for sample in ("wgs-5M", "wes-5M", "panel-twist-5M", "hic-1M", "sbx-1M")
+            for sample in ("wgs-5M", "wes-5M", "panel-agilent-qxt-5M", "hic-1M", "sbx-1M")
             for a in MINIBWA_ARCHS
             for r in range(1, REPS + 1)
         ],

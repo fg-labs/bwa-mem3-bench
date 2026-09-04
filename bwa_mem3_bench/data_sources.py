@@ -2,11 +2,14 @@
 
 Source paths are configured per-host via env vars:
 
-* ``BWA_MEM3_BENCH_VENDOR_ROOT`` — directory holding raw vendor FASTQs (e.g.
-  ``twist-umi_{1,2}.fastq.gz``). Defaults to ``./vendor-fastqs`` under the
-  repo root if unset. The ``twist-*`` files are example QC datasets
-  provided by Twist Bioscience; OSS users should request equivalent files
-  directly from Twist (see ``docs/data-setup.md``).
+* ``BWA_MEM3_BENCH_VENDOR_ROOT`` — root of the vendor data tree (the
+  fgumi-benchmarks layout). Raw vendor FASTQs are read from
+  ``<root>/data/raw/vendor/`` — e.g. ``<root>/data/raw/vendor/agilent-qxt_{1,2}.fastq.gz``
+  and ``<root>/data/raw/vendor/twist-emseq_{1,2}.fastq.gz``. Defaults to
+  ``./vendor-fastqs`` under the repo root if unset. ``agilent-qxt`` is a public
+  human Agilent SureSelect QXT cancer panel (SRR15497869 / PRJNA755485);
+  ``twist-emseq`` is a Twist Bioscience example QC dataset (request from Twist).
+  See ``docs/data-setup.md``.
 * ``BWA_MEM3_BENCH_STAGE_ROOT`` — scratch directory for downsampled FASTQs
   written by ``upload-data``. Defaults to ``./data-stage`` under the repo
   root.
@@ -77,12 +80,15 @@ def sample_sources(bucket: str) -> dict[str, DataSource]:
             source_r2=STAGE_ROOT / "wes-5M_2.fastq.gz",
             dest_prefix="data/wes/1kg-HG00100/downsampled-5M/",
         ),
-        "panel-twist-5M": DataSource(
-            sample="panel-twist-5M",
-            source_r1=vendor / "twist-umi_1.fastq.gz",
-            source_r2=vendor / "twist-umi_2.fastq.gz",
-            dest_prefix="data/panel/twist-umi/downsampled-5M/",
-            downsample_every_nth=2,  # 7.9M pairs / 2 ≈ 3.95M (source is smaller than nominal)
+        "panel-agilent-qxt-5M": DataSource(
+            sample="panel-agilent-qxt-5M",
+            # SRR15497869 (PRJNA755485): human germline blood, Agilent SureSelect
+            # QXT 93-gene hereditary/colorectal-cancer panel, 2x150, non-UMI.
+            # Replaces the mislabeled cat SRR34589119 — see docs/data-setup.md.
+            source_r1=vendor / "agilent-qxt_1.fastq.gz",
+            source_r2=vendor / "agilent-qxt_2.fastq.gz",
+            dest_prefix="data/panel/agilent-qxt/downsampled-5M/",
+            # Source is ~5.31M pairs — already ~5M, so keep the full file.
         ),
         "meth-twist-emseq-5M": DataSource(
             sample="meth-twist-emseq-5M",
@@ -93,10 +99,12 @@ def sample_sources(bucket: str) -> dict[str, DataSource]:
         ),
         "smoke-1M": DataSource(
             sample="smoke-1M",
-            source_r1=vendor / "twist-umi_1.fastq.gz",
-            source_r2=vendor / "twist-umi_2.fastq.gz",
+            # Derived from the same human Agilent QXT panel as panel-agilent-qxt-5M
+            # (replaces the mislabeled cat source). Wiring smoke test only.
+            source_r1=vendor / "agilent-qxt_1.fastq.gz",
+            source_r2=vendor / "agilent-qxt_2.fastq.gz",
             dest_prefix="data/smoke/1M/",
-            downsample_every_nth=250,
+            downsample_every_nth=168,  # 5.31M pairs / 168 ≈ 31.6K (fast wiring smoke)
         ),
         "smoke-meth": DataSource(
             sample="smoke-meth",

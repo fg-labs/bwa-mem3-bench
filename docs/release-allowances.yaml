@@ -1,3 +1,10 @@
+# ⚠️ ERRATA (data correction): every `panel-twist-5M` entry below was measured on
+# a sample later found to be MISLABELED — non-human (Felis catus), SRA run
+# SRR34589119. Those figures accurately record what was measured at the time but
+# are NOT a valid baseline for the panel workload. The panel sample was replaced
+# by `panel-agilent-qxt-5M` (SRR15497869, a human Agilent SureSelect QXT panel);
+# see CHANGELOG. Entries are retained unchanged as a historical record.
+#
 # Release-to-release alignment-change allowances (Gate #2 sign-off).
 #
 # bwa-mem3's output is gated tightly against the last blessed release. Moving the
