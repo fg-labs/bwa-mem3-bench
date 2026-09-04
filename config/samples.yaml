@@ -92,10 +92,10 @@ samples:
     source: data/wes/1kg-HG00100/downsampled-5M/
     fg_labs_flags: []
 
-  panel-twist-5M:
+  panel-agilent-qxt-5M:
     baseline_tool: bwa-mem2-upstream
     reference: hg38
-    source: data/panel/twist-umi/downsampled-5M/
+    source: data/panel/agilent-qxt/downsampled-5M/
     fg_labs_flags: []
 
   meth-twist-emseq-5M:
@@ -283,10 +283,10 @@ samples:
   # Remaining real datasets, so `--fast` is compared on every dataset the
   # benchmark carries. Each mirrors its base sample's layout / mem_flags so the
   # fast-vs-default comparison stays apples-to-apples.
-  panel-twist-5M-fast:
+  panel-agilent-qxt-5M-fast:
     baseline_tool: bwa-mem2-upstream
     reference: hg38
-    source: data/panel/twist-umi/downsampled-5M/
+    source: data/panel/agilent-qxt/downsampled-5M/
     fg_labs_flags: ["--fast"]
 
   hic-1M-fast:
@@ -342,10 +342,10 @@ samples:
     source: data/wes/1kg-HG00100/downsampled-5M/
     fg_labs_flags: ["--compat=bwa-mem2"]
 
-  panel-twist-5M-compat:
+  panel-agilent-qxt-5M-compat:
     baseline_tool: bwa-mem2-upstream
     reference: hg38
-    source: data/panel/twist-umi/downsampled-5M/
+    source: data/panel/agilent-qxt/downsampled-5M/
     fg_labs_flags: ["--compat=bwa-mem2"]
 
   hic-1M-compat:
@@ -479,10 +479,10 @@ samples:
     source: data/wes/1kg-HG00100/downsampled-5M/
     fg_labs_flags: ["--compat=bwa-mem"]
 
-  panel-twist-5M-compat-bwa-mem:
+  panel-agilent-qxt-5M-compat-bwa-mem:
     baseline_tool: bwa-mem2-upstream
     reference: hg38
-    source: data/panel/twist-umi/downsampled-5M/
+    source: data/panel/agilent-qxt/downsampled-5M/
     fg_labs_flags: ["--compat=bwa-mem"]
 
   hic-1M-compat-bwa-mem:

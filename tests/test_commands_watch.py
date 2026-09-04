@@ -132,7 +132,7 @@ def test_classify_marks_spot_terminated_failed_as_retried_when_successor_exists(
     rule:wildcards`).
     """
     watch_module._OUTPUT_CACHE.clear()
-    target_jobs = "align_fg_labs:sha=abc,sample=panel-twist-5M,arch=c7i,rep=2"
+    target_jobs = "align_fg_labs:sha=abc,sample=panel-agilent-qxt-5M,arch=c7i,rep=2"
     cmd = ["/bin/bash", "-c", f"python -m snakemake --target-jobs '{target_jobs}' --cores 2"]
 
     mock_client = MagicMock()

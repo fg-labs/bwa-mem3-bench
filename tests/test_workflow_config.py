@@ -430,7 +430,7 @@ def test_fast_siblings_share_source_and_only_add_fast_flag() -> None:
     pairs = {
         "wgs-5M": "wgs-5M-fast",
         "wes-5M": "wes-5M-fast",
-        "panel-twist-5M": "panel-twist-5M-fast",
+        "panel-agilent-qxt-5M": "panel-agilent-qxt-5M-fast",
         "hic-1M": "hic-1M-fast",
         "sbx-1M": "sbx-1M-fast",
         "meth-twist-emseq-5M": "meth-twist-emseq-5M-fast",

@@ -1,3 +1,9 @@
+# ⚠️ ERRATA (data correction): every `panel-twist-5M` figure below was measured on
+# a sample later found to be MISLABELED — non-human (Felis catus), SRA run
+# SRR34589119. Those figures record what was measured but are NOT a valid panel
+# baseline. The panel sample was replaced by `panel-agilent-qxt-5M` (SRR15497869,
+# a human Agilent SureSelect QXT panel); see CHANGELOG. Retained as a record.
+#
 # Expected divergences between fg-labs/bwa-mem3 and upstream/bwa-mem2.
 #
 # Each entry documents an intentional fg-labs behavior change that produces a

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Panel benchmark sample replaced (data correction).** The former
+  `panel-twist-5M` sample (SRA run `SRR34589119`) was found to be a mislabeled
+  non-human sample (*Felis catus*): aligned to hg38 it maps ~0.8% on-target /
+  17% unmapped / 47% MAPQ-0, so every historical `panel-twist-5M` figure is a
+  cross-species-misalignment artifact. It is replaced by `panel-agilent-qxt-5M`
+  — run `SRR15497869` (BioProject `PRJNA755485`), a public human Agilent
+  SureSelect QXT 93-gene hereditary-cancer panel (2×151, non-UMI; validated
+  99.9% mapped, ~58% on-target, ~214 bp inserts). The sample and its S3 path
+  were renamed (`data/panel/twist-umi/` → `data/panel/agilent-qxt/`) to reflect
+  the correct vendor. `smoke-1M`, which derived from the same mislabeled source,
+  was repointed to the new panel. Historical `panel-twist-5M` figures in
+  `docs/release-allowances.yaml`, `docs/expected-divergences.yaml`, and
+  `docs/0.6.0-release-validation.md` are retained as records of what was
+  measured, each annotated with an errata note.
+
 ### Added
 
 - `cli bless-release --fg-labs-sha <candidate> --golden-ref-sha <prev>` — a

@@ -12,11 +12,11 @@ def test_parse_golden_samples_extracts_pre_prefixes() -> None:
     """`PRE <name>/` rows become bare sample names; trailing slash stripped."""
     ls_output = (
         "                           PRE meth-twist-emseq-5M/\n"
-        "                           PRE panel-twist-5M/\n"
+        "                           PRE panel-agilent-qxt-5M/\n"
         "                           PRE wgs-5M/\n"
     )
     assert golden.parse_golden_samples(ls_output) == frozenset(
-        {"meth-twist-emseq-5M", "panel-twist-5M", "wgs-5M"}
+        {"meth-twist-emseq-5M", "panel-agilent-qxt-5M", "wgs-5M"}
     )
 
 

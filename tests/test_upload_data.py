@@ -58,7 +58,7 @@ def test_downsample_pipeline_uses_pipefail(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(data_sources, "SCRATCH_ROOT", tmp_path)
     calls = _capture_run_cmd(monkeypatch)
 
-    _upload_sample("panel-twist-5M", "test-bucket", dry_run=True)
+    _upload_sample("meth-twist-emseq-5M", "test-bucket", dry_run=True)
 
     pipes = [c for c in calls if c[0] == "bash" and "gunzip" in c[2]]
     assert pipes, f"expected a gunzip downsample call; got {calls}"

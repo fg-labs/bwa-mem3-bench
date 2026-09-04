@@ -272,7 +272,7 @@ impl ConcordanceReport {
                 // BTreeMap<String, _> looks up by &str, so the only allocation
                 // is on first sight of a tag.
                 //
-                // Measured on panel-twist-5M (7.9M primaries, ~9 tags/side, so
+                // Measured on a 7.9M-primary panel sample (~9 tags/side, so
                 // ~140M lookups) against the same binary with this call stubbed
                 // out, interleaved A/B over a warm page cache: 72.3s without vs
                 // 75.8s with, i.e. under 5% — and the two distributions overlap
