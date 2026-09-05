@@ -40,10 +40,15 @@ divergences:
       each read maps is preserved; the affected reads differ in placement
       detail, and the set varies by SIMD architecture. Applies equally to the
       Hi-C (hic-1M, -5SP) and single-end SBX (sbx-1M) read classes — same
-      mechanism, drift well under the budget.
+      mechanism, drift well under the budget. The replacement panel
+      `panel-agilent-qxt-5M` (human Agilent SureSelect QXT; supersedes the
+      mislabeled `panel-twist-5M` — see the errata header) measures 0.0000%
+      primary drift vs bwa-mem2 v2.2.1 across every arch and rep at v0.11.0
+      (`3c355b85`); it is listed here so it carries the same 0.10% primary
+      tier as the other real samples, not a zero budget.
     affected: primary_alignment
     expected_drift_pct: 0.10
-    samples: [wgs-5M, wes-5M, panel-twist-5M, smoke-1M, hic-1M, sbx-1M]
+    samples: [wgs-5M, wes-5M, panel-twist-5M, panel-agilent-qxt-5M, smoke-1M, hic-1M, sbx-1M]
 
   - id: FG-METH-DIVERGENCE
     pr: fg-labs/bwa-mem3#90
