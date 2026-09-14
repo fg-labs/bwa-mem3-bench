@@ -638,8 +638,10 @@ allowances:
     #
     # Golden lives under 2e662761 -- the release-please #444 head, benched at
     # reps=5 (target bless_release) across the six sweep archs, plus the arena
-    # (c8a/c8g) and the thread-scaling ladder. Add the v0.12.0 release-tag SHA as
-    # an alias once #444 squash-merges (metadata-only diff from 2e662761), same
-    # pattern as v0.5.0+ -- until then a vs-golden run must pin 2e662761 itself.
-    # aliases:
-    #   - <v0.12.0 release tag SHA>   # add on merge of #444
+    # (c8a/c8g) and the thread-scaling ladder. #444 squash-merged to the shipped
+    # v0.12.0 tag (ac059d0) on 2026-09-14; that tag's tree is identical to
+    # 2e662761 (zero diff -- no src/, ext/ or Makefile change), so the shipped tag
+    # is the same binary as this golden. Aliased below so a vs-golden run pinned to
+    # the tag resolves here, same pattern as v0.5.0+.
+    aliases:
+      - ac059d0152ad3ebcf5d3079492aab95551a328eb   # v0.12.0 release tag (merge of #444; tree-identical to 2e662761 — same binary as this golden)
