@@ -586,3 +586,60 @@ allowances:
     # so a vs-golden run pinned to the tag resolves here, same pattern as v0.5.0+.
     aliases:
       - 2ba7fd7d5be80ff7bafdae933047a87a7f799c95   # v0.11.0 release tag (squash-merge of #413, metadata-only diff from 3c355b85)
+  - to_sha: 2e6627615ae5c50c5d12829ce9a3900f05dd58ff
+    pr: fg-labs/bwa-mem3#444
+    date: 2026-09-13
+    summary: >-
+      v0.12.0: ONE deliberate, methylation-only alignment change; every non-meth
+      workload is unchanged. NON-METH — 100.0000% vs the v0.11.0 golden on every
+      cell (plain, --compat=bwa-mem2, --compat=bwa-mem, -alt, sim-wgs), Gate #1
+      vs upstream bwa-mem2 v2.2.1 within budget, and the --compat arms
+      byte-identical (record stream), so the large SIMD/perf block this release
+      ships (#492/#495 tiled-SoA transpose, #479/#480/#481 NEON kernels, #448
+      SIMD ref unpack, #452/#486 prefetch, #471 z-drop weighting, #467/#468
+      bandedSWA bounds) is confirmed output-neutral on DNA. METHYLATION — #441
+      ("prune 3-letter over-seeding before SA resolution", SPEC30, ON by default
+      under --meth) moves meth vs-golden to 73.0691% (smoke-meth) / 73.7183%
+      (meth-twist-emseq-5M), i.e. ~27% drift. That figure is almost entirely TAG
+      VALUE, not placement: by_class on meth-twist-emseq-5M (10,369,692 reads) is
+      tag_diff 26.08%, pos_diff 0.88%, cigar_diff 0.34%, mapq_diff 0.33%,
+      flag_diff 0.30%, and mapped_only_baseline 1,566 (0.015%) / mapped_only_query
+      195 (0.002%) -- so mapping rate is unchanged to ~0.015% and the 27% is the
+      candidate-set-describing tags churning as the prune shrinks the SA hit set:
+      XS value_diff 2,495,171 (24%), HN 168,663, XA ~81k. The chosen alignment is
+      stable (placement ~98.8% concordant). CAUSE PINNED TO #441 ALONE. On an
+      m7i.4xlarge (AVX-512, matching the bench meth arch) a from-source build of
+      the candidate reproduces the shipped smoke-meth BAM at 100.0000%
+      concordance (placement + every tag), validating the reproducer; against it,
+      #441's parent (e5bcb2f) is 100.0000% vs the v0.11.0 golden -- everything in
+      v0.12.0 before #441 is record-identical to golden on meth -- while #441
+      vs that parent is 73.0691% with XS differing on 24.75%, i.e. #441 alone
+      introduces the entire divergence. EVIDENCE THIS IS AN IMPROVEMENT, NOT
+      DRIFT. (1) Against simulated truth the meth placement accuracy is UNCHANGED:
+      sim-meth-place 94.6433% correct on both v0.12.0 and the v0.11.0 golden,
+      sim-meth-vars 95.4433% / 95.44%, with meth-level Pearson r (0.9457 / 0.9803)
+      and RMSE identical to four decimals -- the reads the prune re-scores land no
+      less correctly, and the two that unmap were wrong-copy paralog seeds. (2)
+      OPT-OUT SHIPS: `--meth-seed-prune=off` (env `BWAMEM3_METH_SEED_PRUNE=off`)
+      restores the pre-prune, byte-identical-to-v0.11.0 seeding for any pipeline
+      needing release-to-release bit stability; SPEC30 is the default only because
+      --meth is bwa-mem3-native with no upstream reference output to preserve. (3)
+      SPEED: the prune is ~41% faster meth -- meth-twist-emseq-5M -40.9% PROCESS()
+      (71.62 s vs 121.17 s), its --fast sibling -53.0%, smoke-meth -25%. (4)
+      Thread-scaling efficiency and non-meth performance improve or hold (--fast
+      arms -12 to -16%, wgs-5M -2.3%, wes-5M -3.9%, 0 regression cells). The meth
+      Gate #1 over-budget rows are the same fg-labs-vs-bwameth contract carried
+      since v0.4.0 (bwameth is a different aligner, not a truth reference), widened
+      here by the prune but not a new correctness concern. Intentional, accepted.
+    expected_drift_pct: 27.0
+    # expected_drift_pct is the METH headline (100 - ~73% concordance); non-meth is
+    # 0.0000% on every cell. Mirrors the v0.8.0 (#260) convention of recording the
+    # dominant meth tag-diff fraction while the summary carries the per-cell truth.
+    #
+    # Golden lives under 2e662761 -- the release-please #444 head, benched at
+    # reps=5 (target bless_release) across the six sweep archs, plus the arena
+    # (c8a/c8g) and the thread-scaling ladder. Add the v0.12.0 release-tag SHA as
+    # an alias once #444 squash-merges (metadata-only diff from 2e662761), same
+    # pattern as v0.5.0+ -- until then a vs-golden run must pin 2e662761 itself.
+    # aliases:
+    #   - <v0.12.0 release tag SHA>   # add on merge of #444
