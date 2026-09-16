@@ -13,6 +13,7 @@ from bwa_mem3_bench.workflow_config import (
     METH_EXTRA_TAGS,
     METH_IGNORE_TAGS,
     METH_UNEMITTED_TAGS,
+    STOCK_SA_SHIFT,
     Arch,
     Arena,
     Sample,
@@ -25,6 +26,7 @@ from bwa_mem3_bench.workflow_config import (
     _sweep_host_probe_seconds_from,
     _thread_scaling_from,
     _validate_compat_siblings,
+    _validate_dense_sa_shift,
     compat_sample_suffix,
     load_config,
     parse_ladder_override,
@@ -956,7 +958,12 @@ def _arena_yaml(**overrides: object) -> dict[str, object]:
 
 def _arena(**overrides: object) -> Arena:
     cfg = load_config(CONFIG_DIR)
-    return _arena_from(_arena_yaml(**overrides), samples=cfg.samples, archs=cfg.archs)
+    return _arena_from(
+        _arena_yaml(**overrides),
+        samples=cfg.samples,
+        archs=cfg.archs,
+        references=cfg.references,
+    )
 
 
 def test_thread_scaling_accepts_a_well_formed_ladder() -> None:
@@ -1089,6 +1096,76 @@ def test_arena_label_probe_budget_is_optional_and_defaults() -> None:
 
 def test_shipped_config_sets_an_arena_label_probe_budget() -> None:
     assert load_config(CONFIG_DIR).arena.label_probe_seconds > 0
+
+
+_DENSE_REFS = {
+    "hg38": {"key": "references/hg38/", "fasta_name": "x.fasta"},
+    "hg38-u1": {"key": "references/hg38-u1/", "fasta_name": "x.fasta"},
+    "hg38-u2": {"key": "references/hg38-u2/", "fasta_name": "x.fasta"},
+}
+
+
+def test_validate_dense_sa_shift_accepts_a_configured_rate() -> None:
+    for shift in (1, 2, STOCK_SA_SHIFT):
+        assert (
+            _validate_dense_sa_shift(
+                "ctx", "k", shift, references=_DENSE_REFS, reference_names={"hg38"}
+            )
+            == shift
+        )
+
+
+def test_validate_dense_sa_shift_rejects_out_of_range() -> None:
+    with pytest.raises(ValueError, match=r"\bk\b"):
+        _validate_dense_sa_shift(
+            "ctx", "k", STOCK_SA_SHIFT + 1, references=_DENSE_REFS, reference_names={"hg38"}
+        )
+
+
+def test_validate_dense_sa_shift_rejects_a_missing_dense_reference() -> None:
+    """The core guard: a bounds-valid shift whose `<ref>-u<shift>` copy is not
+    configured fails HERE (naming the missing reference), not as a bare KeyError
+    at DAG build. `hg38` has u1/u2 configured, but `hg38-meth` has neither."""
+    with pytest.raises(ValueError, match=r"hg38-meth-u1"):
+        _validate_dense_sa_shift(
+            "ctx", "k", 1, references=_DENSE_REFS, reference_names={"hg38", "hg38-meth"}
+        )
+
+
+def test_arena_dense_sa_shift_is_optional_and_defaults_to_stock() -> None:
+    """Absent `dense_sa_shift` means stock stride-8 (feature off)."""
+    assert _arena().dense_sa_shift == STOCK_SA_SHIFT
+
+
+def test_arena_accepts_the_shipped_dense_sa_shift() -> None:
+    """shift=1 is accepted because `hg38-u1` is a configured reference."""
+    assert _arena(dense_sa_shift=1).dense_sa_shift == 1
+
+
+@pytest.mark.parametrize("shift", [0, 4, -1, True, "1", 1.5])
+def test_arena_rejects_a_bad_dense_sa_shift(shift: object) -> None:
+    """Bounded to [1, 3] (and int, not bool/str/float): a typo must fail the
+    config load, not select an unbuilt/coarser rate an hour into a paid run.
+    `re-sa`'s own on-disk floor is 0 (stride-1) but the arena never densifies
+    below stride-2, so 0 is rejected here too. (0/-1/bool/str/float trip
+    `_as_positive_int`; 4 trips the explicit upper bound -- both name the key.)"""
+    with pytest.raises(ValueError, match=r"dense_sa_shift"):
+        _arena(dense_sa_shift=shift)
+
+
+def test_shipped_config_loads_with_both_dense_sa_features_on() -> None:
+    """The shipped config sets `arena.dense_sa_shift: 1` and
+    `sweep_dense_sa_shift: 2`; both are validated against configured references
+    at load, so a successful load proves every `<ref>-u<shift>` copy the two
+    features ask for (hg38-u1 for the arena; hg38-u2 AND hg38-meth-u2 for the
+    sweep's non-meth + meth samples) is declared."""
+    shipped_sweep_shift = 2  # stride-4
+    cfg = load_config(CONFIG_DIR)
+    assert cfg.arena.dense_sa_shift == 1
+    assert cfg.sweep_dense_sa_shift == shipped_sweep_shift
+    # The sweep touches both reference families; both dense copies must exist.
+    for ref in {s.reference for s in cfg.samples.values()}:
+        assert f"{ref}-u{cfg.sweep_dense_sa_shift}" in cfg.references
 
 
 @pytest.mark.parametrize("seconds", [True, "2", 0, -1.0, float("nan"), float("inf")])

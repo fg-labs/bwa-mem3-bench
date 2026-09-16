@@ -61,7 +61,10 @@ LADDER_SPEC = _ladder_spec(CONFIG)
 
 rule align_thread_scaling:
     input:
-        ref = lambda wc: _ref_inputs(wc, meth_index="d3"),
+        # Same sweep densification as `align_fg_labs` (`sweep_dense_sa_shift`):
+        # a `> v0.12.0` fg-labs SHA aligns against the pre-built stride-4
+        # `<ref>-u2` copy. See `_fg_labs_ref_inputs` in align.smk.
+        ref = _fg_labs_ref_inputs,
         fastqs = _query_fastqs,
     output:
         tsv = "scaling/{sha}/{sample}/{arch}/scaling.tsv",
@@ -117,11 +120,14 @@ rule align_thread_scaling:
     threads: CONFIG.thread_scaling.max_threads
     resources:
         batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
-        # Index in /dev/shm (~17 GB) plus per-thread batch buffers, which grow
+        # Index in /dev/shm (~17 GB stock, ~21 GB with the shipped stride-4
+        # `sweep_dense_sa_shift: 2`) plus per-thread batch buffers, which grow
         # with the thread count — at 64 threads the working set is several times
         # the 16-thread case. 64 GB leaves wide margin on the 128 GB host.
         mem_mb = 64000,
-        shared_memory_size_mb = 20480,
+        # 24576 (not 20480): the stride-4 dense index adds ~+4 GB, matching
+        # `_shm_size_mb_for`'s non-meth value. Trivially fits the 128 GB host.
+        shared_memory_size_mb = 24576,
         container_image = lambda wc: image_for_arch(wc.arch),
         # The ladder is long by construction: the 1-thread rung alone is ~16x a
         # 16-thread run. DEAD for the aws-batch executor -- kept only as

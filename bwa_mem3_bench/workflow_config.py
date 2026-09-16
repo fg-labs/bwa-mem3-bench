@@ -404,6 +404,15 @@ _DEFAULT_HOST_PROBE_SECONDS = 10.0
 # against an hour-plus arena job.
 _DEFAULT_LABEL_PROBE_SECONDS = 2.0
 
+# The stock (default) on-disk SA sample-rate shift bwa-mem3 `index`/`re-sa`
+# produce: rate 1/(1<<3) = stride-8. `arena.dense_sa_shift` defaults here, which
+# means "no densification" — every arm uses the stock index and no separate
+# stride-2 copy is staged. See `Arena.dense_sa_shift`. This is the SINGLE
+# source of the stock-shift value: `arena.smk` imports it (via the Snakefile)
+# rather than redefining `3`, so the loader's validation bound and the
+# workflow's feature-off gate cannot drift apart.
+STOCK_SA_SHIFT = 3
+
 # Seconds per host-contention probe for the regular per-cell sweep
 # (`align_fg_labs`), when `sweep_host_probe_seconds` is absent. Deliberately far
 # below tachyon's own 10 s default, which is sized for the ladder's ~45-minute
@@ -468,6 +477,15 @@ class Arena:
     # the drift this diagnoses. Distinct from `host_probe_seconds`, which
     # brackets the WHOLE job (one "pre" and one "post" reading only).
     label_probe_seconds: float = _DEFAULT_LABEL_PROBE_SECONDS
+    # SA-sample-rate shift the arena's `> v0.12.0` arms align against, staged as
+    # a separate `re-sa -u INT` on-disk index (fg-labs/bwa-mem3#510; sample rate
+    # 1/(1<<INT), so lower = denser = faster SA resolves at more resident RAM):
+    # 1 = stride-2 (+~12 GB), 2 = stride-4 (+~4 GB), 3 = stride-8 (stock — the
+    # feature is OFF, all arms use the stock index and no separate copy is
+    # staged). Only arms newer than v0.12.0 use it; see `_arm_uses_dense_sa` in
+    # arena.smk. Valid range [1, 3]; the on-disk floor is 0 (stride-1) but the
+    # arena never densifies below stride-2.
+    dense_sa_shift: int = STOCK_SA_SHIFT
 
 
 @dataclass(frozen=True)
@@ -507,6 +525,16 @@ class WorkflowConfig:
     # `thread_scaling.host_probe_seconds`: a diagnostic knob, not a decision a
     # config must make.
     sweep_host_probe_seconds: float = _DEFAULT_SWEEP_HOST_PROBE_SECONDS
+    # SA-sample-rate shift for the regular sweep + thread-scaling fg-labs
+    # alignments (`align_fg_labs`, `align_thread_scaling`), staged as a pre-built
+    # `re-sa -u INT` index copy (fg-labs/bwa-mem3#510): `3` = stock stride-8
+    # (off), `2` = stride-4 (the shipped choice: ~+4 GB, fits the 32 GB sweep
+    # hosts). Distinct from `arena.dense_sa_shift` (`1`), because the arena runs
+    # on 64 GB hosts and can afford stride-2. Only applies when the SHA under
+    # measurement is `> v0.12.0` (has `re-sa`); set to `3` for a pre-#510
+    # SHA (bisect / historical re-run) or its align job reads an index it cannot
+    # parse. Defaults to stock (off) when absent; the shipped config sets `2`.
+    sweep_dense_sa_shift: int = STOCK_SA_SHIFT
 
     def _resolve_tags(self, sample_name: str, kind: str, key: str) -> set[str]:
         """Union of a kind's default tag list and the sample's addition to it.
@@ -1097,7 +1125,56 @@ def _thread_scaling_from(
     )
 
 
-def _arena_from(raw: Any, *, samples: dict[str, Sample], archs: dict[str, Arch]) -> Arena:
+def _validate_dense_sa_shift(
+    context: str,
+    key: str,
+    raw: Any,
+    *,
+    references: dict[str, dict[str, str]],
+    reference_names: set[str],
+) -> int:
+    """Validate an SA-densification shift AND that its index copies exist.
+
+    Shared by the arena (`arena.dense_sa_shift`) and the sweep
+    (`sweep_dense_sa_shift`). Bounds the shift to `[1, STOCK_SA_SHIFT]`, and when
+    it densifies (`< STOCK_SA_SHIFT`) requires `<ref>-u<shift>` to be a
+    configured reference for every `ref` in `reference_names`. Both checks run
+    at config load so a bad or unbuilt rate fails HERE, not as a bare `KeyError`
+    when arena/align.smk derives the reference name at DAG-build time on a paid
+    run.
+
+    :param context: config location for error messages (e.g. ``"`arena`"``).
+    :param key: the field name being validated.
+    :param raw: the raw value read from YAML.
+    :param references: the configured references mapping.
+    :param reference_names: the base reference names whose dense copies are
+        needed (the arena's one sample's reference; every distinct sample
+        reference for the sweep).
+    :return: the validated shift.
+    :raises ValueError: on an out-of-range shift or a missing dense reference.
+    """
+    shift = _as_positive_int(context, key, raw)
+    if shift > STOCK_SA_SHIFT:
+        raise ValueError(f"{context} `{key}` must be in [1, {STOCK_SA_SHIFT}]; got {shift!r}")
+    if shift < STOCK_SA_SHIFT:
+        for ref in sorted(reference_names):
+            dense = f"{ref}-u{shift}"
+            if dense not in references:
+                raise ValueError(
+                    f"{context} `{key}`={shift} needs reference {dense!r}, which is not "
+                    f"configured; add it to `references` (have {sorted(references)}) or set "
+                    f"`{key}` to {STOCK_SA_SHIFT} (stock, feature off)"
+                )
+    return shift
+
+
+def _arena_from(
+    raw: Any,
+    *,
+    samples: dict[str, Sample],
+    archs: dict[str, Arch],
+    references: dict[str, dict[str, str]],
+) -> Arena:
     """Validate and build the `arena` block from `defaults.yaml`.
 
     Fails loudly at load time, same rationale as `_thread_scaling_from`: the
@@ -1158,6 +1235,21 @@ def _arena_from(raw: Any, *, samples: dict[str, Sample], archs: dict[str, Arch])
             f"`arena.label_probe_seconds` must be a finite number > 0; got {raw_label_probe!r}"
         )
 
+    # SA densification shift for the arena's `> v0.12.0` arms. In [1, 3]:
+    # 3 = stock stride-8 (feature off), 2 = stride-4, 1 = stride-2. A shift < 3
+    # requires the matching `re-sa` index copy to exist in S3 (e.g. `hg38-u1`
+    # for shift 1) — see `_arena_dense_ref_inputs` in arena.smk. Bounded here so
+    # a typo can't select an unbuilt/coarser rate an hour into a paid run;
+    # `re-sa`'s own on-disk floor is 0 (stride-1) but the arena never goes below
+    # stride-2.
+    dense_sa_shift = _validate_dense_sa_shift(
+        "`arena`",
+        "dense_sa_shift",
+        raw.get("dense_sa_shift", STOCK_SA_SHIFT),
+        references=references,
+        reference_names={samples[sample].reference},
+    )
+
     return Arena(
         sample=sample,
         archs=list(raw_archs),
@@ -1165,6 +1257,7 @@ def _arena_from(raw: Any, *, samples: dict[str, Sample], archs: dict[str, Arch])
         threads=_as_positive_int("`arena`", "threads", raw["threads"]),
         host_probe_seconds=float(raw_probe),
         label_probe_seconds=float(raw_label_probe),
+        dense_sa_shift=dense_sa_shift,
     )
 
 
@@ -1252,7 +1345,9 @@ def load_config(config_dir: Path) -> WorkflowConfig:
         thread_scaling=_thread_scaling_from(
             defaults["thread_scaling"], samples=samples, archs=archs
         ),
-        arena=_arena_from(defaults["arena"], samples=samples, archs=archs),
+        arena=_arena_from(
+            defaults["arena"], samples=samples, archs=archs, references=defaults["references"]
+        ),
         references=defaults["references"],
         runs_prefix=defaults["runs_prefix"],
         baseline_prefix=defaults["baseline_prefix"],
@@ -1260,4 +1355,14 @@ def load_config(config_dir: Path) -> WorkflowConfig:
         data_prefix=defaults["data_prefix"],
         compare_defaults=compare_defaults,
         sweep_host_probe_seconds=_sweep_host_probe_seconds_from(defaults),
+        # Sweep + thread-scaling densification: every distinct sample reference
+        # needs its `<ref>-u<shift>` copy (hg38-u2 AND hg38-meth-u2 for shift 2),
+        # since any sample may be aligned by `align_fg_labs`.
+        sweep_dense_sa_shift=_validate_dense_sa_shift(
+            "defaults.yaml",
+            "sweep_dense_sa_shift",
+            defaults.get("sweep_dense_sa_shift", STOCK_SA_SHIFT),
+            references=defaults["references"],
+            reference_names={s.reference for s in samples.values()},
+        ),
     )

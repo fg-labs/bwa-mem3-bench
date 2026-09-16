@@ -73,6 +73,76 @@ REF_ROOT=~/refs/Homo_sapiens_assembly38 \
     bash scripts/upload_reference.sh <your-bucket> hg38-meth
 ```
 
+### Stride-2 arena index (`hg38-u1`, optional)
+
+The arena runs its `> v0.12.0` arms against a denser SA-sample table
+(`arena.dense_sa_shift: 1` → stride-2), which trades ~+12 GB resident RAM for
+~-4% alignment CPU. It lives as a SEPARATE index copy so the arena's older
+fg-labs releases, upstream bwa-mem2, and minibwa arms keep the stock stride-8
+index — a pre-#510 or foreign reader may not parse a densified on-disk SA
+table. Generate it once with the fg-labs binary's `re-sa` subcommand
+(fg-labs/bwa-mem3#510, needs a `> v0.12.0` build). The bench image installs that
+binary as `bwa-mem2.fg-labs` (a locally built one may be named `bwa-mem3`); the
+`BWA` variable below stands in for whichever name yours has:
+
+```bash
+# The fg-labs binary that carries `re-sa` (#510) -- named bwa-mem2.fg-labs in
+# the bench image; set this to your binary's name.
+BWA=bwa-mem2.fg-labs
+
+# Full copy of the stock index; re-sa rewrites only <idxbase>.bwt.2bit.64.
+cp -r ~/refs/Homo_sapiens_assembly38 ~/refs/Homo_sapiens_assembly38-u1
+cd ~/refs/Homo_sapiens_assembly38-u1
+
+# Rewrite the SA sample table to stride-2 (rate 1/(1<<1)). Near-linear in -t.
+"$BWA" re-sa -u 1 -t 16 Homo_sapiens_assembly38.fasta
+# Sanity: `"$BWA" re-sa Homo_sapiens_assembly38.fasta` (no -u) should now
+# report the on-disk rate as stride-2.
+
+# Upload under references/hg38-u1/ (matches config/defaults.yaml's
+# references.hg38-u1 key). The .fasta and every sidecar except .bwt.2bit.64
+# are byte-identical to hg38, but a self-contained copy keeps staging simple.
+REF_ROOT=~/refs/Homo_sapiens_assembly38-u1 \
+    bash scripts/upload_reference.sh <your-bucket> hg38-u1
+```
+
+To disable the feature entirely (all arena arms on the stock index, no separate
+copy needed), set `arena.dense_sa_shift: 3` in `config/defaults.yaml`.
+
+### Stride-4 sweep indexes (`hg38-u2`, `hg38-meth-u2`, optional)
+
+The regular sweep and thread-scaling ladder densify their `> v0.12.0` fg-labs
+alignments to **stride-4** (`sweep_dense_sa_shift: 2`) — a shallower step than
+the arena's stride-2, because the sweep runs on 32 GB hosts where stride-2's
+~+12 GB would not fit but stride-4's ~+4 GB does. Same "separate copy,
+byte-identical alignment" contract. Two copies are needed — the DNA index and
+the meth seed:
+
+```bash
+# Same fg-labs binary as the arena section above (bwa-mem2.fg-labs in the image).
+BWA=bwa-mem2.fg-labs
+
+# DNA index (hg38-u2): full copy, re-sa the SA to stride-4 (rate 1/(1<<2)).
+cp -r ~/refs/Homo_sapiens_assembly38 ~/refs/Homo_sapiens_assembly38-u2
+cd ~/refs/Homo_sapiens_assembly38-u2
+"$BWA" re-sa -u 2 -t 16 Homo_sapiens_assembly38.fasta
+REF_ROOT=~/refs/Homo_sapiens_assembly38-u2 \
+    bash scripts/upload_reference.sh <your-bucket> hg38-u2
+
+# Meth index (hg38-meth-u2): copy the meth reference tree, then densify ONLY
+# the `.meth` SEED index (D3 seeds against it and pac-fetches the original, so
+# only the seed SA is resolved). The idxbase for re-sa is `<ref>.meth`.
+cp -r ~/refs/hg38-meth ~/refs/hg38-meth-u2
+cd ~/refs/hg38-meth-u2
+"$BWA" re-sa -u 2 -t 16 Homo_sapiens_assembly38.fasta.meth
+REF_ROOT=~/refs/hg38-meth-u2 \
+    bash scripts/upload_reference.sh <your-bucket> hg38-meth-u2
+```
+
+To disable, set `sweep_dense_sa_shift: 3`. Set it to `3` too when benchmarking a
+**pre-#510 (≤ v0.12.0) SHA** (bisect / historical re-run) — that binary cannot
+read a densified on-disk SA.
+
 ---
 
 ## 2. Benchmark FASTQs

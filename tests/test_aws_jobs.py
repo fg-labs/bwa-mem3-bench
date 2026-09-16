@@ -149,12 +149,12 @@ def test_kill_all_enumerates_all_queues_and_active_states(
 
 
 def test_all_queues_covers_the_arena_queues() -> None:
-    """The arena's on-demand queues (`bwa-mem3-bench-c8a-arena`,
-    `bwa-mem3-bench-c8g-arena`) are SEPARATE from each arch's regular spot
-    queue (e.g. `bwa-mem3-bench-c8a`) -- a queue missing from `_ALL_QUEUES` is
+    """The arena's on-demand queues (`bwa-mem3-bench-m8a-arena`,
+    `bwa-mem3-bench-m8g-arena`) are SEPARATE from each arch's regular spot
+    queue (e.g. `bwa-mem3-bench-m8a`) -- a queue missing from `_ALL_QUEUES` is
     invisible to `kill_all`/`jobs`/`cost`, leaving a stuck on-demand arena job
     running (and billing) past a supposed bulk-terminate. Regression test for
     a real CodeRabbit finding: this coverage was missing entirely before
     `aws_config.AwsConfig.arena_queues` existed."""
-    assert "bwa-mem3-bench-c8a-arena" in aws_module._ALL_QUEUES
-    assert "bwa-mem3-bench-c8g-arena" in aws_module._ALL_QUEUES
+    assert "bwa-mem3-bench-m8a-arena" in aws_module._ALL_QUEUES
+    assert "bwa-mem3-bench-m8g-arena" in aws_module._ALL_QUEUES

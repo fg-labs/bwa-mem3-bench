@@ -15,22 +15,51 @@ conditions -- not by two medians that were never comparable in the first
 place.
 
 Scope, deliberately narrow. ONE sample (`config/defaults.yaml`'s
-`arena.sample`, wgs-5M), TWO archs (c8a, c8g) -- see the CDK on-demand queues
+`arena.sample`, wgs-5M), TWO archs (m8a, m8g) -- see the CDK on-demand queues
 below for why archs are capped, and AskUserQuestion scoping in the PR that
 added this rule for why samples are capped to one. This is a
 correctness-anchored progression view ALONGSIDE the cross-arch sweep, not a
 replacement for it.
 
-Why c8a, not c7i, for the x86 leg. `aws ec2 describe-instance-types` on
-`.4xlarge`: c7i (Intel Sapphire Rapids) and m7i report `DefaultThreadsPerCore:
-2` -- 16 vCPUs is 8 PHYSICAL cores under 2-way SMT. c8a (AMD, next-gen after
-c7a's Genoa) and c8g (Graviton4) both report `DefaultThreadsPerCore: 1` and
-`ValidThreadsPerCore: [1]` -- SMT isn't even an option, so 16 vCPUs IS 16
-physical cores. `-t 16` on the old c7i leg was therefore 16 software threads
-contending for 8 cores' worth of execution ports, while the c8g leg got 16
-independent cores for the same thread count -- not an apples-to-apples core
-count despite matching vCPU/thread numbers. c8a fixes that: both arena legs
-now run `-t 16` on 16 real cores.
+Why m8a / m8g (64 GB), not c8a/c8g (32 GB) or c7i. `aws ec2
+describe-instance-types` on `.4xlarge`: c7i (Intel Sapphire Rapids) and m7i
+report `DefaultThreadsPerCore: 2` -- 16 vCPUs is 8 PHYSICAL cores under 2-way
+SMT. c8a/c8g AND their general-purpose siblings m8a (AMD, same family as c8a) /
+m8g (Graviton4, same family as c8g) all report `ValidThreadsPerCore: [1]` --
+SMT isn't even an option, so 16 vCPUs IS 16 physical cores. `-t 16` on the old
+c7i leg was therefore 16 software threads contending for 8 cores' worth of
+execution ports, while a no-SMT leg gets 16 independent cores for the same
+thread count. The arena moved off c7i to c8a/c8g for that reason, and then off
+c8a/c8g (32 GB) to m8a/m8g (64 GB) for a second: the `re-sa -u 1` stride-2 arm
+(see "SA densification" below) needs ~27-28 GB resident, which does not fit
+under a 32 GB host / 28 GB cgroup. m8a/m8g change ONLY RAM-per-core (2 -> 4
+GiB/vCPU) versus c8a/c8g -- same core count, same no-SMT, same CPU family -- and
+the extra RAM also lets the `cat` prewarm finally hold the heavy arms fully warm
+(upstream's ~21 GB index needs ~42 GB of cache+RSS, which never fit on 32 GB).
+TRADE-OFF: unlike c8g, m8a/m8g are NOT cross-arch sweep archs, so the arena no
+longer runs on the exact hardware the spot sweep uses -- accepted to fit the
+dense-SA arm.
+
+SA densification (fg-labs/bwa-mem3#510). Arms newer than v0.12.0 align against
+a stride-2 `re-sa -u 1` copy of the index (`hg38-u1`), staged
+SEPARATELY from the stock stride-8 index so older fg-labs releases, upstream
+bwa-mem2, lh3/bwa and minibwa -- which may not parse a densified on-disk SA
+table -- keep the stock one. The candidate is always a dense arm; historical
+release arms cross the threshold as they age past v0.12.0. Byte-identical
+alignment output (only SA-resolve speed changes), so the fgumi correctness
+check below is unaffected. See `_arm_uses_dense_sa` / `_arena_dense_ref_inputs`;
+set `arena.dense_sa_shift: 3` to turn it off (all arms on the stock index).
+
+WHAT THE CANDIDATE-VS-PRIOR RATIO MEANS with this on. The candidate (dense) is
+compared against the prior release (v0.12.0, stock stride-8), so its headline
+`vs_prior_release` speedup folds in the ~4% SA-resolve win from the denser
+index ON TOP OF any codegen delta -- it is a SHIPPED-CONFIGURATION comparison,
+not the pure-codegen, identical-conditions delta the arena gives between two
+stock arms. This is deliberate: `> v0.12.0` releases are recommended to run
+`-u 1`, so the arena measures them as they will run. Two consequences to keep
+straight: (1) once the prior release is itself `> v0.12.0` (both arms dense),
+the ratio is codegen-only again; (2) to isolate codegen for a candidate whose
+prior is stock, read the STOCK sibling arms, or set `dense_sa_shift: 3`.
 
 Scheduled first, not just included. `align_arena` carries `priority: 100`
 (every other rule defaults to 0), so when `bless_release`'s full matrix
@@ -50,8 +79,8 @@ ladder) because it names literal binaries the builder base image bakes in:
                             existing `align_bwa` rule's own "wall-time only"
                             scope for a third-party comparator).
   - `bwa-mem2-upstream`  -- upstream bwa-mem2 v2.2.1. x86 ONLY -- upstream has
-                            no ARM build (`_has_upstream_baseline`), so c8g's
-                            arm list is one shorter than c8a's.
+                            no ARM build (`_has_upstream_baseline`), so m8g's
+                            arm list is one shorter than m8a's.
   - `minibwa`            -- lh3/minibwa (timing only, matches `align_minibwa`).
   - `v021` .. `v110`     -- every prior BLESSED bwa-mem3 release
                             (docs/release-allowances.yaml `to_sha`s), built
@@ -279,6 +308,70 @@ ARENA_MINIBWA_FLAGS = " ".join(_arena_sample_cfg.minibwa_flags)
 ARENA_BATCH_FLAG = _batch_flag()
 
 
+# --- SA densification (fg-labs/bwa-mem3#510) ---------------------------------
+#
+# Arms NEWER than v0.12.0 align against a stride-2 `re-sa -u 1` copy of the
+# index (`arena.dense_sa_shift`), which trades ~+12 GB resident RAM for ~-4%
+# CPU. Older fg-labs releases, upstream bwa-mem2, lh3/bwa and minibwa keep the
+# stock stride-8 index -- partly by choice ("prior versions don't use it") and
+# partly because a pre-#510 / foreign reader may not parse a densified on-disk
+# SA table at all. That split is why the dense table is a SEPARATE index copy
+# (`hg38-u1`), not an in-place `re-sa` of the one shared index.
+#
+# `STOCK_SA_SHIFT` (3 = stride-8, imported from workflow_config so the loader's
+# validation bound and this feature-off gate cannot drift) is the sentinel for
+# "feature off": at that shift `_arm_uses_dense_sa` is False for every arm,
+# `_arena_dense_ref_inputs` falls back to the stock index, and no separate copy
+# is staged. Must come after `_arena_sample_cfg` (it reads `.reference`).
+ARENA_DENSE_SA_SHIFT = CONFIG.arena.dense_sa_shift
+
+# The dense index's reference NAME, derived from the shift so it cannot drift
+# from the staged copy: shift 1 -> "hg38-u1" (config load has already verified
+# that reference exists -- see `_arena_from` in workflow_config.py), shift 3 ->
+# the stock reference (feature off).
+_ARENA_STOCK_REFERENCE = _arena_sample_cfg.reference
+ARENA_DENSE_REFERENCE = (
+    _ARENA_STOCK_REFERENCE
+    if ARENA_DENSE_SA_SHIFT >= STOCK_SA_SHIFT
+    else f"{_ARENA_STOCK_REFERENCE}-u{ARENA_DENSE_SA_SHIFT}"
+)
+
+# The arena runs on 64 GB m8a/m8g hosts (config/archs.yaml), NOT the sweep's
+# 32 GB c-series, specifically so the stride-2 arm's ~27-28 GB peak RSS fits.
+# A dedicated ceiling rather than `_mem_mb_for` (28000, sized for the sweep's
+# 32 GB hosts): 56 GB is ~2x the dense arm's RSS and leaves the 64 GB host ~8 GB
+# for the OS, with the rest of the cgroup available as page cache for the `cat`
+# prewarm of the heavy arms (upstream's ~21 GB index, the stride-2 index's
+# ~27 GB) that never fit alongside their RSS on 32 GB.
+ARENA_MEM_MB = 56000
+
+# ARENA_RELEASES is oldest-first, so an arm's release is "newer than v0.12.0"
+# iff its label sits after v120's in the list. Keyed on list position, not a
+# parse of the ambiguous `vNNN` label (v120 = v0.12.0 but v100 = v0.10.0, not
+# v1.0.0), so appending a future release automatically makes it a dense arm.
+ARENA_DENSE_SA_MIN_LABEL = "v120"
+
+
+# Bound once to this module's release list + config knobs; unit-tested via
+# `bwa_mem3_bench.arena_arms.DenseSaPolicy`. See that class for the full gate;
+# in short: the candidate is always dense, a historical `bwa-mem3.<release>`
+# arm is dense iff it is newer than `ARENA_DENSE_SA_MIN_LABEL`,
+# bwa/minibwa/upstream never are, and nothing is dense when the feature is off
+# (`ARENA_DENSE_SA_SHIFT == STOCK_SA_SHIFT`).
+_DENSE_SA_POLICY = DenseSaPolicy(
+    release_labels=tuple(lbl for lbl, _ in ARENA_RELEASES),
+    min_label=ARENA_DENSE_SA_MIN_LABEL,
+    dense_shift=ARENA_DENSE_SA_SHIFT,
+    stock_shift=STOCK_SA_SHIFT,
+)
+
+
+def _arm_uses_dense_sa(label: str, binary: str) -> bool:
+    """True if this arm aligns against the stride-2 `re-sa` index (see
+    `_DENSE_SA_POLICY` / `DenseSaPolicy`)."""
+    return _DENSE_SA_POLICY.uses_dense_sa(label, binary)
+
+
 def _arena_arms(arch: str, *, seed: str) -> list[tuple[str, str, str]]:
     """Return (label, binary, mode) for every arm `arch` runs, in run order.
 
@@ -320,8 +413,16 @@ def _arena_arms(arch: str, *, seed: str) -> list[tuple[str, str, str]]:
 
 
 def _arena_arm_spec(arch: str, *, seed: str) -> str:
-    """`_arena_arms` as `label|binary|mode` tokens for the shell loop."""
-    return " ".join(f"{label}|{binary}|{mode}" for label, binary, mode in _arena_arms(arch, seed=seed))
+    """`_arena_arms` as `label|binary|mode|dense` tokens for the shell loop.
+
+    The 4th field is `1` when the arm aligns against the stride-2 `re-sa` index
+    and `0` otherwise (`_arm_uses_dense_sa`) -- decided in Python (unit-tested)
+    so the shell only has to pick which staged idxbase to pass.
+    """
+    return " ".join(
+        f"{label}|{binary}|{mode}|{int(_arm_uses_dense_sa(label, binary))}"
+        for label, binary, mode in _arena_arms(arch, seed=seed)
+    )
 
 
 # `_ref_inputs` / `_bwa_ref_inputs` / `_minibwa_ref_inputs` each take a
@@ -360,9 +461,26 @@ def _arena_ref_inputs(wc):
     return seen
 
 
+def _arena_dense_ref_inputs(wc):
+    """bwa-mem3 sidecars for the stride-2 `re-sa` index the dense arms use.
+
+    Reuses `_ref_inputs` with a reference override (`ARENA_DENSE_REFERENCE`,
+    e.g. `hg38-u1`) so the sidecar list is never restated. When the feature is
+    off (`ARENA_DENSE_SA_SHIFT == STOCK_SA_SHIFT`) this resolves to the STOCK
+    reference, so the list is always non-empty and `{input.ref_dense[0]}`
+    always formats -- the shell just never routes an arm to it, because
+    `_arm_uses_dense_sa` is then False for all of them.
+
+    Only the bwa-mem2/bwa-mem3 family is staged (bwa/minibwa are never dense
+    arms). `wc` is unused -- see `_arena_ref_inputs`.
+    """
+    return _ref_inputs(_ARENA_WC, meth_index="d3", reference=ARENA_DENSE_REFERENCE)
+
+
 rule align_arena:
     input:
         ref = _arena_ref_inputs,
+        ref_dense = _arena_dense_ref_inputs,
         fastqs = [f"{_arena_sample_cfg.source}{name}" for name in _arena_sample_cfg.fastq_names],
     output:
         tsv            = "arena/{sha}/{arch}/arena.tsv",
@@ -386,7 +504,7 @@ rule align_arena:
     threads: CONFIG.arena.threads
     resources:
         batch_queue = lambda wc: ARENA_QUEUES[wc.arch],
-        mem_mb = _mem_mb_for(ARENA_SAMPLE),
+        mem_mb = ARENA_MEM_MB,
         container_image = lambda wc: image_for_arch(wc.arch),
         # The arena is long by construction: an interleaved warmup + N measured
         # cycles across 13-14 arms. The profile default (7200 s) can be tight
@@ -399,6 +517,11 @@ rule align_arena:
         arm_spec = lambda wc: _arena_arm_spec(wc.arch, seed=wc.sha),
         reps = CONFIG.arena.reps,
         prior_label = ARENA_PRIOR_RELEASE_LABEL,
+        # Whether the candidate's dedicated SMEM-lockstep pin probe reads the
+        # stride-2 `re-sa` index -- the candidate is always a dense arm when the
+        # feature is on, so the probe must load the same idxbase its measured
+        # reps do (1) or the stock one (0). See `_arm_uses_dense_sa`.
+        fg_labs_dense = int(_arm_uses_dense_sa("fg-labs-default", "bwa-mem2.fg-labs")),
         probe_seconds = CONFIG.arena.host_probe_seconds,
         label_probe_seconds = CONFIG.arena.label_probe_seconds,
         fg_labs_flags = ARENA_FG_LABS_FLAGS,
@@ -446,14 +569,21 @@ rule align_arena:
             # 0-record (or missing) BAM; the caller reads it under `set +e`,
             # deliberately suspended around this call -- see the module
             # docstring's "Never hard-fail on an old binary".
-            local label="$1" binary="$2" mode="$3" rep="$4" out="$5"
+            local label="$1" binary="$2" mode="$3" rep="$4" out="$5" dense="$6"
             local cmd
+            # Arms newer than v0.12.0 (`dense=1`, decided by `_arm_uses_dense_sa`
+            # in Python) align against the stride-2 `re-sa` index staged under
+            # `{input.ref_dense[0]}`; everything else uses the stock stride-8
+            # `{input.ref[0]}`. Only bwa-mem2.fg-labs / historical bwa-mem3 arms
+            # are ever dense, so bwa/minibwa always fall through to the stock ref.
+            local ref="{input.ref[0]}"
+            [ "$dense" = "1" ] && ref="{input.ref_dense[0]}"
             case "$binary" in
                 bwa)
-                    cmd="bwa mem -t {threads} {params.batch_flag} {params.mem_flags} {input.ref[0]} {input.fastqs}"
+                    cmd="bwa mem -t {threads} {params.batch_flag} {params.mem_flags} $ref {input.fastqs}"
                     ;;
                 minibwa)
-                    cmd="minibwa map -t {threads} {params.minibwa_flags} {input.ref[0]} {input.fastqs}"
+                    cmd="minibwa map -t {threads} {params.minibwa_flags} $ref {input.fastqs}"
                     ;;
                 bwa-mem2.fg-labs)
                     local fast_flag=""
@@ -466,7 +596,7 @@ rule align_arena:
                     # very wall_s values this pin exists to keep clean.
                     local verbosity_flag=""
                     [ "$rep" -eq 0 ] && verbosity_flag="-v 3"
-                    cmd="$binary mem -t {threads} $verbosity_flag {params.batch_flag} {params.mem_flags} {params.fg_labs_flags} $fast_flag {input.ref[0]} {input.fastqs}"
+                    cmd="$binary mem -t {threads} $verbosity_flag {params.batch_flag} {params.mem_flags} {params.fg_labs_flags} $fast_flag $ref {input.fastqs}"
                     ;;
                 *)
                     # Historical bwa-mem3 releases and bwa-mem2-upstream: NEVER
@@ -481,7 +611,7 @@ rule align_arena:
                     # into a SKIPPED row, not a job failure.
                     local fast_flag=""
                     [ "$mode" = "fast" ] && fast_flag="--fast"
-                    cmd="$binary mem -t {threads} {params.batch_flag} {params.mem_flags} $fast_flag {input.ref[0]} {input.fastqs}"
+                    cmd="$binary mem -t {threads} {params.batch_flag} {params.mem_flags} $fast_flag $ref {input.fastqs}"
                     ;;
             esac
             # --trace: per-tick RSS/IO/page-fault samples, not just the
@@ -510,7 +640,12 @@ rule align_arena:
         # a missing sidecar must not fail the whole job over a warm-cache
         # nicety.
         prewarm_arm() {{
-            local binary="$1"
+            local binary="$1" dense="$2"
+            # Warm the SAME idxbase the matching run_arm will read: dense
+            # bwa-mem2/bwa-mem3 arms use the stride-2 `re-sa` copy, so its
+            # (larger) .bwt.2bit.64 is what must be resident, not the stock one.
+            local ref="{input.ref[0]}"
+            [ "$dense" = "1" ] && ref="{input.ref_dense[0]}"
             case "$binary" in
                 bwa)
                     cat {input.ref[0]}.bwt {input.ref[0]}.sa {input.ref[0]}.pac
@@ -519,7 +654,7 @@ rule align_arena:
                     cat {input.ref[0]}.l2b {input.ref[0]}.mbw
                     ;;
                 *)
-                    cat {input.ref[0]}.0123 {input.ref[0]}.bwt.2bit.64 {input.ref[0]}.pac
+                    cat "$ref".0123 "$ref".bwt.2bit.64 "$ref".pac
                     ;;
             esac > /dev/null 2>/dev/null || true
             cat {input.fastqs} > /dev/null 2>/dev/null || true
@@ -584,7 +719,7 @@ rule align_arena:
         export BWA3_SMEM_LOCKSTEP_PROBE=1
         PIN_PROBE_OUT="$OUTDIR/runs/fg-labs-default.default.pinprobe"
         set +e
-        run_arm "fg-labs-default" "bwa-mem2.fg-labs" "default" 0 "$PIN_PROBE_OUT"
+        run_arm "fg-labs-default" "bwa-mem2.fg-labs" "default" 0 "$PIN_PROBE_OUT" {params.fg_labs_dense}
         status=$?
         set -e
         [ $status -ne 0 ] && echo "pin probe: fg-labs-default failed (exit=$status); a parsed width will be used if available, otherwise --fast rows will run unpinned (the build's own default width resolution)" >&2
@@ -632,7 +767,7 @@ rule align_arena:
         # is what stops whichever label happens to run last from always being
         # the newest candidate.
         for entry in $ARM_SPEC; do
-            IFS='|' read -r label binary mode <<< "$entry"
+            IFS='|' read -r label binary mode dense <<< "$entry"
 
             for rep in $(seq 1 {params.reps}); do
                 # Untimed per-rep page-cache top-off, run immediately before
@@ -651,11 +786,11 @@ rule align_arena:
                 # convergence pass, done untimed instead of leaking into
                 # wall_s.
                 CAT_T0=$SECONDS
-                prewarm_arm "$binary"
-                echo "prewarm: label=$label mode=$mode rep=$rep cat_s=$((SECONDS - CAT_T0))" >&2
+                prewarm_arm "$binary" "$dense"
+                echo "prewarm: label=$label mode=$mode rep=$rep dense=$dense cat_s=$((SECONDS - CAT_T0))" >&2
                 OUT="$OUTDIR/runs/${{label}}.${{mode}}.rep${{rep}}"
                 set +e
-                run_arm "$label" "$binary" "$mode" "$rep" "$OUT"
+                run_arm "$label" "$binary" "$mode" "$rep" "$OUT" "$dense"
                 status=$?
                 set -e
                 if [ $status -ne 0 ]; then

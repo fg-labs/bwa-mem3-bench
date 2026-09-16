@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **SA densification for `> v0.12.0` fg-labs alignments (opt-in,
+  fg-labs/bwa-mem3#510).** Arms newer than v0.12.0 align against a pre-built,
+  denser `re-sa` copy of the index, staged separately from the stock stride-8
+  index so older fg-labs releases, upstream bwa-mem2, lh3/bwa and minibwa keep
+  the stock one (a pre-#510 or foreign reader may not parse a densified on-disk
+  SA table). Alignment output is byte-identical; only SA-resolve speed changes.
+  Two shifts, sized to their hosts:
+    - **Arena** — stride-2 (`arena.dense_sa_shift: 1` → `references/hg38-u1`,
+      ~+12 GB), afforded by the 64 GB m8a/m8g arena hosts.
+    - **Sweep + thread-scaling** — stride-4 (`sweep_dense_sa_shift: 2` →
+      `references/hg38-u2` and `references/hg38-meth-u2`, ~+4 GB), which fits the
+      32 GB sweep hosts.
+
+  Both are gated (`3` = stock/off; set `3` for a pre-#510 SHA), validated
+  against configured references at config load, and surfaced in the bless plan.
+  The index copies are one-time manual uploads —
+  `scripts/upload_reference.sh {hg38-u1,hg38-u2,hg38-meth-u2}` (see
+  `docs/data-setup.md`).
+
+### Changed
+
+- **Arena moved from c8a/c8g (32 GB) to m8a/m8g (64 GB) on-demand hosts** — the
+  general-purpose siblings of the same AMD / Graviton4 families (16 real cores,
+  no SMT), whose extra RAM holds the stride-2 arm's ~27–28 GB peak RSS that does
+  not fit under a 32 GB host / 28 GB cgroup. The arena's on-demand Batch queues
+  are renamed accordingly (`bwa-mem3-bench-{c8a,c8g}-arena` →
+  `-{m8a,m8g}-arena`). Trade-off: the arena no longer runs on the exact hardware
+  the cross-arch spot sweep uses.
+
 ### Fixed
 
 - **Panel benchmark sample replaced (data correction).** The former

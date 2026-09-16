@@ -34,6 +34,18 @@ stale comparison:
 `tests/test_arena_ladder.py` enforces the same ladder invariant in
 `pixi run check`, so a stale ladder fails CI even if this preflight is skipped.
 
+**One-time prerequisite — the densified index copies.** The bench aligns its
+`> v0.12.0` fg-labs arms against separate `re-sa` index copies: the arena uses
+stride-2 (`arena.dense_sa_shift: 1` → `references/hg38-u1`), and the sweep +
+thread-scaling use stride-4 (`sweep_dense_sa_shift: 2` → `references/hg38-u2`
+and `references/hg38-meth-u2`). Upload all three once (see `docs/data-setup.md`
+→ "Stride-2 arena index" and "Stride-4 sweep indexes"); the preflight is offline
+and cannot check S3, so a missing copy surfaces only when a worker fails at
+input staging deep into the paid run. The bless plan prints this reminder. To
+skip either feature, set the corresponding `*_dense_sa_shift: 3` — and set both
+to `3` when blessing a pre-#510 (≤ v0.12.0) SHA, whose binary cannot read a
+densified on-disk SA.
+
 ## The steps
 
 The three named **gates** a bless exists to check (see `rule bless_release` in

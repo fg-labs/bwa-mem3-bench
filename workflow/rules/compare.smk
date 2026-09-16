@@ -333,7 +333,11 @@ rule compat_thread_invariance:
     Fails the run on any difference, via fgumi's exit status.
     """
     input:
-        ref = lambda wc: _ref_inputs(wc, meth_index="none"),
+        # Same sweep densification as `align_fg_labs`: a `> v0.12.0` fg-labs SHA
+        # runs against the pre-built `<ref>-u<shift>` copy. Safe here because both
+        # thread counts stage the SAME (dense) index, so the invariance check is
+        # unaffected; `meth_index="none"` is preserved. See `_fg_labs_ref_inputs`.
+        ref = lambda wc: _fg_labs_ref_inputs(wc, meth_index="none"),
         fastqs = lambda wc: _query_fastqs(wc),
     output:
         report = "runs/{sha}/compat-invariance/{sample}/{arch}/report.txt",

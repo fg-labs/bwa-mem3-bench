@@ -25,6 +25,7 @@ across different arena submissions).
 from __future__ import annotations
 
 import random
+from dataclasses import dataclass
 
 ArenaArm = tuple[str, str, str]
 
@@ -61,3 +62,47 @@ def front_load_fast_arms(arms: list[ArenaArm], *, seed: str) -> list[ArenaArm]:
     rng.shuffle(fast)
     rng.shuffle(default)
     return fast + default
+
+
+@dataclass(frozen=True)
+class DenseSaPolicy:
+    """Which arena arms align against the stride-2 ``re-sa`` index.
+
+    Extracted from ``arena.smk`` so the "newer than v0.12.0" gate is
+    unit-testable without a Snakemake runtime. The gate is decided by POSITION
+    in the oldest-first ``release_labels`` list rather than by parsing the
+    ambiguous ``vNNN`` label (``v120`` = v0.12.0 but ``v100`` = v0.10.0, not
+    v1.0.0).
+
+    :param release_labels: every historical release label, oldest first.
+    :param min_label: the exclusive threshold label; arms after it are dense.
+    :param dense_shift: the configured SA-sample-rate shift (1 = stride-2).
+    :param stock_shift: the stock/off shift (3 = stride-8); when
+        ``dense_shift >= stock_shift`` the feature is off and no arm is dense.
+    """
+
+    release_labels: tuple[str, ...]
+    min_label: str
+    dense_shift: int
+    stock_shift: int
+
+    def uses_dense_sa(self, label: str, binary: str) -> bool:
+        """Whether the ``(label, binary)`` arm uses the densified index.
+
+        - The candidate (``bwa-mem2.fg-labs``) is always dense: it is the SHA
+          under measurement, newer than every blessed release.
+        - A historical ``bwa-mem3.<release>`` arm (default or ``<release>-fast``)
+          is dense iff its release comes strictly after ``min_label``.
+        - lh3/bwa, minibwa, and upstream bwa-mem2 are never dense.
+        - When the feature is off, NO arm is dense.
+        """
+        if self.dense_shift >= self.stock_shift:
+            return False
+        if binary == "bwa-mem2.fg-labs":
+            return True
+        if not binary.startswith("bwa-mem3."):
+            return False
+        release = label[: -len("-fast")] if label.endswith("-fast") else label
+        if release not in self.release_labels or self.min_label not in self.release_labels:
+            return False
+        return self.release_labels.index(release) > self.release_labels.index(self.min_label)

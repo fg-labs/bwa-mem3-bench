@@ -29,6 +29,29 @@ from bwa_mem3_bench import REPO_ROOT
 
 ARENA_SMK = Path(REPO_ROOT) / "workflow" / "rules" / "arena.smk"
 RULES_DIR = Path(REPO_ROOT) / "workflow" / "rules"
+SNAKEFILE = Path(REPO_ROOT) / "workflow" / "Snakefile"
+
+
+def test_workflow_loads_without_error() -> None:
+    """`snakemake --list` parses and EXECUTES every included .smk at module
+    scope. This is the only check that catches a load-order bug in a rules file
+    -- e.g. a module-level name used before its definition -- because the
+    text-based tests here never execute the file and no unit test imports it (a
+    .smk needs Snakemake's injected globals). Regression guard for a real one:
+    arena.smk's SA-densification block referenced `_arena_sample_cfg` 60+ lines
+    before it was defined, a NameError at load that every green test missed."""
+    result = subprocess.run(  # noqa: S603, S607 -- fixed args, no shell
+        ["snakemake", "-s", str(SNAKEFILE), "--list"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=180,
+    )
+    assert result.returncode == 0, (
+        f"`snakemake --list` failed to load the workflow (a .smk parse/NameError "
+        f"at module scope?):\nstdout:\n{result.stdout[-2000:]}\nstderr:\n{result.stderr[-2000:]}"
+    )
 
 
 def test_arena_queues_are_derived_from_config_not_a_hardcoded_dict() -> None:
@@ -90,15 +113,17 @@ def test_align_arena_is_scheduled_ahead_of_every_other_rule() -> None:
                 )
 
 
-# A representative `label|binary|mode` list, matching every distinct case
+# A representative `label|binary|mode|dense` list, matching every distinct case
 # `run_arm`'s `case "$binary" in` dispatches on -- including the SHA-like
-# `394f8f8` label, the least string-like of the historical release names.
+# `394f8f8` label, the least string-like of the historical release names. The
+# 4th field is the dense-SA flag (`_arm_uses_dense_sa`): 1 for the candidate,
+# 0 for the historical/foreign arms shown here.
 _SAMPLE_ARM_SPEC = (
-    "bwa|bwa|default minibwa|minibwa|default "
-    "bwa-mem2-upstream|bwa-mem2.upstream|default "
-    "v021|bwa-mem3.v021|default 394f8f8|bwa-mem3.394f8f8|default "
-    "fg-labs-default|bwa-mem2.fg-labs|default "
-    "fg-labs-fast|bwa-mem2.fg-labs|fast"
+    "bwa|bwa|default|0 minibwa|minibwa|default|0 "
+    "bwa-mem2-upstream|bwa-mem2.upstream|default|0 "
+    "v021|bwa-mem3.v021|default|0 394f8f8|bwa-mem3.394f8f8|default|0 "
+    "fg-labs-default|bwa-mem2.fg-labs|default|1 "
+    "fg-labs-fast|bwa-mem2.fg-labs|fast|1"
 )
 _SAMPLE_ARM_SPEC_COUNT = 7
 # The align_arena rule declares exactly one arm-spec-iterating `for` loop --
@@ -155,7 +180,7 @@ def test_arm_spec_for_loop_does_not_trigger_a_bash_syntax_error() -> None:
     ARM_SPEC="{_SAMPLE_ARM_SPEC}"
     count=0
     for entry in $ARM_SPEC; do
-        IFS='|' read -r label binary mode <<< "$entry"
+        IFS='|' read -r label binary mode dense <<< "$entry"
         count=$((count + 1))
     done
     echo "$count"
@@ -254,7 +279,7 @@ def test_arm_spec_literal_substitution_reproduces_the_original_bug() -> None:
     """
     script = f"""
     for entry in {_SAMPLE_ARM_SPEC}; do
-        IFS='|' read -r label binary mode <<< "$entry"
+        IFS='|' read -r label binary mode dense <<< "$entry"
     done
     """
     result = subprocess.run(  # noqa: S603, S607 -- fixed, test-owned Bash script
@@ -337,6 +362,7 @@ def test_fg_labs_invocation_requests_v3_only_on_the_warmup_rep() -> None:
     script = f"""
     check_cmd() {{
         local binary="$1" mode="$2" rep="$3"
+        local ref="ref.fa"   # set outside the case block in the real run_arm
         case "$binary" in
             {case_body}
         esac
@@ -353,6 +379,89 @@ def test_fg_labs_invocation_requests_v3_only_on_the_warmup_rep() -> None:
     assert len(lines) == _EXPECTED_CHECK_CMD_INVOCATIONS, f"expected 2 output lines, got {lines!r}"
     assert "-v 3" in lines[0], f"warmup (rep=0) must pass -v 3: {lines[0]!r}"
     assert "-v 3" not in lines[1], f"measured rep (rep=1) must NOT pass -v 3: {lines[1]!r}"
+
+
+def test_dense_sa_min_label_is_a_real_release() -> None:
+    """`ARENA_DENSE_SA_MIN_LABEL` gates by position in ARENA_RELEASES, so it
+    MUST be a label in that list -- otherwise `arm_uses_dense_sa` falls to its
+    'min_label not in release_labels -> stock' guard and every historical arm
+    silently stays stock, no matter how new."""
+    text = ARENA_SMK.read_text()
+    m = re.search(r'ARENA_DENSE_SA_MIN_LABEL\s*=\s*"([^"]+)"', text)
+    assert m, "ARENA_DENSE_SA_MIN_LABEL assignment not found"
+    min_label = m.group(1)
+    release_labels = re.findall(r'\(\s*"([^"]+)"\s*,\s*"[0-9a-f]{40}"\s*\)', text)
+    assert min_label in release_labels, (
+        f"ARENA_DENSE_SA_MIN_LABEL={min_label!r} is not in ARENA_RELEASES "
+        f"{release_labels!r}; the dense-SA gate would never fire for a release"
+    )
+
+
+def _run_arm_body() -> str:
+    """The `run_arm() { ... }` function body, sliced OUT of the surrounding
+    script (it ends where `prewarm_arm()` begins). Scoping to run_arm matters:
+    prewarm_arm carries the identical ref-selection lines, so a whole-file
+    `in text` check cannot prove the routing lives in run_arm."""
+    text = ARENA_SMK.read_text()
+    start = text.index("run_arm() {{")
+    end = text.index("prewarm_arm() {{", start)
+    return text[start:end]
+
+
+def test_run_arm_routes_dense_arms_to_the_stride2_index() -> None:
+    """A dense arm (`dense=1`) must align against `{input.ref_dense[0]}` (the
+    stride-2 `re-sa` copy), everything else against the stock `{input.ref[0]}`.
+    run_arm selects this ONCE, before the case block, into `$ref`; the aligner
+    cmds then reference `$ref`, never a hard-coded index."""
+    body = _run_arm_body()
+    # The selection lives IN run_arm (not merely somewhere in the file).
+    assert 'local ref="{input.ref[0]}"' in body
+    assert '[ "$dense" = "1" ] && ref="{input.ref_dense[0]}"' in body
+    # Every aligner cmd must read $ref (never a hard-coded idxbase), or a dense
+    # arm would silently align against the stock stride-8 index. All four cases
+    # (bwa, minibwa, fg-labs, *) end their cmd with `$ref {input.fastqs}`.
+    _EXPECTED_REF_USING_CMDS = 4
+    assert body.count("$ref {input.fastqs}") == _EXPECTED_REF_USING_CMDS, (
+        "expected all four run_arm aligner cmds to end with `$ref {input.fastqs}`"
+    )
+    assert "{input.ref[0]} {input.fastqs}" not in body, (
+        "an aligner cmd hard-codes the stock idxbase `{input.ref[0]}` -- dense "
+        "arms would then ignore the stride-2 index; use $ref"
+    )
+
+    # Execute the real selection lines for dense=0 and dense=1.
+    script = r"""
+    select_ref() {
+        local dense="$1"
+        local ref="stock.fa"
+        [ "$dense" = "1" ] && ref="dense.fa"
+        echo "$ref"
+    }
+    select_ref 0
+    select_ref 1
+    """
+    result = subprocess.run(  # noqa: S603, S607 -- fixed, test-owned Bash script
+        ["bash", "-c", script], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert result.stdout.split() == ["stock.fa", "dense.fa"]
+
+
+def test_run_arm_call_sites_pass_the_dense_argument() -> None:
+    """Both run_arm invocations must pass the 6th positional `dense` arg, or the
+    candidate silently measures against the wrong SA-sample index: the pin probe
+    passes the Python-computed `{params.fg_labs_dense}`, and the measured loop
+    passes the parsed `"$dense"` token. A missing arg makes run_arm read an
+    unset `$6`, which under `set -u` aborts the job (loud) but under the probe's
+    `set +e` window could silently default the ref."""
+    text = ARENA_SMK.read_text()
+    assert (
+        'run_arm "fg-labs-default" "bwa-mem2.fg-labs" "default" 0 "$PIN_PROBE_OUT" '
+        "{params.fg_labs_dense}" in text
+    ), "pin-probe run_arm call must pass {params.fg_labs_dense} as the dense arg"
+    assert 'run_arm "$label" "$binary" "$mode" "$rep" "$OUT" "$dense"' in text, (
+        'measured-loop run_arm call must pass "$dense" as the 6th arg'
+    )
 
 
 def _lockstep_pin_snippet() -> str:
@@ -647,12 +756,16 @@ def _prewarm_arm_snippet() -> str:
     start = text.index("prewarm_arm() {{")
     end = text.index("\n        }}", start) + len("\n        }}")
     snippet = text[start:end].replace("{{", "{").replace("}}", "}")
-    return snippet.replace("{input.ref[0]}", "ref").replace("{input.fastqs}", "r1.fq r2.fq")
+    return (
+        snippet.replace("{input.ref[0]}", "ref")
+        .replace("{input.ref_dense[0]}", "ref_dense")
+        .replace("{input.fastqs}", "r1.fq r2.fq")
+    )
 
 
-def _run_prewarm_arm(binary: str) -> list[str]:
-    """Runs `prewarm_arm(binary)` with `cat` replaced by a stub that logs its
-    file arguments to a side file (not stdout, since the production case
+def _run_prewarm_arm(binary: str, dense: str = "0") -> list[str]:
+    """Runs `prewarm_arm(binary, dense)` with `cat` replaced by a stub that logs
+    its file arguments to a side file (not stdout, since the production case
     block redirects stdout/stderr to `/dev/null` -- a side-file log survives
     that redirect since it is the stub's own explicit target, not FD 1/2).
     Returns the file arguments every `cat` invocation received, in order,
@@ -665,7 +778,7 @@ def _run_prewarm_arm(binary: str) -> list[str]:
         for f in "$@"; do printf '%s\\n' "$f" >> "$LOGFILE"; done
     }}
     {_prewarm_arm_snippet()}
-    prewarm_arm {binary}
+    prewarm_arm {binary} {dense}
     unset -f cat
     cat "$LOGFILE"
     """
@@ -693,6 +806,22 @@ def test_prewarm_arm_cats_the_bwa_mem2_format_index_for_every_other_binary() -> 
         assert _run_prewarm_arm(binary) == expected, binary
 
 
+def test_prewarm_arm_cats_the_dense_index_for_a_dense_arm() -> None:
+    """A dense arm (`dense=1`, e.g. the `> v0.12.0` candidate) must warm the
+    STRIDE-2 `re-sa` idxbase (`ref_dense.*`), not the stock one -- otherwise the
+    (larger) .bwt.2bit.64 the timed run reads would be cold. bwa/minibwa are
+    never dense arms, so they stay on the stock ref even if dense is set."""
+    assert _run_prewarm_arm("bwa-mem2.fg-labs", "1") == [
+        "ref_dense.0123",
+        "ref_dense.bwt.2bit.64",
+        "ref_dense.pac",
+        "r1.fq",
+        "r2.fq",
+    ]
+    # bwa/minibwa ignore dense -- always their own stock-index sidecars.
+    assert _run_prewarm_arm("bwa", "1") == ["ref.bwt", "ref.sa", "ref.pac", "r1.fq", "r2.fq"]
+
+
 def test_prewarm_arm_tolerates_missing_index_files(tmp_path: Path) -> None:
     """A missing sidecar (e.g. no upstream .bwt/.sa on an arch that never
     stages them) must not fail the job over a warm-cache nicety -- the same
@@ -703,7 +832,7 @@ def test_prewarm_arm_tolerates_missing_index_files(tmp_path: Path) -> None:
     set -euo pipefail
     cd {tmp_path}
     {_prewarm_arm_snippet()}
-    prewarm_arm bwa
+    prewarm_arm bwa 0
     echo DONE
     """
     result = subprocess.run(  # noqa: S603, S607 -- fixed, test-owned Bash script

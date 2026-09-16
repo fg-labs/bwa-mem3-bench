@@ -59,11 +59,11 @@ def load() -> AwsConfig:
     # MUST stay in sync with ARCHS in cdk/stacks/batch_stack.py — `aws kill-all`
     # only terminates jobs in the queues listed here, so a queue missing from
     # this tuple is silently skipped and its workers keep running (and billing).
-    # c8g64 and c8a are, respectively, the thread-scaling ladder's and the
-    # arena's queue; both are deliberately absent from `full_archs` in
-    # config/archs.yaml (not part of the cross-arch sweep) but their jobs
+    # c8g64 is the thread-scaling ladder's arch; m8a and m8g are the arena's
+    # (64 GB, x86 / arm64). All three are deliberately absent from `full_archs`
+    # in config/archs.yaml (not part of the cross-arch sweep) but their jobs
     # still need to be killable.
-    archs = ("c8g", "c7g", "c6a", "c7i", "c7a", "m7i", "c8g64", "c8a")
+    archs = ("c8g", "c7g", "c6a", "c7i", "c7a", "m7i", "c8g64", "m8a", "m8g")
     worker_queues = tuple(
         batch.get(f"Queue{arch[0].upper()}{arch[1:].upper()}") or f"{project_name}-{arch}"
         for arch in archs
@@ -71,12 +71,12 @@ def load() -> AwsConfig:
 
     # MUST stay in sync with ARENA_ARCHS in cdk/stacks/batch_stack.py and
     # config/defaults.yaml's arena.archs. These are the arena's ON-DEMAND
-    # queues (`bwa-mem3-bench-c8a-arena`, `bwa-mem3-bench-c8g-arena`) --
+    # queues (`bwa-mem3-bench-m8a-arena`, `bwa-mem3-bench-m8g-arena`) --
     # SEPARATE from each arch's regular spot queue above (e.g.
-    # `bwa-mem3-bench-c8a`) -- so they were previously invisible to `aws
+    # `bwa-mem3-bench-m8a`) -- so they were previously invisible to `aws
     # kill-all`/`aws jobs`/`aws cost`: a stuck arena job would keep running,
     # and billing at on-demand rates, past a supposed bulk-terminate.
-    arena_archs = ("c8a", "c8g")
+    arena_archs = ("m8a", "m8g")
     arena_queues = tuple(f"{project_name}-{arch}-arena" for arch in arena_archs)
 
     return AwsConfig(
