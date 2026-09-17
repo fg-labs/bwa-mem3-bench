@@ -230,18 +230,21 @@ COPY bwa_mem3_bench /opt/bwa_mem3_bench
 COPY pyproject.toml /opt/pyproject.toml
 RUN pip3 install --no-cache-dir --break-system-packages /opt
 
-# Snakemake + AWS Batch executor for running inside the coordinator job.
-# snakemake-storage-plugin-s3 is pinned to 0.3.1: from 0.3.3 onward the PyPI
-# metadata requires snakemake-interface-storage-plugins >= 4.2.3, which in turn
-# needs snakemake >= 9. We're on 8.x. 0.3.1 still declares the 3.x interface
-# and works with snakemake 8.
-# auto_deploy_default_storage_provider=False in our executor fork means workers
-# rely on this system install rather than a per-worker `pip install`.
+# Snakemake 9 + AWS Batch executor for running inside the coordinator job.
+# The biffix coordinator runs Snakemake 9, and a SM9 coordinator cannot drive SM8
+# workers, so the worker image must also be SM9. snakemake-storage-plugin-s3
+# >= 0.3.3 pulls snakemake-interface-storage-plugins >= 4, which needs
+# snakemake >= 9 — the matched SM9 line. The executor is pinned to the head of
+# upstream PR snakemake/snakemake-executor-plugin-aws-batch#55 (ba24f2b): its base
+# (upstream main) already targets the SM9 interface, and it adds the remote-job-state
+# emitter. The biffix coordinator pins the same commit.
+# auto_deploy_default_storage_provider=False in the executor means workers rely on
+# this system install rather than a per-worker `pip install`.
 RUN pip3 install --no-cache-dir --break-system-packages \
-    'snakemake>=8.27,<9' \
-    'snakemake-interface-storage-plugins>=3.2.4,<4' \
-    'snakemake-storage-plugin-s3==0.3.1' \
-    'git+https://github.com/nh13/snakemake-executor-plugin-aws-batch.git@727782c961e96c2a50f934c526072357a22cdf07'
+    'snakemake>=9,<10' \
+    'snakemake-interface-storage-plugins>=4,<5' \
+    'snakemake-storage-plugin-s3>=0.3.3,<0.4' \
+    'git+https://github.com/nh13/snakemake-executor-plugin-aws-batch.git@ba24f2bc37e5b56e75a61320622623354fda61c8'
 
 # Workflow + config so snakemake can find them without a checkout.
 COPY workflow /opt/workflow
