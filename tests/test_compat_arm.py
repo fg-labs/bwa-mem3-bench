@@ -633,7 +633,10 @@ def test_alt_sidecar_is_conditional_not_unconditional() -> None:
     `.alt` mention to fall inside the body of an `alt_aware` conditional.
     """
     for name, text, func in (
-        ("align.smk", ALIGN_SMK, "_ref_inputs"),
+        # align.smk resolves its sidecar list in `_ref_inputs_rel` (`_ref_inputs`
+        # now just wraps each result through `_shared`), so the `alt_aware`
+        # conditional this guard inspects lives there.
+        ("align.smk", ALIGN_SMK, "_ref_inputs_rel"),
         ("align_bwa.smk", ALIGN_BWA_SMK, "_bwa_ref_inputs"),
     ):
         source = _top_level_def(_code_only(text), func)
@@ -650,6 +653,45 @@ def test_alt_sidecar_is_conditional_not_unconditional() -> None:
         assert set(mentions) <= guarded, (
             f"{name}: .alt append is not inside an alt_aware conditional"
         )
+
+
+def _load_shared(shared_root: str):
+    """Compile align.smk's ``_shared`` helper with a given ``SHARED_ROOT``.
+
+    The .smk file isn't importable as a whole, so slice out the one helper and
+    exec it in a namespace stubbing the two module globals it closes over:
+    ``SHARED_ROOT`` (the config value) and Snakemake's ``storage()`` (recorded as
+    a ``("storage", path)`` marker so the resolved path is inspectable).
+    """
+    namespace: dict = {
+        "SHARED_ROOT": shared_root,
+        "storage": lambda p: ("storage", p),
+    }
+    exec(_top_level_def(_code_only(ALIGN_SMK), "_shared"), namespace)
+    return namespace["_shared"]
+
+
+def test_shared_joins_root_and_path_with_a_single_separator() -> None:
+    """A ``shared_root`` without a trailing slash must not fuse into the path.
+
+    ``s3://bucket`` + ``references/hg38/x`` has to resolve to
+    ``s3://bucket/references/hg38/x``, not ``s3://bucketreferences/...`` (which
+    would stage from a nonexistent bucket). An empty root leaves the
+    bucket-relative path untouched, and a trailing-slash root does not double the
+    separator.
+    """
+    # No trailing slash: exactly one separator, wrapped in storage() for s3://.
+    assert _load_shared("s3://bucket")("references/hg38/x") == (
+        "storage",
+        "s3://bucket/references/hg38/x",
+    )
+    # Trailing slash: still exactly one separator.
+    assert _load_shared("s3://bucket/")("references/hg38/x") == (
+        "storage",
+        "s3://bucket/references/hg38/x",
+    )
+    # Empty root: bucket-relative path unchanged and NOT wrapped in storage().
+    assert _load_shared("")("references/hg38/x") == "references/hg38/x"
 
 
 def test_alt_aware_is_a_baseline_input_for_sibling_validation() -> None:

@@ -153,7 +153,39 @@ def _shm_size_mb_for(sample_name: str) -> int:
     return 40960 if _is_meth(sample_name) else 24576
 
 
-def _ref_inputs(wc, *, meth_index: str, reference: str | None = None) -> list[str]:
+# Shared, read-only inputs (the reference tree and pre-staged query FASTQs) live
+# once at a shared namespace root, not under any per-run prefix. This repo's own
+# AWS-Batch profile sets the Snakemake default-storage-prefix to the bucket root,
+# so bucket-relative paths like ``references/hg38/...`` resolve directly. A
+# control plane that roots the default-storage-prefix at a PER-RUN prefix instead
+# (e.g. biffix: ``s3://<bucket>/runs/<id>/``) would look for the shared inputs
+# under that run prefix and miss them. ``shared_root`` (a config key, empty by
+# default => unchanged behaviour under this repo's profile) prepends the shared
+# namespace root and wraps the result in ``storage()`` so Snakemake stages it
+# regardless of the run's default-storage-prefix.
+SHARED_ROOT = str(config.get("shared_root", ""))
+
+
+def _shared(path: str):
+    """Resolve a shared, read-only input against ``SHARED_ROOT``.
+
+    Empty ``SHARED_ROOT`` returns the bucket-relative path unchanged. A non-empty
+    absolute root (e.g. ``s3://bucket/``) yields an explicit ``storage()`` remote
+    path that Snakemake stages regardless of the run's default-storage-prefix.
+    """
+    p = path if not SHARED_ROOT else f"{SHARED_ROOT.rstrip('/')}/{path.lstrip('/')}"
+    return storage(p) if "://" in p else p
+
+
+def _ref_inputs(wc, *, meth_index: str, reference: str | None = None) -> list:
+    """Reference-sidecar inputs, resolved against ``SHARED_ROOT`` (see ``_shared``)."""
+    return [
+        _shared(p)
+        for p in _ref_inputs_rel(wc, meth_index=meth_index, reference=reference)
+    ]
+
+
+def _ref_inputs_rel(wc, *, meth_index: str, reference: str | None = None) -> list[str]:
     """S3-relative paths to every reference-sidecar file the aligner needs.
 
     Paths are returned relative to the snakemake default-storage-prefix
@@ -268,6 +300,11 @@ def _fg_labs_ref_inputs(wc, *, meth_index: str = "d3"):
 
 
 def _query_fastqs(wc):
+    """Query-FASTQ inputs, resolved against ``SHARED_ROOT`` (see ``_shared``)."""
+    return [_shared(p) for p in _query_fastqs_rel(wc)]
+
+
+def _query_fastqs_rel(wc):
     """Ordered list of query-FASTQ input paths for the sample's layout.
 
     Paired samples -> [r1, r2]; single-end (e.g. SBX) -> [r1]. Paths are
