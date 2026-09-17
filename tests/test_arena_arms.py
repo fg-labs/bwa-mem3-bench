@@ -1,8 +1,59 @@
-"""Unit tests for `bwa_mem3_bench.arena_arms.front_load_fast_arms`."""
+"""Unit tests for `bwa_mem3_bench.arena_arms`."""
 
 from __future__ import annotations
 
-from bwa_mem3_bench.arena_arms import front_load_fast_arms
+from bwa_mem3_bench.arena_arms import DenseSaPolicy, front_load_fast_arms
+
+# Oldest-first release labels, mirroring `arena.smk`'s ARENA_RELEASES. `v120`
+# (v0.12.0) is the dense-SA threshold; a hypothetical future `v130` is included
+# to prove a release NEWER than the threshold flips to dense automatically.
+_RELEASES = ("v021", "v090", "v100", "v110", "v120", "v130")
+_MIN_LABEL = "v120"
+_STOCK_SHIFT = 3
+
+
+def _dense(label: str, binary: str, shift: int = 1) -> bool:
+    return DenseSaPolicy(
+        release_labels=_RELEASES,
+        min_label=_MIN_LABEL,
+        dense_shift=shift,
+        stock_shift=_STOCK_SHIFT,
+    ).uses_dense_sa(label, binary)
+
+
+def test_candidate_is_always_dense() -> None:
+    assert _dense("fg-labs-default", "bwa-mem2.fg-labs") is True
+    assert _dense("fg-labs-fast", "bwa-mem2.fg-labs") is True
+
+
+def test_bwa_minibwa_upstream_are_never_dense() -> None:
+    assert _dense("bwa", "bwa") is False
+    assert _dense("minibwa", "minibwa") is False
+    assert _dense("bwa-mem2-upstream", "bwa-mem2.upstream") is False
+
+
+def test_release_arm_is_dense_iff_newer_than_the_threshold() -> None:
+    # At or below v0.12.0: stock.
+    assert _dense("v120", "bwa-mem3.v120") is False
+    assert _dense("v120-fast", "bwa-mem3.v120") is False
+    assert _dense("v090", "bwa-mem3.v090") is False
+    # Strictly newer: dense (proves list position, not label parsing, drives it).
+    assert _dense("v130", "bwa-mem3.v130") is True
+    assert _dense("v130-fast", "bwa-mem3.v130") is True
+
+
+def test_feature_off_makes_every_arm_stock() -> None:
+    """dense_shift == stock_shift disables the feature for all arms, including
+    the candidate."""
+    assert _dense("fg-labs-default", "bwa-mem2.fg-labs", shift=_STOCK_SHIFT) is False
+    assert _dense("v130", "bwa-mem3.v130", shift=_STOCK_SHIFT) is False
+
+
+def test_unknown_release_label_defaults_to_stock() -> None:
+    """A bwa-mem3 arm whose label is absent from the release list (e.g. the raw
+    `394f8f8` SHA label, or a typo) is treated as stock rather than raising."""
+    assert _dense("394f8f8", "bwa-mem3.394f8f8") is False
+
 
 _ARMS = [
     ("bwa", "bwa", "default"),

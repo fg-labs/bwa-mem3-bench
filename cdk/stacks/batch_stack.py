@@ -25,7 +25,7 @@ class ArchSpec:
 @dataclass(frozen=True)
 class ArenaArchSpec:
     logical_id: str      # camelcase for CDK construct ids
-    arch_key: str        # matches workflow/rules/arena.smk's ARENA_QUEUES key (c8a, c8g)
+    arch_key: str        # matches workflow/rules/arena.smk's ARENA_QUEUES key (m8a, m8g)
     instance_type: str   # SAME instance type as the regular spot ArchSpec for this arch —
                           # the arena measures the SAME hardware, just on-demand instead of spot
 
@@ -58,13 +58,17 @@ ARCHS: tuple[ArchSpec, ...] = (
     # Graviton4 has no SMT (ThreadsPerCore=1), so 64 vCPU is 64 physical cores
     # and the scaling curve has no hyperthreading knee at 32.
     ArchSpec("C8g64", "c8g64", "c8g.16xlarge", "linux/arm64"),
-    # c8a: used ONLY by the arena's x86 leg (`--target arena`), never by the
-    # cross-arch sweep — absent from `full_archs` in config/archs.yaml, same
-    # pattern as c8g64 above. No SMT (ValidThreadsPerCore=[1] per `aws ec2
-    # describe-instance-types`), so 16 vCPUs are 16 real cores — unlike c7i's
-    # 8 physical cores under 2-way SMT. See ARENA_ARCHS below and arena.smk's
-    # module docstring for why this replaced c7i as the arena's x86 arch.
-    ArchSpec("C8a", "c8a", "c8a.4xlarge", "linux/amd64"),
+    # m8a / m8g: used ONLY by the arena's x86 / arm64 legs (`--target arena`),
+    # never by the cross-arch sweep — absent from `full_archs` in
+    # config/archs.yaml, same pattern as c8g64 above. Both report
+    # `ValidThreadsPerCore: [1]` (no SMT), so their 16 vCPUs are 16 real cores —
+    # unlike c7i's 8 physical cores under 2-way SMT. They are the 64 GB
+    # general-purpose siblings of c8a (AMD) / c8g (Graviton4); the extra RAM
+    # holds the arena's `re-sa -u 1` stride-2 arm, which does not fit on the
+    # 32 GB c8a/c8g they replaced. See ARENA_ARCHS below and arena.smk's module
+    # docstring.
+    ArchSpec("M8a", "m8a", "m8a.4xlarge", "linux/amd64"),
+    ArchSpec("M8g", "m8g", "m8g.4xlarge", "linux/arm64"),
 )
 
 
@@ -72,20 +76,23 @@ ARCHS: tuple[ArchSpec, ...] = (
 # (workflow/rules/arena.smk, config/defaults.yaml's `arena.archs`). Every arm
 # in that job runs INTERLEAVED on one host, so a spot reclaim mid-job would
 # corrupt every arm's timing at once — the same reasoning that keeps
-# `CoordinatorCe` below on-demand. Scoped to c8a + c8g only (not every arch in
+# `CoordinatorCe` below on-demand. Scoped to m8a + m8g only (not every arch in
 # `ARCHS`): the arena is a narrow, correctness-anchored progression view
 # alongside the cross-arch spot sweep, not a replacement for it, and each
 # additional arch roughly doubles the on-demand spend for the same job.
 #
-# c8a, not c7i, for the x86 leg: `aws ec2 describe-instance-types` shows
-# c7i.4xlarge runs 16 vCPUs on 8 PHYSICAL cores (2-way SMT, on by default),
-# while c8a.4xlarge and c8g.4xlarge both report `ValidThreadsPerCore: [1]` —
-# no SMT option at all, so their 16 vCPUs are 16 real cores. c7i's `-t 16`
-# arm was therefore not measuring the same core count as c8g's. See
-# workflow/rules/arena.smk's module docstring for the full instance-type table.
+# m8a / m8g (64 GB), not c8a/c8g (32 GB) or c7i: `aws ec2 describe-instance-types`
+# shows c7i.4xlarge runs 16 vCPUs on 8 PHYSICAL cores (2-way SMT), while
+# c8a/c8g AND m8a/m8g all report `ValidThreadsPerCore: [1]` — no SMT, so their
+# 16 vCPUs are 16 real cores. m8a/m8g (the general-purpose siblings of c8a/c8g,
+# same AMD / Graviton4 families) carry 64 GB rather than 32 GB, which the arena
+# now needs for its `re-sa -u 1` stride-2 arm (~27-28 GB peak RSS). NOTE: unlike
+# the c8a/c8g legs they replaced, m8a/m8g are NOT sweep archs, so the arena no
+# longer runs on the exact hardware the spot sweep uses — a deliberate trade to
+# fit the dense-SA arm. See workflow/rules/arena.smk's module docstring.
 ARENA_ARCHS: tuple[ArenaArchSpec, ...] = (
-    ArenaArchSpec("C8aArena", "c8a", "c8a.4xlarge"),
-    ArenaArchSpec("C8gArena", "c8g", "c8g.4xlarge"),
+    ArenaArchSpec("M8aArena", "m8a", "m8a.4xlarge"),
+    ArenaArchSpec("M8gArena", "m8g", "m8g.4xlarge"),
 )
 
 

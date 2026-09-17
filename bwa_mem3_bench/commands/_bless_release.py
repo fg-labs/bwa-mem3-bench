@@ -149,6 +149,11 @@ def _plan(fg_labs_sha: str, golden_ref_sha: str) -> list[str]:
     sha = shlex.quote(fg_labs_sha)
     golden = shlex.quote(golden_ref_sha)
     return [
+        "One-time (shipped defaults enable this): ensure the densified re-sa index copies "
+        "are uploaded -- hg38-u1 (arena, stride-2) and hg38-u2 + hg38-meth-u2 (sweep + "
+        "thread-scaling, stride-4) -- or the >v0.12.0 fg-labs arms fail at input staging. "
+        "Set *_dense_sa_shift: 3 to skip (and always for a pre-#510 SHA). See "
+        "docs/data-setup.md.",
         f"If the arena ladder changed: {cli} build-base --image-name <ecr>-base --push",
         f"Build + push the per-SHA image: {cli} build --fg-labs-sha {sha} "
         "--image-name <ecr> --push",

@@ -54,6 +54,16 @@ batch_bases: 160000000
 # error. See fg-labs/bwa-mem3-bench#56.
 sweep_host_probe_seconds: 2.0
 
+# SA densification for the regular sweep + thread-scaling fg-labs alignments
+# (fg-labs/bwa-mem3#510). 3 = stock stride-8 (off); 2 = stride-4 (shipped): the
+# `> v0.12.0` fg-labs arms align against pre-built `<ref>-u2` index copies
+# (hg38-u2, hg38-meth-u2), ~-2.5% CPU for ~+4 GB resident, which fits the 32 GB
+# sweep hosts. The arena uses the denser stride-2 (`arena.dense_sa_shift: 1`)
+# because it runs on 64 GB hosts. Requires the `-u2` index copies to exist
+# (validated at config load). Set to 3 when benchmarking a pre-#510 SHA (its
+# binary cannot read a densified on-disk SA). See docs/data-setup.md.
+sweep_dense_sa_shift: 2
+
 # Thread-scaling ladder (`--target thread_scaling`, part of `bless_release`).
 #
 # Strong-scaling efficiency E(n) = T(1) / (n * T(n)) is only meaningful on FIXED
@@ -127,12 +137,19 @@ thread_scaling:
 # hardcoded in arena.smk. Only the measurement scope lives here.
 arena:
   sample: wgs-5M
-  # c8a, not c7i: c7i.4xlarge is 16 vCPU over 8 physical cores (2-way SMT),
-  # while c8a and c8g are both no-SMT (16 vCPU = 16 real cores) -- see
-  # workflow/rules/arena.smk's module docstring.
-  archs: [c8a, c8g]
+  # m8a / m8g, not c8a/c8g or c7i: all three of c8a/c8g/m8a/m8g are no-SMT
+  # (16 vCPU = 16 real cores, unlike c7i's 8 physical + 2-way SMT), but the
+  # m-series legs carry 64 GB (vs 32 GB) so the `re-sa -u 1` stride-2 arm
+  # (`dense_sa_shift`) fits -- see config/archs.yaml and arena.smk's docstring.
+  archs: [m8a, m8g]
   reps: 3
   threads: 16
+  # SA-sample-rate shift the arena's `> v0.12.0` arms align against, staged as a
+  # separate stride-2 on-disk index (fg-labs/bwa-mem3#510 `re-sa -u INT`, rate
+  # 1/(1<<INT)): 1 = stride-2 (+~12 GB resident), 2 = stride-4 (+~4 GB), 3 =
+  # stride-8 (stock, no separate index). Older arms + upstream + minibwa always
+  # use the stock stride-8 index; see `_arm_uses_dense_sa` in arena.smk.
+  dense_sa_shift: 1
   # Same rationale as thread_scaling.host_probe_seconds -- at ~13-14 arms x
   # 4 cycles (1 warmup + 3 reps), the arena runs well over an hour per arch
   # (see align_arena's own `resources.runtime = 14400` budget), so two 10s
@@ -148,8 +165,36 @@ references:
   hg38:
     key: references/hg38/
     fasta_name: Homo_sapiens_assembly38.fasta
+  # Stride-2 (`re-sa -u 1`) copy of the hg38 index, used ONLY by the arena's
+  # `> v0.12.0` arms (see arena.smk's `_arm_uses_dense_sa`). It is a full copy
+  # of `references/hg38/` in which only `<idxbase>.bwt.2bit.64` was rewritten by
+  # `bwa-mem3 re-sa -u 1`; every other sidecar (.pac/.ann/.amb/.0123/.fai/.dict)
+  # is byte-identical, and alignment output is byte-identical to the stock
+  # index. The suffix must match `arena.dense_sa_shift` (1); a mismatch is
+  # caught by tests/test_workflow_config.py. Generate + upload once with the
+  # `bwa-mem3 re-sa` procedure in docs/data-setup.md ("Stride-2 arena index").
+  hg38-u1:
+    key: references/hg38-u1/
+    fasta_name: Homo_sapiens_assembly38.fasta
+  # Stride-4 (`re-sa -u 2`) copy of the hg38 index, used by the regular sweep +
+  # thread-scaling `> v0.12.0` fg-labs alignments (`sweep_dense_sa_shift: 2`).
+  # +4 GB vs stock, so it fits the 32 GB sweep hosts (stride-2 would not). Same
+  # "only .bwt.2bit.64 differs, alignment byte-identical" contract as hg38-u1;
+  # generate + upload with `scripts/upload_reference.sh hg38-u2` (see
+  # docs/data-setup.md "Stride-4 sweep index").
+  hg38-u2:
+    key: references/hg38-u2/
+    fasta_name: Homo_sapiens_assembly38.fasta
   hg38-meth:
     key: references/hg38-meth/
+    fasta_name: Homo_sapiens_assembly38.fasta
+  # Stride-4 copy of the hg38-meth index for the meth sweep's `> v0.12.0`
+  # fg-labs arms: a full copy of `references/hg38-meth/` in which only the
+  # `.meth` SEED index's `.meth.bwt.2bit.64` was rewritten by `re-sa -u 2`
+  # (D3 seeds against `.meth` and pac-fetches the original, so only the seed SA
+  # is resolved). `scripts/upload_reference.sh hg38-meth-u2`.
+  hg38-meth-u2:
+    key: references/hg38-meth-u2/
     fasta_name: Homo_sapiens_assembly38.fasta
 
 runs_prefix: runs/

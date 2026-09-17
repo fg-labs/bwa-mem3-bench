@@ -99,17 +99,22 @@ def _mem_mb_for(sample_name: str) -> int:
     (~21 GB) and scores against the original reference by pac-fetching bases from
     `.pac` (~1 GB) on demand (fg-labs/bwa-mem3#177) — so it loads NEITHER the
     original `.0123` (~6.4 GB) NOR the seed `.0123`/`.pac` (~13/1.6 GB), and
-    `index --meth` doesn't even emit the original `.0123`. The resident index is
-    therefore ~22 GB (bwa-mem3 `memory-and-data-types` docs); on a 5M sample at
-    `-t 16` the per-batch working set adds ~5-10 GB, so peak RSS is ~30-32 GB
-    worst-case. (The smoke_meth `9c4bbf2` tricorder max_rss of ~21.7 GB is just
-    the resident index — smoke's batch is tiny. An earlier ~52-55 GB figure was
-    the pre-#177 `feat/meth-d3-seeding` branch, which still loaded the original
-    `.0123` plus both seed files.) 48 GB ~= 1.5x the ~32 GB worst-case peak and
-    leaves headroom under the ~62 GB container budget on m7i.4xlarge (64 GB host); meth
+    `index --meth` doesn't even emit the original `.0123`. The STOCK seed is
+    ~21 GB; the SHIPPED `sweep_dense_sa_shift: 2` stages a stride-4 `re-sa` copy
+    of it (`hg38-meth-u2`), which is ~27 GB (measured: +7.5 GB, since the doubled
+    reference has 2x the SA samples — twice the non-meth stride-4 increment). On
+    a 5M sample at `-t 16` the per-batch working set adds ~5-10 GB, so peak RSS is
+    ~34-40 GB worst-case with the dense seed (~30-32 GB on the stock seed). (The
+    smoke_meth `9c4bbf2` tricorder max_rss of ~21.7 GB is just the resident stock
+    index — smoke's batch is tiny. An earlier ~52-55 GB figure was the pre-#177
+    `feat/meth-d3-seeding` branch, which still loaded the original `.0123` plus
+    both seed files.) 52 GB ~= 1.3x the ~40 GB dense worst-case peak and leaves
+    headroom under the ~62 GB container budget on m7i.4xlarge (64 GB host); meth
     is pinned there because its working set exceeds the 32 GB RAM of the non-meth
-    *.4xlarge hosts. Non-meth 28 GB is plenty for standard hg38 (~15 GB FMI/.pac
-    resident + per-batch).
+    *.4xlarge hosts. (Was 48 GB for the stock seed; bumped to 52 GB with the
+    dense seed to keep the OOM margin healthy.) Non-meth 28 GB is plenty for
+    standard hg38 (~15-19 GB FMI/.pac resident incl. the stride-4 sweep copy
+    `hg38-u2`, + per-batch).
 
     Note: for non-meth, `bwa-mem2 shm` stages the segment in /dev/shm (tmpfs),
     accounted against this cgroup limit — but it aliases the FMI/.pac buffers
@@ -117,7 +122,7 @@ def _mem_mb_for(sample_name: str) -> int:
     no-shm case. Meth (D3) uses `shm --meth` to stage the seed-only `.meth`
     FM-index, then pac-fetches the original `.pac` from page cache.
     """
-    return 48000 if _is_meth(sample_name) else 28000
+    return 52000 if _is_meth(sample_name) else 28000
 
 
 def _shm_size_mb_for(sample_name: str) -> int:
@@ -135,11 +140,20 @@ def _shm_size_mb_for(sample_name: str) -> int:
     / section table. Plumbed into the worker job definition's
     linuxParameters.sharedMemorySize via our snakemake-executor-plugin-aws-batch
     fork (default ECS /dev/shm is 64 MB).
+
+    Sized for the SHIPPED sweep densification (`sweep_dense_sa_shift: 2`): a
+    stride-4 `<ref>-u2` index adds ~+4 GB to the non-meth SA-sample table, so
+    the non-meth segment is ~21 GB (was ~17 GB stock) and 20480 would overflow
+    -- hence 24576. Still well under the non-meth 28 GB cgroup (`_mem_mb_for`)
+    and the 32 GB host. Meth is unchanged: its stride-4 seed adds ~+8 GB (the
+    seed is over the doubled reference) to ~29 GB, which the existing 40960 (with
+    ~19 GB of stock headroom) already covers. Both values are safe with the
+    feature OFF too -- a stock index just uses less of the segment.
     """
-    return 40960 if _is_meth(sample_name) else 20480
+    return 40960 if _is_meth(sample_name) else 24576
 
 
-def _ref_inputs(wc, *, meth_index: str) -> list[str]:
+def _ref_inputs(wc, *, meth_index: str, reference: str | None = None) -> list[str]:
     """S3-relative paths to every reference-sidecar file the aligner needs.
 
     Paths are returned relative to the snakemake default-storage-prefix
@@ -148,9 +162,16 @@ def _ref_inputs(wc, *, meth_index: str) -> list[str]:
     S3 sync then does not count against ``benchmark:`` wall time. The first
     entry is always the plain .fasta; the shell references it via
     ``{input.ref[0]}``.
+
+    ``reference`` overrides the sample's own reference name (whose sidecar
+    layout is otherwise identical), used by the arena to stage a stride-2
+    ``re-sa`` copy of the index (``hg38-u1``) alongside the stock ``hg38`` one
+    without restating the sidecar list. The meth/alt-awareness predicates still
+    key off the SAMPLE, so a plain-index override of a non-meth sample stays on
+    the non-meth branch.
     """
     sample = CONFIG.samples[wc.sample]
-    ref = sample.reference
+    ref = reference if reference is not None else sample.reference
     fasta_name = CONFIG.references[ref]["fasta_name"]
     base = f"references/{ref}/{fasta_name}"
     # Key the meth-sidecar branch on the same predicate as `params.is_meth`
@@ -217,6 +238,35 @@ def _ref_inputs(wc, *, meth_index: str) -> list[str]:
     return files
 
 
+def _sweep_dense_reference(sample_name: str) -> str:
+    """The reference `align_fg_labs` / `align_thread_scaling` align against for
+    `sample_name`: the pre-built `<ref>-u<shift>` densified copy when the sweep
+    densification is on (`sweep_dense_sa_shift < STOCK_SA_SHIFT`, the shipped
+    default is 2 -> stride-4), else the sample's stock reference.
+
+    Applies to fg-labs ONLY -- `align_baseline` (upstream bwa-mem2 / bwameth)
+    keeps the stock reference, since those readers cannot parse a densified SA.
+    Config load has already verified the dense copy exists (see
+    `_validate_dense_sa_shift` in workflow_config.py), so no existence check
+    here. `re-sa` output is byte-identical, so swapping the index does not change
+    alignments or any concordance comparison.
+    """
+    stock = CONFIG.samples[sample_name].reference
+    shift = CONFIG.sweep_dense_sa_shift
+    return stock if shift >= STOCK_SA_SHIFT else f"{stock}-u{shift}"
+
+
+def _fg_labs_ref_inputs(wc, *, meth_index: str = "d3"):
+    """`_ref_inputs` for the fg-labs sweep / thread-scaling / thread-invariance
+    rules, keyed on the (possibly densified) sweep reference. `{input.ref[0]}`
+    then points at the dense index transparently -- the shm/mem shell body is
+    unchanged. `meth_index` is passed through so the thread-invariance rule can
+    keep its ``"none"`` mode; the sweep and ladder use the default ``"d3"``."""
+    return _ref_inputs(
+        wc, meth_index=meth_index, reference=_sweep_dense_reference(wc.sample)
+    )
+
+
 def _query_fastqs(wc):
     """Ordered list of query-FASTQ input paths for the sample's layout.
 
@@ -233,7 +283,7 @@ def _query_fastqs(wc):
 
 rule align_fg_labs:
     input:
-        ref = lambda wc: _ref_inputs(wc, meth_index="d3"),
+        ref = _fg_labs_ref_inputs,
         fastqs = _query_fastqs,
     output:
         bam        = "runs/{sha}/{sample}/{arch}/rep-{rep}/aligned.bam",
