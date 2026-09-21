@@ -94,7 +94,7 @@ rule eval_accuracy:
         # (ingest skips empties).
         meth_tsv     = "runs/{sha}/{sample}/{arch}/rep-{rep}/eval/{tool}.meth.tsv",
     resources:
-        batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
+        batch_queue = lambda wc: batch_queue_for(wc.arch),
         container_image = lambda wc: image_for_arch(wc.arch),
         # No FMI load, but holodeck loads reference contigs on demand for the
         # genomic-edit NM/MD concordance (targeted datasets touch one/few contigs;

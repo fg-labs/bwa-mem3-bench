@@ -231,13 +231,13 @@ COPY pyproject.toml /opt/pyproject.toml
 RUN pip3 install --no-cache-dir --break-system-packages /opt
 
 # Snakemake 9 + AWS Batch executor for running inside the coordinator job.
-# The biffix coordinator runs Snakemake 9, and a SM9 coordinator cannot drive SM8
-# workers, so the worker image must also be SM9. snakemake-storage-plugin-s3
+# A SM9 coordinator cannot drive SM8 workers, so the worker image must also be
+# SM9 whenever an external SM9 control plane drives the run. snakemake-storage-plugin-s3
 # >= 0.3.3 pulls snakemake-interface-storage-plugins >= 4, which needs
 # snakemake >= 9 — the matched SM9 line. The executor is pinned to the head of
 # upstream PR snakemake/snakemake-executor-plugin-aws-batch#55 (ba24f2b): its base
 # (upstream main) already targets the SM9 interface, and it adds the remote-job-state
-# emitter. The biffix coordinator pins the same commit.
+# emitter. Any external coordinator driving this image must pin the same commit.
 # auto_deploy_default_storage_provider=False in the executor means workers rely on
 # this system install rather than a per-worker `pip install`.
 RUN pip3 install --no-cache-dir --break-system-packages \

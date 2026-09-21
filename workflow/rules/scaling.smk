@@ -119,7 +119,7 @@ rule align_thread_scaling:
     # second job onto the host, which would corrupt every point on the curve.
     threads: CONFIG.thread_scaling.max_threads
     resources:
-        batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
+        batch_queue = lambda wc: batch_queue_for(wc.arch),
         # Index in /dev/shm (~17 GB stock, ~21 GB with the shipped stride-4
         # `sweep_dense_sa_shift: 2`) plus per-thread batch buffers, which grow
         # with the thread count — at 64 threads the working set is several times

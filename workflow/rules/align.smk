@@ -158,8 +158,8 @@ def _shm_size_mb_for(sample_name: str) -> int:
 # AWS-Batch profile sets the Snakemake default-storage-prefix to the bucket root,
 # so bucket-relative paths like ``references/hg38/...`` resolve directly. A
 # control plane that roots the default-storage-prefix at a PER-RUN prefix instead
-# (e.g. biffix: ``s3://<bucket>/runs/<id>/``) would look for the shared inputs
-# under that run prefix and miss them. ``shared_root`` (a config key, empty by
+# (``s3://<bucket>/runs/<id>/``, isolating each run's writes) would look for the
+# shared inputs under that run prefix and miss them. ``shared_root`` (a config key, empty by
 # default => unchanged behaviour under this repo's profile) prepends the shared
 # namespace root and wraps the result in ``storage()`` so Snakemake stages it
 # regardless of the run's default-storage-prefix.
@@ -175,6 +175,32 @@ def _shared(path: str):
     """
     p = path if not SHARED_ROOT else f"{SHARED_ROOT.rstrip('/')}/{path.lstrip('/')}"
     return storage(p) if "://" in p else p
+
+
+# Per-arch Batch queue resolution. Natively each arch runs on its own queue named
+# in config/archs.yaml (``CONFIG.archs[arch].batch_queue``). An external control
+# plane that provisions its OWN per-arch queues under a different namespace can
+# redirect every arch-routed rule by setting ``--config batch_queue_prefix=<prefix>``:
+# the arch key is appended verbatim, so arch ``c6a`` routes to ``<prefix>c6a``. Empty
+# (the default) keeps the config/archs.yaml queue, so behaviour under this repo's own
+# profile is unchanged. The executor reads each rule's ``resources.batch_queue`` and
+# submits the child job to that queue, so this alone redirects the whole per-arch
+# fan-out. (The arena's on-demand queues resolve separately and are a follow-up.)
+BATCH_QUEUE_PREFIX = str(config.get("batch_queue_prefix", ""))
+
+
+def batch_queue_for(arch_name: str) -> str:
+    """The Batch queue an arch's jobs run on, honouring ``BATCH_QUEUE_PREFIX``.
+
+    Empty prefix (the default) returns the arch's own queue from config/archs.yaml.
+    A non-empty prefix returns ``<prefix><arch_name>`` -- the queue an external
+    control plane exposes for that arch. This only changes which queue the job is
+    submitted to; index/``re-sa`` selection and every concordance comparison are
+    unaffected.
+    """
+    if BATCH_QUEUE_PREFIX:
+        return f"{BATCH_QUEUE_PREFIX}{arch_name}"
+    return CONFIG.archs[arch_name].batch_queue
 
 
 def _ref_inputs(wc, *, meth_index: str, reference: str | None = None) -> list:
@@ -347,7 +373,7 @@ rule align_fg_labs:
         # fg-labs/bwa-mem3-bench#56.
         host_probe = "runs/{sha}/{sample}/{arch}/rep-{rep}/benchmarks/host-probe.jsonl",
     resources:
-        batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
+        batch_queue = lambda wc: batch_queue_for(wc.arch),
         mem_mb = lambda wc: _mem_mb_for(wc.sample),
         shared_memory_size_mb = lambda wc: _shm_size_mb_for(wc.sample),
         container_image = lambda wc: image_for_arch(wc.arch),
@@ -488,7 +514,7 @@ rule align_baseline:
         timing     = "baseline/{tool_version}/{sample}/{arch}/rep-{rep}/benchmarks/timing.tsv",
         bwa_stderr = "baseline/{tool_version}/{sample}/{arch}/rep-{rep}/benchmarks/bwa.stderr.log",
     resources:
-        batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
+        batch_queue = lambda wc: batch_queue_for(wc.arch),
         mem_mb = lambda wc: _mem_mb_for(wc.sample),
         container_image = lambda wc: image_for_arch(wc.arch),
     # See align_fg_labs: `threads:` (not a param) so the executor plugin
