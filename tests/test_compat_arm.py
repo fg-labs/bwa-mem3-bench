@@ -13,6 +13,7 @@ import importlib
 import re
 from itertools import pairwise
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -692,6 +693,46 @@ def test_shared_joins_root_and_path_with_a_single_separator() -> None:
     )
     # Empty root: bucket-relative path unchanged and NOT wrapped in storage().
     assert _load_shared("")("references/hg38/x") == "references/hg38/x"
+
+
+def _load_batch_queue_for(prefix: str, native: dict[str, str]):
+    """Compile align.smk's ``batch_queue_for`` with a given ``BATCH_QUEUE_PREFIX``.
+
+    Mirrors ``_load_shared``: the .smk isn't importable as a whole, so slice out
+    the one helper and exec it in a namespace stubbing the two globals it closes
+    over -- ``BATCH_QUEUE_PREFIX`` (the config value) and ``CONFIG`` (only its
+    ``archs[arch].batch_queue`` is read, stubbed from ``native``).
+    """
+    config_stub = SimpleNamespace(
+        archs={arch: SimpleNamespace(batch_queue=queue) for arch, queue in native.items()}
+    )
+    namespace: dict = {"BATCH_QUEUE_PREFIX": prefix, "CONFIG": config_stub}
+    exec(_top_level_def(_code_only(ALIGN_SMK), "batch_queue_for"), namespace)
+    return namespace["batch_queue_for"]
+
+
+def test_batch_queue_for_honours_the_prefix_override() -> None:
+    """Empty prefix keeps the arch's own config/archs.yaml queue; a non-empty
+    prefix routes ``<prefix><arch>``.
+
+    An external control plane that exposes its own per-arch queues sets
+    ``--config batch_queue_prefix=<prefix>`` and every arch-routed rule targets
+    ``<prefix><arch>`` without restating the arch list. The executor reads
+    ``resources.batch_queue`` VERBATIM, so the FULL physical queue name must be
+    produced here -- the arch key is appended with NO separator, matching how the
+    external queues are named (prefix ``ext-arch-`` + ``c6a`` -> ``ext-arch-c6a``).
+    The prefixed branch never touches ``CONFIG``, so an arch absent from
+    config/archs.yaml still resolves.
+    """
+    native = {"c6a": "bwa-mem3-bench-c6a", "c8g": "bwa-mem3-bench-c8g"}
+    # Empty prefix (the default): native per-arch queue, unchanged.
+    default_resolver = _load_batch_queue_for("", native)
+    assert default_resolver("c6a") == "bwa-mem3-bench-c6a"
+    assert default_resolver("c8g") == "bwa-mem3-bench-c8g"
+    # Non-empty prefix: arch key appended verbatim, no separator, CONFIG untouched.
+    prefixed = _load_batch_queue_for("ext-arch-", native)
+    assert prefixed("c6a") == "ext-arch-c6a"
+    assert prefixed("m7i") == "ext-arch-m7i"
 
 
 def test_alt_aware_is_a_baseline_input_for_sibling_validation() -> None:

@@ -143,7 +143,7 @@ rule compare_vs_baseline:
     # CLAUDE.md). compare-bams walks the two streams single-threaded.
     threads: 1
     resources:
-        batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
+        batch_queue = lambda wc: batch_queue_for(wc.arch),
         container_image = lambda wc: image_for_arch(wc.arch),
         mem_mb = COMPARE_MEM_MB,
     params:
@@ -206,7 +206,7 @@ rule compare_compat_identity:
     # compare-bams this genuinely uses the threads it is given.
     threads: 4
     resources:
-        batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
+        batch_queue = lambda wc: batch_queue_for(wc.arch),
         container_image = lambda wc: image_for_arch(wc.arch),
         mem_mb = COMPARE_MEM_MB,
     shell:
@@ -285,7 +285,7 @@ rule compare_bwa_identity:
     # fgumi's content engine genuinely parallelises BGZF decode + comparison.
     threads: 4
     resources:
-        batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
+        batch_queue = lambda wc: batch_queue_for(wc.arch),
         container_image = lambda wc: image_for_arch(wc.arch),
         mem_mb = COMPARE_MEM_MB,
     shell:
@@ -343,7 +343,7 @@ rule compat_thread_invariance:
         report = "runs/{sha}/compat-invariance/{sample}/{arch}/report.txt",
     threads: CONFIG.thread_scaling.max_threads
     resources:
-        batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
+        batch_queue = lambda wc: batch_queue_for(wc.arch),
         container_image = lambda wc: image_for_arch(wc.arch),
         mem_mb = lambda wc: _mem_mb_for(wc.sample),
         shared_memory_size_mb = lambda wc: _shm_size_mb_for(wc.sample),
@@ -408,7 +408,7 @@ rule compare_vs_x86:
     # CLAUDE.md). compare-bams walks the two streams single-threaded.
     threads: 1
     resources:
-        batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
+        batch_queue = lambda wc: batch_queue_for(wc.arch),
         container_image = lambda wc: image_for_arch(wc.arch),
         mem_mb = COMPARE_MEM_MB,
     params:
@@ -450,7 +450,7 @@ rule compare_vs_default:
     # CLAUDE.md). compare-bams walks the two streams single-threaded.
     threads: 1
     resources:
-        batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
+        batch_queue = lambda wc: batch_queue_for(wc.arch),
         container_image = lambda wc: image_for_arch(wc.arch),
         mem_mb = COMPARE_MEM_MB,
     params:
@@ -481,7 +481,7 @@ rule compare_vs_golden:
     # CLAUDE.md). compare-bams walks the two streams single-threaded.
     threads: 1
     resources:
-        batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
+        batch_queue = lambda wc: batch_queue_for(wc.arch),
         container_image = lambda wc: image_for_arch(wc.arch),
         mem_mb = COMPARE_MEM_MB,
     params:

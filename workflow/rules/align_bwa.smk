@@ -95,7 +95,7 @@ rule align_bwa:
         timing     = "bwa/{tool_version}/{sample}/{arch}/rep-{rep}/benchmarks/timing.tsv",
         bwa_stderr = "bwa/{tool_version}/{sample}/{arch}/rep-{rep}/benchmarks/bwa.stderr.log",
     resources:
-        batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
+        batch_queue = lambda wc: batch_queue_for(wc.arch),
         mem_mb = lambda wc: _mem_mb_for(wc.sample),
         container_image = lambda wc: image_for_arch(wc.arch),
     # `threads:` (not a param) so the executor plugin reserves the vCPUs the

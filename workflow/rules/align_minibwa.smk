@@ -69,7 +69,7 @@ rule align_minibwa:
         timing         = "minibwa/{minibwa_sha}/{sample}/{arch}/rep-{rep}/benchmarks/timing.minibwa.tsv",
         minibwa_stderr = "minibwa/{minibwa_sha}/{sample}/{arch}/rep-{rep}/benchmarks/minibwa.stderr.log",
     resources:
-        batch_queue = lambda wc: CONFIG.archs[wc.arch].batch_queue,
+        batch_queue = lambda wc: batch_queue_for(wc.arch),
         # Meth runs the bisulfite `.meth.mbw` index (~12.8 GB) + `.l2b` (~0.8 GB)
         # mmapped, plus the page-cache prewarm of both — give it the same 48 GB
         # cgroup the bwa-mem3 meth arm uses (m7i has 64 GB). Non-meth (~6.4 GB
