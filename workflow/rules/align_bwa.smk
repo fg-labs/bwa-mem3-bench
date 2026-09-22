@@ -75,7 +75,10 @@ def _bwa_ref_inputs(wc) -> list[str]:
     # ALT-aware aligner against an alt-naive one and blame bwa-mem3.
     if sample.alt_aware:
         files.append(f"{base}.alt")
-    return files
+    # Shared read-only index sidecars (see `_shared`): under a per-run
+    # default-storage-prefix they resolve to the shared root, not the run prefix
+    # -- the same routing `_ref_inputs` gives the bwa-mem2/bwa-mem3 arm.
+    return [_shared(f) for f in files]
 
 
 rule align_bwa:

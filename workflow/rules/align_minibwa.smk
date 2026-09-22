@@ -53,10 +53,13 @@ def _minibwa_ref_inputs(wc) -> list[str]:
     # (see mb_idx_load). Stage exactly the BWT the run will use so the prewarm
     # and the timed region match.
     bwt = f"{base}.meth.mbw" if _is_meth_sample(wc.sample) else f"{base}.mbw"
+    # Shared read-only index sidecars (see `_shared`): under a per-run
+    # default-storage-prefix they resolve to the shared root, not the run prefix
+    # -- the same routing `_ref_inputs` gives the bwa-mem2/bwa-mem3 arm.
     return [
-        base,  # plain .fasta — must be index 0 (path passed to minibwa)
-        f"{base}.l2b",
-        bwt,
+        _shared(base),  # plain .fasta — must be index 0 (path passed to minibwa)
+        _shared(f"{base}.l2b"),
+        _shared(bwt),
     ]
 
 
