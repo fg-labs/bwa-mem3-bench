@@ -540,6 +540,7 @@ def test_bless_release_includes_the_compat_bwa_arm() -> None:
 # ---------------------------------------------------------------------------
 
 ALIGN_SMK = (REPO_ROOT / "workflow" / "rules" / "align.smk").read_text()
+ARENA_SMK = (REPO_ROOT / "workflow" / "rules" / "arena.smk").read_text()
 
 
 def test_alt_aware_flag_survives_the_yaml_round_trip() -> None:
@@ -733,6 +734,45 @@ def test_batch_queue_for_honours_the_prefix_override() -> None:
     prefixed = _load_batch_queue_for("ext-arch-", native)
     assert prefixed("c6a") == "ext-arch-c6a"
     assert prefixed("m7i") == "ext-arch-m7i"
+
+
+def _load_arena_queue_for(prefix: str, native: dict[str, str]):
+    """Compile arena.smk's ``arena_queue_for`` with a given ``BATCH_QUEUE_PREFIX``.
+
+    Mirrors ``_load_batch_queue_for``: slice the one helper and exec it in a
+    namespace stubbing the two globals it closes over -- ``BATCH_QUEUE_PREFIX``
+    (the config value) and ``ARENA_QUEUES`` (the native per-arch queue map, read
+    only in the empty-prefix branch).
+    """
+    namespace: dict = {"BATCH_QUEUE_PREFIX": prefix, "ARENA_QUEUES": native}
+    exec(_top_level_def(_code_only(ARENA_SMK), "arena_queue_for"), namespace)
+    return namespace["arena_queue_for"]
+
+
+def test_arena_queue_for_honours_the_prefix_override() -> None:
+    """The arena's on-demand queues follow ``batch_queue_prefix`` the same way the
+    spot sweep does, but keep the ``-arena`` suffix.
+
+    Empty prefix (this repo's own profile) keeps the native
+    ``bwa-mem3-bench-<arch>-arena`` name; a non-empty prefix routes
+    ``<prefix><arch>-arena`` so an external control plane's ON-DEMAND arena queues
+    receive the arena arms. The executor reads ``resources.batch_queue`` VERBATIM,
+    so the FULL physical name (suffix included) must be produced here. The prefixed
+    branch never touches ``ARENA_QUEUES``, so an arch absent from that map still
+    resolves.
+    """
+    native = {"m8a": "bwa-mem3-bench-m8a-arena", "m8g": "bwa-mem3-bench-m8g-arena"}
+    # Empty prefix (the default): native on-demand arena queue, unchanged.
+    default_resolver = _load_arena_queue_for("", native)
+    assert default_resolver("m8a") == "bwa-mem3-bench-m8a-arena"
+    assert default_resolver("m8g") == "bwa-mem3-bench-m8g-arena"
+    # Non-empty prefix: <prefix><arch>-arena, ARENA_QUEUES untouched.
+    prefixed = _load_arena_queue_for("ext-arch-", native)
+    assert prefixed("m8a") == "ext-arch-m8a-arena"
+    assert prefixed("m8g") == "ext-arch-m8g-arena"
+    # An arch absent from ARENA_QUEUES still resolves -- the prefixed branch
+    # never indexes the map, so no KeyError (c8g is not in `native` above).
+    assert prefixed("c8g") == "ext-arch-c8g-arena"
 
 
 def test_alt_aware_is_a_baseline_input_for_sibling_validation() -> None:
