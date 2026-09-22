@@ -293,8 +293,31 @@ ARENA_PRIOR_RELEASE_LABEL = ARENA_RELEASES[-1][0]
 # cdk/stacks/batch_stack.py's ARENA_ARCHS-derived queue names by hand -- CDK
 # is a separate (non-Python-importable-from-here) stack, so that half of the
 # contract can't be derived the same way; `tests/test_cdk_synth.py`'s
-# `test_arena_queues_are_on_demand` pins the CDK side of it.
+# `test_arena_queues_are_on_demand` pins the CDK side of it. This native
+# name / CDK-match invariant applies only to the empty-`BATCH_QUEUE_PREFIX`
+# case: `arena_queue_for` (just below) wraps this dict to honour a control
+# plane's prefix, and those queues are that control plane's responsibility.
 ARENA_QUEUES = {arch: f"bwa-mem3-bench-{arch}-arena" for arch in CONFIG.arena.archs}
+
+
+def arena_queue_for(arch_name: str) -> str:
+    """The on-demand Batch queue an arena arm runs on, honouring ``BATCH_QUEUE_PREFIX``.
+
+    The arena counterpart of ``batch_queue_for`` (align.smk): an external control
+    plane that provisions its OWN queues under a different namespace redirects the
+    arena the same way it redirects the spot sweep, by setting
+    ``--config batch_queue_prefix=<prefix>``. The ``-arena`` suffix is preserved,
+    so arch ``m8a`` routes to ``<prefix>m8a-arena``. Empty (the default) keeps the
+    native ``bwa-mem3-bench-<arch>-arena`` name from ``ARENA_QUEUES``, so behaviour
+    under this repo's own profile is unchanged. Whatever queue this resolves to
+    must be ON-DEMAND (a spot reclaim mid-run corrupts the interleaved timing);
+    that is the control plane's responsibility, exactly as it is the CDK stack's
+    for the native queues.
+    """
+    if BATCH_QUEUE_PREFIX:
+        return f"{BATCH_QUEUE_PREFIX}{arch_name}-arena"
+    return ARENA_QUEUES[arch_name]
+
 
 # Matches `wildcard_constraints: arch = ...` below, so an arch config adds
 # without a second hand-edit -- the same reasoning as ARENA_QUEUES above.
@@ -503,7 +526,7 @@ rule align_arena:
     priority: 100
     threads: CONFIG.arena.threads
     resources:
-        batch_queue = lambda wc: ARENA_QUEUES[wc.arch],
+        batch_queue = lambda wc: arena_queue_for(wc.arch),
         mem_mb = ARENA_MEM_MB,
         container_image = lambda wc: image_for_arch(wc.arch),
         # The arena is long by construction: an interleaved warmup + N measured
