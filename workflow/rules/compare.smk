@@ -469,7 +469,12 @@ rule compare_vs_golden:
     # requests these outputs when GOLDEN_REF_SHA is set and != the run's SHA.
     input:
         query  = "runs/{sha}/{sample}/{arch}/rep-{rep}/aligned.bam",
-        golden = lambda wc: (
+        # The golden BAM is a pre-blessed, read-only reference never produced
+        # in-run, so it resolves against SHARED_ROOT (see `_shared`): under a
+        # per-run default-storage-prefix it must come from the shared root, not
+        # the run prefix. (The baseline compare-read is left run-relative on
+        # purpose -- `align_baseline` re-produces it in-run, so it self-heals.)
+        golden = lambda wc: _shared(
             f"golden/fg-labs-{GOLDEN_REF_SHA}/{wc.sample}/{wc.arch}/aligned.bam"
         ),
         meta   = "runs/{sha}/{sample}/{arch}/rep-{rep}/benchmarks/meta.json",

@@ -30,20 +30,21 @@ family).
 """
 
 
-def _truth_inputs(wc) -> list[str]:
-    """S3-relative paths to the truth artifacts for `wc.sample`.
+def _truth_inputs(wc) -> list:
+    """Truth artifacts for `wc.sample`, resolved against ``SHARED_ROOT`` (see ``_shared``).
 
     Co-located under the sample's `source` prefix: `golden.bam` (placement +
     variant-footprint truth) and `truth.vcf` (the injected SNVs eval scores),
     plus `cpg-truth.bedGraph` for meth samples (the methylation-level truth).
-    Returned bucket-relative so the S3 storage plugin stages them before the
-    shell body runs.
+    These are pre-staged read-only inputs never produced in-run, so they go
+    through ``_shared``: under an external control plane's per-run
+    default-storage-prefix they resolve to the shared root, not the run prefix.
     """
     src = CONFIG.samples[wc.sample].source
     inputs = [f"{src}golden.bam", f"{src}truth.vcf"]
     if _is_meth_sample(wc.sample):
         inputs.append(f"{src}cpg-truth.bedGraph")
-    return inputs
+    return [_shared(p) for p in inputs]
 
 
 def _eval_query_bam(wc) -> str:
@@ -67,17 +68,21 @@ def _eval_query_bam(wc) -> str:
     raise ValueError(f"unknown eval tool {wc.tool!r}")
 
 
-def _eval_reference_inputs(wc) -> list[str]:
+def _eval_reference_inputs(wc) -> list:
     """The reference FASTA + .fai for `holodeck eval --reference`.
 
     Enables bisulfite-aware genomic NM/MD concordance: holodeck recomputes each
     read's edits against the reference (index-loaded via the .fai) rather than
     comparing convention-dependent NM/MD tags. Index 0 is the plain .fasta.
+
+    Resolved against ``SHARED_ROOT`` (see ``_shared``): the reference is a
+    pre-staged read-only input, so under a per-run default-storage-prefix it
+    must resolve to the shared root, not the run prefix.
     """
     sample = CONFIG.samples[wc.sample]
     fasta_name = CONFIG.references[sample.reference]["fasta_name"]
     base = f"references/{sample.reference}/{fasta_name}"
-    return [base, f"{base}.fai"]
+    return [_shared(base), _shared(f"{base}.fai")]
 
 
 rule eval_accuracy:

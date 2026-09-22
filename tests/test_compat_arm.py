@@ -541,6 +541,9 @@ def test_bless_release_includes_the_compat_bwa_arm() -> None:
 
 ALIGN_SMK = (REPO_ROOT / "workflow" / "rules" / "align.smk").read_text()
 ARENA_SMK = (REPO_ROOT / "workflow" / "rules" / "arena.smk").read_text()
+EVAL_SMK = (REPO_ROOT / "workflow" / "rules" / "eval.smk").read_text()
+ALIGN_BWA_SMK = (REPO_ROOT / "workflow" / "rules" / "align_bwa.smk").read_text()
+ALIGN_MINIBWA_SMK = (REPO_ROOT / "workflow" / "rules" / "align_minibwa.smk").read_text()
 
 
 def test_alt_aware_flag_survives_the_yaml_round_trip() -> None:
@@ -694,6 +697,55 @@ def test_shared_joins_root_and_path_with_a_single_separator() -> None:
     )
     # Empty root: bucket-relative path unchanged and NOT wrapped in storage().
     assert _load_shared("")("references/hg38/x") == "references/hg38/x"
+
+
+def _nows(text: str) -> str:
+    """Comment/docstring-stripped source with all whitespace removed.
+
+    Makes the wiring guards below robust to line wrapping and indentation: the
+    routed forms span several lines in the .smk, so a substring check has to
+    ignore formatting.
+    """
+    return re.sub(r"\s+", "", _code_only(text))
+
+
+def test_pre_staged_shared_reads_are_routed_through_shared_root() -> None:
+    """The read-only artifacts a run never produces itself must resolve against
+    SHARED_ROOT, not the per-run default-storage-prefix.
+
+    An external control plane points each rule's storage prefix at the run's own
+    output dir, so a bare ``golden/...`` / ``<source>golden.bam`` / ``references/...``
+    path looks for a shared artifact under the run prefix and fails at DAG build
+    with MissingInputException. These are exactly the arms ``bless_release`` adds
+    over the smoke (vs-golden Gate #2, accuracy/eval, arena), which is why the
+    smoke did not catch it. ``_shared`` is a no-op when SHARED_ROOT is empty, so
+    native behaviour is unchanged.
+    """
+    # Golden BAM (Gate #2, compare.smk).
+    assert '_shared(f"golden/fg-labs-{GOLDEN_REF_SHA}/{wc.sample}/{wc.arch}/aligned.bam")' in _nows(
+        COMPARE_SMK
+    )
+    # Sim truth + eval reference (eval.smk).
+    assert "return[_shared(p)forpininputs]" in _nows(EVAL_SMK)
+    assert 'return[_shared(base),_shared(f"{base}.fai")]' in _nows(EVAL_SMK)
+    # Arena FASTQs (arena.smk).
+    assert '_shared(f"{_arena_sample_cfg.source}{name}")' in _nows(ARENA_SMK)
+    # lh3/bwa and minibwa reference index sidecars, whose own helpers do not go
+    # through `_ref_inputs` (compat-bwa and fast-minibwa arms of bless_release).
+    assert "return[_shared(f)forfinfiles]" in _nows(ALIGN_BWA_SMK)
+    assert '[_shared(base),_shared(f"{base}.l2b"),_shared(bwt),]' in _nows(ALIGN_MINIBWA_SMK)
+
+
+def test_baseline_compare_reads_are_deliberately_not_shared_routed() -> None:
+    """The baseline BAM is the counter-case and must stay run-relative.
+
+    ``align_baseline`` reproduces it in-run, so it self-heals under a per-run
+    storage prefix. Routing it through ``_shared`` would turn it into a read-only
+    shared input with no in-run producer, and a sample whose baseline was never
+    blessed at the shared root (e.g. a newly added one) would then fail at DAG
+    build instead of simply re-aligning. Pin that it is NOT wrapped.
+    """
+    assert '_shared(f"baseline/bwa-mem2' not in _nows(COMPARE_SMK)
 
 
 def _load_batch_queue_for(prefix: str, native: dict[str, str]):

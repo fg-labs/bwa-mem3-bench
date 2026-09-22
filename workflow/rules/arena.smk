@@ -504,7 +504,13 @@ rule align_arena:
     input:
         ref = _arena_ref_inputs,
         ref_dense = _arena_dense_ref_inputs,
-        fastqs = [f"{_arena_sample_cfg.source}{name}" for name in _arena_sample_cfg.fastq_names],
+        # Shared read-only FASTQs (see `_shared`): under a per-run
+        # default-storage-prefix they resolve to the shared root, not the run
+        # prefix -- the same routing `_query_fastqs` gives the sweep rules.
+        fastqs = [
+            _shared(f"{_arena_sample_cfg.source}{name}")
+            for name in _arena_sample_cfg.fastq_names
+        ],
     output:
         tsv            = "arena/{sha}/{arch}/arena.tsv",
         profile        = "arena/{sha}/{arch}/runtime-profiles.tar.gz",
