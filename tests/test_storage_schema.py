@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from bwa_mem3_bench.storage import sqlite as sqlite_module
 from bwa_mem3_bench.storage.sqlite import (
     EXPECTED_SCHEMA_VERSION,
     connect,
@@ -244,7 +245,7 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 def test_fresh_db_has_supp_json_column(db_path: Path) -> None:
     conn = connect(db_path)
-    assert "supp_json" in _columns(conn, "comparisons")
+    assert {"supp_json", "placement_json"} <= _columns(conn, "comparisons")
     (ver,) = conn.execute("PRAGMA user_version").fetchone()
     assert ver == EXPECTED_SCHEMA_VERSION
     conn.close()
@@ -277,7 +278,7 @@ def test_v1_db_migrates_through_to_latest(db_path: Path) -> None:
 
     conn = connect(db_path)
     assert {"process_seconds", "index_read_seconds"} <= _columns(conn, "trials")
-    assert "supp_json" in _columns(conn, "comparisons")
+    assert {"supp_json", "placement_json"} <= _columns(conn, "comparisons")
     assert "accuracy" in _tables(conn)  # v4 table created on the v1→latest path
     (ver,) = conn.execute("PRAGMA user_version").fetchone()
     assert ver == EXPECTED_SCHEMA_VERSION
@@ -661,3 +662,91 @@ def test_upsert_comparison_round_trips_supp_json(db_path: Path) -> None:
     ).fetchone()
     assert got == '{"supp_unmatched": 9, "supp_count_mismatch_templates": 5}'
     conn.close()
+
+
+# The last schema version without comparisons.placement_json.
+_PRE_PLACEMENT_SCHEMA_VERSION = 11
+
+
+def test_v11_db_migrates_to_v12_adding_placement_json(db_path: Path) -> None:
+    """A v11 DB -- the current schema minus comparisons.placement_json -- gains
+    the column on connect(), and its existing comparison rows survive with NULL."""
+    conn = connect(db_path)
+    conn.execute("INSERT INTO runs(fg_labs_sha, status) VALUES ('old', 'complete')")
+    conn.execute("INSERT INTO trials(fg_labs_sha, sample, arch, rep) VALUES ('old', 's', 'a', 1)")
+    conn.execute(
+        "INSERT INTO comparisons(trial_id, kind, concordance_pct) VALUES (1, 'vs-baseline', 99.0)"
+    )
+    conn.execute("ALTER TABLE comparisons DROP COLUMN placement_json")
+    conn.execute(f"PRAGMA user_version = {_PRE_PLACEMENT_SCHEMA_VERSION}")
+    conn.commit()
+    conn.close()
+
+    conn = connect(db_path)
+    assert "placement_json" in _columns(conn, "comparisons")
+    (ver,) = conn.execute("PRAGMA user_version").fetchone()
+    assert ver == EXPECTED_SCHEMA_VERSION
+    assert conn.execute("SELECT placement_json FROM comparisons").fetchall() == [(None,)]
+    conn.close()
+
+
+def test_an_interrupted_migration_leaves_the_old_version_and_retries(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The version bump must commit together with the ALTERs it stands for.
+
+    If it committed first, a crash between the two would leave a v11 DB
+    stamped v12 without `comparisons.placement_json`; every later connect
+    would then skip the ALTER and every comparison write would fail.
+    """
+    conn = connect(db_path)
+    conn.execute("ALTER TABLE comparisons DROP COLUMN placement_json")
+    conn.execute(f"PRAGMA user_version = {_PRE_PLACEMENT_SCHEMA_VERSION}")
+    conn.commit()
+    conn.close()
+
+    real_forward_migrate = sqlite_module._forward_migrate
+
+    def crash_after_migrating(conn: sqlite3.Connection, existing_version: int) -> None:
+        real_forward_migrate(conn, existing_version)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(sqlite_module, "_forward_migrate", crash_after_migrating)
+    with pytest.raises(KeyboardInterrupt):
+        connect(db_path)
+
+    raw = sqlite3.connect(db_path)
+    (ver,) = raw.execute("PRAGMA user_version").fetchone()
+    assert ver == _PRE_PLACEMENT_SCHEMA_VERSION
+    assert "placement_json" not in _columns(raw, "comparisons")
+    raw.close()
+
+    monkeypatch.setattr(sqlite_module, "_forward_migrate", real_forward_migrate)
+    conn = connect(db_path)
+    (ver,) = conn.execute("PRAGMA user_version").fetchone()
+    assert ver == EXPECTED_SCHEMA_VERSION
+    assert "placement_json" in _columns(conn, "comparisons")
+    conn.close()
+
+
+def test_a_failing_schema_script_rolls_back_and_releases_the_db(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The schema script runs inside the upgrade transaction; if it fails partway
+    the transaction must be rolled back and the connection closed, not leaked
+    holding a write lock on the DB."""
+    connect(db_path).close()
+    monkeypatch.setattr(
+        sqlite_module, "SCHEMA_SQL", "CREATE TABLE partial (a INTEGER);\nNOT VALID SQL;\n"
+    )
+    with pytest.raises(sqlite3.OperationalError) as excinfo:
+        connect(db_path)
+
+    raw = sqlite3.connect(db_path, timeout=0.1)
+    raw.execute("CREATE TABLE writable_after_failure (a INTEGER)")  # not locked
+    raw.commit()
+    assert "partial" not in {
+        r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    raw.close()
+    del excinfo

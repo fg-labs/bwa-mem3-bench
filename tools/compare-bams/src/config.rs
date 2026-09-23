@@ -4,6 +4,16 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+/// Default for [`CompareOptions::confident_mapq`]: MAPQ 20 is a 1% chance the
+/// placement is wrong, the usual cut for a "confident" alignment.
+pub const DEFAULT_CONFIDENT_MAPQ: u8 = 20;
+
+/// Default for [`CompareOptions::relocation_bp`]. Measured on meth-twist-emseq-5M
+/// against bwameth, 77% of the confident reads whose `POS` differed had
+/// unclipped 5' ends within 10 bp of each other (small indel and clip placement
+/// differences); past that the distribution jumps to different loci.
+pub const DEFAULT_RELOCATION_BP: u32 = 10;
+
 /// Options controlling how [`crate::classify::classify`] compares two records.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompareOptions {
@@ -18,7 +28,9 @@ pub struct CompareOptions {
     /// * against `bwameth.py` — additionally `NM`, `MD`, `XA`, `SA` (each is,
     ///   or embeds, an edit distance computed against a C→T/G→A converted
     ///   reference, plus doubled-reference contig names such as `fchr1`), and
-    ///   the disjoint bisulfite tag sets `XM`/`XG`/`XR` and `YD`/`YC`/`RG`.
+    ///   the disjoint bisulfite tag sets `XM`/`XG`/`XR` and `YD`/`YC`/`RG`,
+    ///   plus `XS`, which describes the candidate set rather than the chosen
+    ///   alignment and differs between two aligners by design.
     /// * `bwa-mem3` against itself at the same search settings (another release
     ///   or arch) — empty. Both sides are the same binary run the same way, so
     ///   every tag is comparable and any difference is a real finding.
@@ -79,6 +91,14 @@ pub struct CompareOptions {
     /// Permitted absolute MAPQ difference before flagging as discordant.
     pub mapq_tolerance: u8,
 
+    /// MAPQ at or above which a side counts as confident for the placement
+    /// axis (see [`crate::placement`]).
+    pub confident_mapq: u8,
+
+    /// Largest distance between unclipped 5' ends that the placement axis
+    /// still treats as the same locus.
+    pub relocation_bp: u32,
+
     /// Whether to run the tag-set guard at all (`--no-tag-guard` clears it).
     ///
     /// Defaults to **true**, which is why this type implements [`Default`] by
@@ -95,6 +115,8 @@ impl Default for CompareOptions {
             expect_tags: BTreeSet::new(),
             absent_ok_tags: BTreeSet::new(),
             mapq_tolerance: 0,
+            confident_mapq: DEFAULT_CONFIDENT_MAPQ,
+            relocation_bp: DEFAULT_RELOCATION_BP,
             tag_guard: true,
         }
     }

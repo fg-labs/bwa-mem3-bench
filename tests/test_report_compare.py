@@ -104,3 +104,32 @@ def test_generate_compare_omits_fast_section_when_absent(tmp_path: Path) -> None
     md = out.read_text()
     assert "## Concordance vs upstream bwa-mem2" in md
     assert "`--fast` preset vs default" not in md
+
+
+def test_registry_cross_check_compares_like_with_like(tmp_path: Path) -> None:
+    """The expected total sums only `concordance` budgets, so the observed mean
+    beside it must be over samples gated on concordance too. Meth is gated on
+    confident relocation; its ~28% concordance drift vs bwameth must not be
+    averaged against a total that carries no meth budget."""
+    db = tmp_path / "benchmark.db"
+    conn = connect(db)
+    upsert_run(conn, fg_labs_sha=_SHA, status="complete")
+    for sample, arch, pct in (("wgs-5M", "c6a", 99.95), ("meth-twist-emseq-5M", "m7i", 72.0)):
+        upsert_comparison(
+            conn,
+            trial_id=_trial(conn, sample, arch),
+            kind=VS_BASELINE,
+            concordant=int(pct * 20),
+            total=2000,
+            concordance_pct=pct,
+            by_class_json=json.dumps({}),
+            supp_json=None,
+        )
+    conn.commit()
+    conn.close()
+
+    out = tmp_path / "compare.md"
+    generate_compare(db_path=db, fg_labs_sha=_SHA, out_md=out)
+    md = out.read_text()
+    assert "Observed drift (mean across `concordance`-gated trials): 0.0500%" in md
+    assert "meth-twist-emseq-5M" in md  # still shown in the per-sample tables

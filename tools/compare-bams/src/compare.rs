@@ -13,6 +13,8 @@
 //!     `bwa-mem2 v2.2.1`.
 //!   * **secondary divergence** — the same treatment for `0x100` records, which
 //!     reached neither of the other two axes before and were scored by nothing.
+//!   * **confident placement** — whether primaries that at least one side maps
+//!     with confidence land at the same locus (see [`crate::placement`]).
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::io::Read;
@@ -22,6 +24,7 @@ use noodles_sam::alignment::record_buf::RecordBuf;
 
 use crate::classify::{classify, Classification, Discordance};
 use crate::config::CompareOptions;
+use crate::placement::PlacementReport;
 use crate::report::{discordance_key, ConcordanceReport, NonPrimaryClass, NonPrimaryTally};
 use crate::template_reader::{template_iter, Template};
 
@@ -36,7 +39,10 @@ where
     R1: Read,
     R2: Read,
 {
-    let mut report = ConcordanceReport::default();
+    let mut report = ConcordanceReport {
+        placement: PlacementReport::new(opts.confident_mapq, opts.relocation_bp),
+        ..Default::default()
+    };
     for template in template_iter(query, baseline)? {
         compare_template(&template?, opts, &mut report);
     }
@@ -220,6 +226,7 @@ fn compare_template(t: &Template, opts: &CompareOptions, report: &mut Concordanc
             (None, None) => continue,
         };
         report.record(&classification);
+        report.placement.record(q.copied(), b.copied());
     }
 
     // Presence is censused across EVERY record on both sides, not just the

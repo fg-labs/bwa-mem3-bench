@@ -45,6 +45,8 @@ EXPECTED_SCHEMA_VERSION = SCHEMA_VERSION
 #   v10 → v11: added the `arena` table (release-history comparison, workflow/
 #              rules/arena.smk) — a new table, created in place by
 #              executescript, no ALTER needed.
+#   v11 → v12: added comparisons.placement_json (compare-bams confident-
+#              placement axis).
 # Only versions whose step needs an ALTER get a constant; v4 does not (its step
 # added a whole table).
 _SCHEMA_V1 = 1
@@ -55,6 +57,7 @@ _SCHEMA_V7 = 7
 _SCHEMA_V8 = 8
 _SCHEMA_V9 = 9
 _SCHEMA_V10 = 10
+_SCHEMA_V11 = 11
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -74,45 +77,64 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
 def connect(db_path: Path) -> sqlite3.Connection:
     """Open (or create) the benchmark SQLite DB and ensure tables exist.
 
-    Reads user_version *before* applying SCHEMA_SQL so we can tell an older DB
-    from a freshly-created one — SCHEMA_SQL sets user_version unconditionally to
-    the current version, so reading after would always show the latest.
+    Reads user_version first so an older DB can be told from a fresh one.
 
-    Older DBs are forward-migrated in place, oldest step first
-    (v1→v2: trials.process_seconds/index_read_seconds; v2→v3:
-    comparisons.supp_json). Raises RuntimeError if the DB is *newer* than this
-    code understands (user_version > EXPECTED_SCHEMA_VERSION).
+    Older DBs are forward-migrated in place, oldest step first. The whole
+    upgrade -- missing tables, the host_probes rebuild, every column ALTER, and
+    the `user_version` stamp -- is ONE transaction: stamping the version in a
+    separate earlier commit meant an interruption could leave, say, a v11 DB
+    marked v12 without `comparisons.placement_json`, and every later connect
+    would then skip the ALTER it still needed. Raises RuntimeError if the DB is
+    *newer* than this code understands (user_version > EXPECTED_SCHEMA_VERSION).
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys = ON")
     (existing_version,) = conn.execute("PRAGMA user_version").fetchone()
-    # Guard a too-new DB *before* any write. SCHEMA_SQL sets user_version, so
-    # running it first would clobber a newer DB's version pragma before we raise.
+    # Guard a too-new DB *before* any write, so it is refused unmodified.
     if existing_version > EXPECTED_SCHEMA_VERSION:
         raise RuntimeError(
             f"benchmark.db schema version {existing_version} is newer than this "
             f"code supports (expected {EXPECTED_SCHEMA_VERSION}); upgrade the tool "
             f"or rebuild the DB"
         )
+    # `executescript` commits any pending transaction before it runs, so the
+    # transaction has to be opened INSIDE the script; it stays open afterwards
+    # and the statements below join it.
+    script = "BEGIN;\n"
     # v9 -> v10's host_probes UNIQUE-key change needs the table recreated (see
     # the migration notes above `_SCHEMA_V1`) — rename the old one aside BEFORE
-    # executescript runs, so `CREATE TABLE IF NOT EXISTS host_probes` below finds
-    # the name free and creates the new-schema table rather than leaving the old
-    # one in place untouched. A DB predating v8 has no `host_probes` at all, so
-    # there is nothing to rename; executescript alone gives it the current
-    # schema. Checked by existence, not just the version bound: a DB can claim
-    # version >= 8 without actually carrying every table that version implies
-    # (e.g. a test fixture built from an older schema with the pragma alone
-    # bumped), and the version bound alone would then try to rename a table
-    # that was never there.
+    # the table definitions run, so `CREATE TABLE IF NOT EXISTS host_probes`
+    # finds the name free and creates the new-schema table rather than leaving
+    # the old one in place untouched. A DB predating v8 has no `host_probes` at
+    # all, so there is nothing to rename. Checked by existence, not just the
+    # version bound: a DB can claim version >= 8 without actually carrying every
+    # table that version implies (e.g. a test fixture built from an older schema
+    # with the pragma alone bumped), and the version bound alone would then try
+    # to rename a table that was never there.
     if _SCHEMA_V8 <= existing_version < _SCHEMA_V10 and _table_exists(conn, "host_probes"):
-        conn.execute("ALTER TABLE host_probes RENAME TO host_probes_old")
-    conn.executescript(SCHEMA_SQL)
-    conn.commit()
-    if existing_version == 0:
-        # Fresh DB; SCHEMA_SQL just created the tables at the current version.
-        return conn
+        script += "ALTER TABLE host_probes RENAME TO host_probes_old;\n"
+    try:
+        conn.executescript(script + SCHEMA_SQL)
+        if existing_version != 0:
+            _forward_migrate(conn, existing_version)
+        if existing_version < EXPECTED_SCHEMA_VERSION:
+            # An int constant, not input: PRAGMA values cannot be bound parameters.
+            conn.execute(f"PRAGMA user_version = {EXPECTED_SCHEMA_VERSION}")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        conn.close()
+        raise
+    return conn
+
+
+def _forward_migrate(conn: sqlite3.Connection, existing_version: int) -> None:
+    """Bring a DB written at ``existing_version`` up to the current schema's columns.
+
+    Runs after ``SCHEMA_SQL`` has created any whole tables that were missing,
+    inside the transaction ``connect`` opened, so it must not commit.
+    """
     # Forward-migrate in place, oldest step first. Each ALTER runs only when
     # coming from a version that predates it, so a column is never added twice.
     if existing_version <= _SCHEMA_V1:
@@ -168,10 +190,9 @@ def connect(db_path: Path) -> sqlite3.Connection:
             """
         )
         conn.execute("DROP TABLE host_probes_old")
-    if existing_version < EXPECTED_SCHEMA_VERSION:
-        conn.execute(f"PRAGMA user_version = {EXPECTED_SCHEMA_VERSION}")
-        conn.commit()
-    return conn
+    # v11 -> v12. `comparisons` exists in every schema, so no lower bound.
+    if existing_version <= _SCHEMA_V11:
+        conn.execute("ALTER TABLE comparisons ADD COLUMN placement_json TEXT")
 
 
 def upsert_run(  # noqa: PLR0913
@@ -364,21 +385,33 @@ def upsert_comparison(  # noqa: PLR0913
     concordance_pct: float,
     by_class_json: str,
     supp_json: str | None = None,
+    placement_json: str | None = None,
     commit: bool = True,
 ) -> None:
     conn.execute(
         """
         INSERT INTO comparisons
-            (trial_id, kind, concordant, total, concordance_pct, by_class_json, supp_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (trial_id, kind, concordant, total, concordance_pct, by_class_json, supp_json,
+             placement_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(trial_id, kind) DO UPDATE SET
             concordant = excluded.concordant,
             total = excluded.total,
             concordance_pct = excluded.concordance_pct,
             by_class_json = excluded.by_class_json,
-            supp_json = excluded.supp_json
+            supp_json = excluded.supp_json,
+            placement_json = excluded.placement_json
         """,
-        (trial_id, kind, concordant, total, concordance_pct, by_class_json, supp_json),
+        (
+            trial_id,
+            kind,
+            concordant,
+            total,
+            concordance_pct,
+            by_class_json,
+            supp_json,
+            placement_json,
+        ),
     )
     if commit:
         conn.commit()

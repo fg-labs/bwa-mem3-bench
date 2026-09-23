@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 # Increment this whenever the schema changes in a backward-incompatible way.
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
-# `user_version` is INTERPOLATED from SCHEMA_VERSION, never written literally.
-# It used to be hardcoded, so bumping SCHEMA_VERSION without editing the PRAGMA
-# left the DB stamped with the old number while the code believed it was current
-# — migrations would then either re-run or be skipped depending on direction.
-SCHEMA_SQL = f"""
-PRAGMA user_version = {SCHEMA_VERSION};
-
+# The table definitions only. `user_version` is deliberately NOT set here:
+# `storage.sqlite.connect` stamps it from SCHEMA_VERSION in the same transaction
+# as the column migrations, so an interrupted upgrade can never leave a DB
+# claiming a version whose columns it lacks. (It used to be set here, first as a
+# hardcoded literal and then interpolated, and was committed before the ALTERs.)
+SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS runs (
     fg_labs_sha     TEXT PRIMARY KEY,
     fg_labs_branch  TEXT,
@@ -80,6 +79,12 @@ CREATE TABLE IF NOT EXISTS comparisons (
     -- read end, so values are not comparable across that boundary -- see
     -- NonPrimaryTally::unmatched in tools/compare-bams/src/report.rs.
     supp_json        TEXT,
+    -- JSON blob of compare-bams' confident-placement axis (the report's
+    -- `placement` block): thresholds, confident_reads, shifted, relocated,
+    -- relocated_pct and the both/query_only/baseline_only split. NULL for rows
+    -- written before compare-bams emitted it. Gate #1 reads it for samples
+    -- whose drift budget is declared with `metric: confident_relocation`.
+    placement_json   TEXT,
     UNIQUE (trial_id, kind)
 );
 

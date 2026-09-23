@@ -281,3 +281,33 @@ fn a_malformed_tag_name_is_a_usage_error() {
         );
     }
 }
+
+/// The placement thresholds reach the report through the CLI, and a run with no
+/// confident read reports its percentage as `null` rather than 0%. The test
+/// records carry no MAPQ, which reads as 0.
+#[test]
+fn placement_thresholds_are_wired_through_the_cli() {
+    let (code, value) = run_guarded(
+        &[],
+        &[],
+        &[
+            "--no-tag-guard",
+            "--confident-mapq",
+            "0",
+            "--relocation-bp",
+            "5",
+        ],
+    );
+    assert_eq!(code, 0);
+    let placement = &value["placement"];
+    assert_eq!(placement["confident_mapq"], 0);
+    assert_eq!(placement["relocation_bp"], 5);
+    assert_eq!(placement["confident_reads"], 1);
+    assert_eq!(placement["relocated"], 0);
+    assert_eq!(placement["relocated_pct"], 0.0);
+
+    let (code, value) = run_guarded(&[], &[], &["--no-tag-guard", "--confident-mapq", "1"]);
+    assert_eq!(code, 0);
+    assert_eq!(value["placement"]["confident_reads"], 0);
+    assert!(value["placement"]["relocated_pct"].is_null());
+}

@@ -144,7 +144,15 @@ ALT_EXTRA_TAGS = frozenset({"pa"})
 # 9 -- so promoting a `sim-meth-*` sample into SWEEP_SAMPLES would have sent
 # NM/MD/XA/SA strict against bwameth (a ~100% crater) while the guard stayed
 # silent, because METH_EXTRA_TAGS had already allowlisted every tag involved.
-METH_IGNORE_TAGS = frozenset({"NM", "MD", "XA", "SA", "XM", "XG", "XR", "YD", "YC", "RG"})
+#
+# XS is here for a different reason: it IS comparable in form, but it describes
+# the candidate set (the best suboptimal hit), not the chosen alignment, and two
+# different aligners' candidate sets differ by design. Once bwa-mem3's --meth
+# seed-prune (fg-labs/bwa-mem3#441, v0.12.0) shrank that set, XS alone accounted
+# for 24.1 pp of a 27.8% meth-vs-bwameth drift (2,503,128 of 10,369,692 reads on
+# meth-twist-emseq-5M at v0.13.0) while placement was essentially unchanged.
+# `vs_default` excludes XS for the same reason.
+METH_IGNORE_TAGS = frozenset({"NM", "MD", "XA", "SA", "XS", "XM", "XG", "XR", "YD", "YC", "RG"})
 
 
 @dataclass(frozen=True)

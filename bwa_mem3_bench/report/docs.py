@@ -46,13 +46,14 @@ def render_divergence_catalog(entries: list[DivergenceEntry]) -> str:
             e.pr,
             e.affected,
             ", ".join(e.samples) if e.samples else "all",
+            e.metric,
             e.expected_drift_pct,
             e.summary,
         )
         for e in entries
     ]
     return md_table(
-        ["id", "pr", "affected", "samples", "budget_%", "summary"],
+        ["id", "pr", "affected", "samples", "metric", "budget_%", "summary"],
         rows,
         float_fmt="{:.4f}",
     )

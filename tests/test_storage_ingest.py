@@ -14,6 +14,7 @@ from bwa_mem3_bench.storage.ingest import (
     _parse_eval_txt,
     _parse_meth_tsv,
     _parse_variants_tsv,
+    _placement_json,
     _supp_json,
     baseline_sha_for,
     ingest_accuracy,
@@ -241,6 +242,21 @@ def test_supp_json_extracts_only_supp_keys() -> None:
         "supp_count_mismatch_templates": 5,
         "supp_unmatched_pct": 0.0879,
     }
+
+
+def test_placement_json_round_trips_the_block_and_is_none_when_absent() -> None:
+    block = {"confident_reads": 10, "relocated": 1, "relocated_pct": 10.0, "by_group": {}}
+    assert json.loads(_placement_json({"placement": block}) or "") == block
+    assert _placement_json({"concordance_pct": 100.0}) is None
+
+
+def test_placement_is_a_field_of_the_rust_report() -> None:
+    """`_placement_json` reads the report's `placement` key; fail here if the
+    Rust struct renames it, rather than silently storing NULL for every run."""
+    report_rs = (
+        Path(__file__).resolve().parent.parent / "tools" / "compare-bams" / "src" / "report.rs"
+    ).read_text()
+    assert re.search(r"^\s*pub placement: PlacementReport,", report_rs, re.MULTILINE)
 
 
 def test_supp_json_none_when_absent() -> None:

@@ -80,6 +80,12 @@ def _supp_json(comp: dict[str, Any]) -> str | None:
     return json.dumps(supp) if supp else None
 
 
+def _placement_json(comp: dict[str, Any]) -> str | None:
+    """The compare-bams `placement` block as JSON, or None when absent (older reports)."""
+    placement = comp.get("placement")
+    return json.dumps(placement) if placement else None
+
+
 # bwa-mem2's profiling output (printed to stderr by both upstream v2.2.1 and
 # fg-labs in identical format — see src/profiling.cpp). PROCESS() is the
 # total compute time excluding index loading; that's the apples-to-apples
@@ -498,6 +504,7 @@ def ingest_run(
                         concordance_pct=float(comp.get("concordance_pct", 0.0)),
                         by_class_json=json.dumps(comp.get("by_class", {})),
                         supp_json=_supp_json(comp),
+                        placement_json=_placement_json(comp),
                         commit=False,
                     )
 

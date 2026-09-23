@@ -309,13 +309,144 @@ def test_baseline_budget_flags_only_over_budget_cells() -> None:
     assert verdicts["meth-twist-emseq-5M"] == "ok"  # 1.00 <= 1.50 (meth tier)
 
 
+def test_baseline_budget_scores_each_sample_on_its_declared_metric() -> None:
+    conc = pd.DataFrame(
+        {
+            "sample": ["wgs-5M", "meth"],
+            "arch": ["c6a", "m7i"],
+            "baseline_concordance": [99.95, 70.0],
+            "placement_relocated_pct": [5.0, 0.2],
+        }
+    )
+    registry = [
+        _entry(0.10, ("wgs-5M",)),
+        DivergenceEntry(
+            id="M",
+            pr="p",
+            date="d",
+            summary="s",
+            affected="meth_alignment",
+            expected_drift_pct=0.25,
+            samples=("meth",),
+            metric="confident_relocation",
+        ),
+    ]
+    out = _baseline_budget(conc, registry).set_index("sample")
+    # wgs-5M: concordance drift 0.05 <= 0.10 (its placement number is ignored).
+    assert out.loc["wgs-5M", "metric"] == "concordance"
+    assert out.loc["wgs-5M", "verdict"] == "ok"
+    # meth: relocation 0.2 <= 0.25 (its 30% concordance drift is ignored).
+    assert out.loc["meth", "metric"] == "confident_relocation"
+    assert out.loc["meth", "observed_drift_pct"] == pytest.approx(0.2)
+    assert out.loc["meth", "verdict"] == "ok"
+
+
+def _meth_relocation_registry() -> list[DivergenceEntry]:
+    return [
+        DivergenceEntry(
+            id="M",
+            pr="p",
+            date="d",
+            summary="s",
+            affected="meth_alignment",
+            expected_drift_pct=0.25,
+            samples=("meth",),
+            metric="confident_relocation",
+        )
+    ]
+
+
+def test_baseline_budget_fails_a_cell_with_any_rep_missing_placement() -> None:
+    """MAX over reps skips NULLs, so a measured rep can hide an unmeasured one.
+    The per-cell missing count must fail the cell on its own."""
+    conc = pd.DataFrame(
+        {
+            "sample": ["meth", "meth"],
+            "arch": ["m7i", "c7i"],
+            "baseline_concordance": [96.0, 96.0],
+            "placement_relocated_pct": [0.1, 0.1],
+            "placement_missing": [1, 0],
+        }
+    )
+    out = _baseline_budget(conc, _meth_relocation_registry()).set_index("arch")
+    assert out.loc["m7i", "verdict"] == "missing_placement"
+    assert out.loc["c7i", "verdict"] == "ok"
+
+
+def test_gate1_meth_with_null_relocation_fails_closed(tmp_path: Path) -> None:
+    """compare-bams writes `relocated_pct: null` when no read was confident on
+    either side; that cell measured nothing and must not pass."""
+    db = tmp_path / "b.db"
+    _seed_baseline(db, sample="meth-twist-emseq-5M", arch="m7i", baseline_pct=100.0)
+    conn = connect(db)
+    conn.execute(
+        "UPDATE comparisons SET placement_json = ? WHERE kind = 'vs-baseline'",
+        (json.dumps({"confident_reads": 0, "relocated": 0, "relocated_pct": None}),),
+    )
+    conn.commit()
+    conn.close()
+    ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old")
+    assert ok is False
+    assert "missing_placement" in report
+
+
+def test_gate1_meth_fails_when_one_rep_lacks_placement(tmp_path: Path) -> None:
+    db = tmp_path / "b.db"
+    _seed_baseline(
+        db, sample="meth-twist-emseq-5M", arch="m7i", baseline_pct=96.0, relocated_pct=0.1
+    )
+    conn = connect(db)
+    second = upsert_trial(
+        conn,
+        fg_labs_sha="new",
+        sample="meth-twist-emseq-5M",
+        arch="m7i",
+        rep=2,
+        wall_seconds=100.0,
+        max_rss_mb=1.0,
+        cpu_time=1.0,
+        io_read_mb=1.0,
+        io_write_mb=1.0,
+        mean_load=1.0,
+        reads_processed=1,
+        instance_type=None,
+        availability_zone=None,
+        spot_price=None,
+        status="ok",
+    )
+    upsert_comparison(
+        conn,
+        trial_id=second,
+        kind="vs-baseline",
+        concordant=9600,
+        total=10000,
+        concordance_pct=96.0,
+        by_class_json=json.dumps({}),
+    )
+    conn.close()
+    ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old")
+    assert ok is False
+    assert "missing_placement" in report
+
+
 def test_baseline_budget_empty_in_empty_out() -> None:
     out = _baseline_budget(pd.DataFrame(columns=["sample", "arch", "baseline_concordance"]), [])
     assert out.empty
 
 
-def _seed_baseline(db: Path, *, sample: str, arch: str, baseline_pct: float) -> None:
-    """One flat-perf, golden-clean cell with a vs-baseline comparison at baseline_pct."""
+def _seed_baseline(
+    db: Path,
+    *,
+    sample: str,
+    arch: str,
+    baseline_pct: float,
+    relocated_pct: float | None = None,
+) -> None:
+    """One flat-perf, golden-clean cell with a vs-baseline comparison at baseline_pct.
+
+    ``relocated_pct`` adds a compare-bams ``placement`` block; omitted, the
+    comparison looks like one written before that axis existed.
+    """
     conn = connect(db)
     upsert_run(conn, fg_labs_sha="new", status="complete")
     upsert_run(conn, fg_labs_sha="old", status="complete")
@@ -355,6 +486,9 @@ def _seed_baseline(db: Path, *, sample: str, arch: str, baseline_pct: float) -> 
         total=10000,
         concordance_pct=baseline_pct,
         by_class_json=json.dumps({}),
+        placement_json=(
+            None if relocated_pct is None else json.dumps({"relocated_pct": relocated_pct})
+        ),
     )
     conn.close()
 
@@ -378,13 +512,36 @@ def test_gate1_fails_over_budget(tmp_path: Path) -> None:
     assert "Gate #1 failures" in report
 
 
-def test_gate1_meth_tier_tolerates_higher_drift(tmp_path: Path) -> None:
+def test_gate1_meth_is_scored_on_confident_placement_not_concordance(tmp_path: Path) -> None:
     db = tmp_path / "b.db"
-    # 1.00% drift would bust the non-meth budget but is within meth's 1.50%.
-    _seed_baseline(db, sample="meth-twist-emseq-5M", arch="m7i", baseline_pct=99.00)
+    # 27.77% concordance drift (the v0.13.0 figure, dominated by XS and repeat
+    # choice) is irrelevant; 0.13% confident relocation is within the budget.
+    _seed_baseline(
+        db, sample="meth-twist-emseq-5M", arch="m7i", baseline_pct=72.23, relocated_pct=0.13
+    )
     ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old")
-    assert ok is True
-    assert "PASS" in report
+    assert ok is True, report
+    assert "confident_relocation" in report
+
+
+def test_gate1_meth_fails_on_confident_relocation(tmp_path: Path) -> None:
+    db = tmp_path / "b.db"
+    _seed_baseline(
+        db, sample="meth-twist-emseq-5M", arch="m7i", baseline_pct=99.9, relocated_pct=1.0
+    )
+    ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old")
+    assert ok is False
+    assert "over_budget" in report
+
+
+def test_gate1_meth_without_placement_fails_closed(tmp_path: Path) -> None:
+    """A meth comparison predating the placement axis has not been measured on
+    the metric its budget is expressed in, so it must fail rather than pass."""
+    db = tmp_path / "b.db"
+    _seed_baseline(db, sample="meth-twist-emseq-5M", arch="m7i", baseline_pct=100.0)
+    ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old")
+    assert ok is False
+    assert "missing_placement" in report
 
 
 def _seed_missing(
