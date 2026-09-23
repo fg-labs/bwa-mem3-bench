@@ -645,3 +645,63 @@ allowances:
     # the tag resolves here, same pattern as v0.5.0+.
     aliases:
       - ac059d0152ad3ebcf5d3079492aab95551a328eb   # v0.12.0 release tag (merge of #444; tree-identical to 2e662761 — same binary as this golden)
+  - to_sha: 64420af4d1672350b734b9de49cae3933fb0cb8c
+    pr: fg-labs/bwa-mem3#507
+    date: 2026-09-23
+    summary: >-
+      v0.13.0: NO alignment change vs the v0.12.0 golden (2e662761). Gate #2 is
+      100.0000% on all 19 golden-backed cells -- 18 DNA cells across the six
+      sweep archs plus meth-twist-emseq-5M (10,369,692 of 10,369,692 reads;
+      smoke-meth has no golden BAM) -- and vs_x86 is 100.0000% on all 14 ARM
+      cells. The arena's fgumi full-content check is IDENTICAL against v0.12.0 on
+      both m8a and m8g (10,030,558 records, 0 content diffs). This is a
+      performance release: byte-identical changes to seeding and extension
+      (cross-read (k,s) SA-interval dedup #511, contained-seed extension skip on
+      by default #512, third-pass bwtseed lockstep widened to 24 #514,
+      bns_intv2rid single-bucket fast path #508, parallel .pac load #517), the
+      fused pairing path routed through mem_pair_resolve_batch_post (#515), a
+      bounds guard on the SMEM lockstep width (#516), opt-in SA densification at
+      shm stage time (#510), and removal of the scalar mate-rescue path, which
+      makes AVX2 the x86 floor (#513).
+
+      Gate #1 passes. All 70 DNA vs-upstream cells are 100.0000%. Meth is scored
+      from this release on by confident placement against bwameth rather than
+      full-record concordance (fg-labs/bwa-mem3-bench#115; see
+      FG-METH-DIVERGENCE): 0.126% of confidently mapped primaries relocated on
+      meth-twist-emseq-5M (12,080 of 9,610,099) and 0.172% on smoke-meth (33 of
+      19,218), against a 0.25% budget. Under the old concordance metric the meth
+      cells read 72.2326% / 71.6152% -- identical to v0.12.0's to four decimals,
+      as they must be for byte-identical output compared against the same
+      bwameth baseline. Those two cells were re-scored in place with the new
+      compare-bams and the originals kept beside them as
+      vs-baseline.pre-placement.json. Gate #3 (thread scaling) passes; the
+      v0.12.0 ladder reads above 100% efficiency (super-linear), so the gate
+      fell back to per-rung PROCESS() time, as for prior releases.
+
+      PERFORMANCE, arena (interleaved on one on-demand host per arch, wgs-5M,
+      3 reps, medians): 1.080x (m8a) / 1.067x (m8g) faster wall than v0.12.0 on
+      the default preset, and 1.069x / 1.051x on --fast; PROCESS() is 1.10x /
+      1.07x. This is a shipped-configuration comparison, not codegen alone: the
+      v0.13.0 arms align against a stride-2 SA index (`re-sa -u 1`, new in this
+      release via #510, ~+12 GB resident, byte-identical output) while v0.12.0
+      and the comparators use the stock stride-8 index -- which is why the arena
+      moved to the 64 GB m8a/m8g hosts. The denser index accounts for roughly 4%
+      of the gain; the rest is the byte-identical seeding and extension work
+      above. Against the comparators on m8a (bwa-mem3 on the stride-2 index, the
+      comparators on stock): 6.47x bwa, 2.75x bwa-mem2 v2.2.1, and at parity
+      with minibwa (0.99x) on the default preset -- 2.15x on --fast. The
+      regression gate's cross-run perf table (AWS Batch spot, days
+      apart from the v0.12.0 run) is dominated by substrate noise in both
+      directions (c7i reads 13% faster, m7i 3% slower) and flags no REGRESSION
+      cell; the arena is the release-over-release claim. Intentional (release
+      continuity, no output change), accepted.
+    expected_drift_pct: 0.0
+    # Golden lives under 64420af4 -- the release-please #507 head, benched at
+    # reps=5 (target bless_release) across the six sweep archs, plus the arena
+    # (m8a/m8g) and the thread-scaling ladder. #507 merged to the shipped v0.13.0
+    # tag (e3904dd) on 2026-09-23; the two commits share tree d84035f4, so the
+    # shipped tag is the same binary as this golden (case 1 in
+    # `ReleaseAllowance.aliases`). Aliased so a vs-golden run pinned to the tag
+    # resolves here, same pattern as v0.5.0+.
+    aliases:
+      - e3904dd7e27792f4c97d98e7a2146a55096c3429   # v0.13.0 release tag (merge of #507; tree-identical to 64420af4)
