@@ -22,10 +22,21 @@
 #                      supplementary_alignment | secondary_alignment
 #   expected_drift_pct per-cell drift budget contributed by this entry (percent)
 #   samples            samples this budget applies to; omit/empty = all samples
+#   metric             what the budget measures (default `concordance`):
+#                        concordance          100 - compare-bams concordance_pct
+#                        confident_relocation compare-bams placement.relocated_pct:
+#                                             % of primaries that either side maps
+#                                             at MAPQ >= 20 which land on another
+#                                             contig/strand, > 10 bp away (unclipped
+#                                             5' end), or unmapped on the other side
+#                      A sample is gated on confident_relocation when an entry that
+#                      names it declares that metric; budgets on different metrics
+#                      are never summed together.
 #
-# Budgets are set just above the empirically observed drift at bwa-mem3
-# `bffae5a` (full bench, all archs x all samples x 5 reps): non-meth primary
-# drift peaks at panel-twist-5M 0.0586%; meth at 1.1227%. Tighten per-sample as
+# Concordance budgets are set just above the empirically observed drift at
+# bwa-mem3 `bffae5a` (full bench, all archs x all samples x 5 reps): non-meth
+# primary drift peaks at panel-twist-5M 0.0586%. (Meth, then 1.1227%, is now
+# budgeted on confident_relocation -- see FG-METH-DIVERGENCE.) Tighten per-sample as
 # the numbers stabilize across releases. The hic-1M / sbx-1M sample classes were
 # added later (bench #14) and first characterized at `a02fcb4` (v0.3.0): primary
 # drift hic-1M 0.0032%, sbx-1M 0.0004% — both well inside the 0.10% primary tier.
@@ -52,38 +63,45 @@ divergences:
 
   - id: FG-METH-DIVERGENCE
     pr: fg-labs/bwa-mem3#90
-    date: 2026-08-05
+    date: 2026-09-23
     summary: >-
-      Bisulfite (--meth) mode against the bwameth.py baseline diverges in
-      placement (C->T/G->A conversion handling), giving a larger but still
-      bounded concordance drift on methylation workloads. The two aligners'
-      bisulfite tags are not comparable at all and are excluded rather than
-      budgeted: bwameth computes NM/MD — and the NM embedded in XA/SA — against
-      the converted reference, and the Bismark-compatible XM/XG/XR set has no
-      bwameth counterpart (bwameth writes YD/YC/RG instead). See
-      `compare_options` in config/samples.yaml.
+      Bisulfite (--meth) mode against the bwameth.py baseline. bwameth is a
+      different aligner (3-letter, converted reference), not a truth reference,
+      so this budget is expressed on CONFIDENT PLACEMENT rather than full-record
+      concordance: the share of primaries that either aligner maps at MAPQ >= 20
+      which the two place at a different locus. Truth-based accuracy is gated
+      separately by the sim-meth holodeck eval, and release-to-release stability
+      by Gate #2.
 
-      Budget re-derived 2026-08-05 from 1.50%, which had been stale since the
-      v0.4.0 native-bisulfite cutover — observed drift was already 2.88% at
-      v0.7.0 and 3.02% at v0.8.0, i.e. the gate had been failing on both meth
-      cells for several releases. That excess was reviewed and accepted at the
-      time rather than budgeted (docs/release-allowances.yaml, the v0.6.0 and
-      v0.7.0 entries); this makes the registry say what those entries already
-      concluded.
+      Why not concordance. The bisulfite tag sets are not comparable at all and
+      were always excluded (see METH_IGNORE_TAGS in workflow_config.py), but the
+      remaining concordance still measured candidate-set description and repeat
+      choice rather than placement. At bwa-mem3 v0.13.0 (64420af4, identical
+      output to v0.12.0) meth-twist-emseq-5M scored 72.23% concordant (27.77%
+      drift) against a 4.00% budget: 24.1 pp was XS, the suboptimal-hit score,
+      which fg-labs/bwa-mem3#441's seed-prune moves by design (XS is now
+      ignored, as on vs_default); and of the 155,463 reads whose position
+      differed, 97% had MAPQ < 20 on both sides -- two aligners choosing
+      different copies of a repeat. With XS ignored, concordance is 96.03% (3.97%
+      drift: MAPQ 2.10%, FLAG 1.64% -- mostly the 0x200 chimera heuristic ported
+      from bwameth -- position 1.50%, CIGAR 0.56%). That residue is still not
+      placement error, which is why the budget moved metric rather than number.
+      The concordance budget history (1.50% -> 4.00% at the v0.8.0 golden, then
+      over budget and accepted in docs/release-allowances.yaml for v0.12.0) is
+      superseded by this entry.
 
-      Measured at the v0.8.0 golden (4acb0956) against bwameth 0.2.7, on the
-      COMPLETE meth population for this gate — meth samples run on m7i only and
-      all five reps are bit-identical, so two cells is the whole matrix:
-      meth-twist-emseq-5M 3.3764%, smoke-meth 3.2932%. Of that, ~0.3 pp is newly
-      VISIBLE rather than new: widening compare-bams to the whole FLAG exposed
-      the 0x200 QC-fail bit, which bwa-mem3 sets from a hand-ported copy of
-      bwameth.py's own chimera heuristic (src/meth_bam.cpp:488). The two
-      implementations disagree on which reads to flag, and that path sets 0x200
-      and clears 0x2 together, so the disagreement lands on both bits at once —
-      69% of differing records XOR to exactly 0x202. 4.00% sits just above the
-      3.38% peak with headroom comparable to the primary tier's.
+      Measured at v0.13.0 (64420af4) against bwameth 0.2.7, both meth cells
+      (meth samples run on m7i only and all reps are bit-identical):
+      meth-twist-emseq-5M 0.126% relocated (12,080 of 9,610,099 confident
+      reads: 1,154 where both are confident, 6,408 where only bwa-mem3 is,
+      4,518 where only bwameth is); smoke-meth 0.172% (33 of 19,218). Among
+      reads both sides are confident about, 77% of position differences are
+      within 10 bp of the same unclipped 5' end (clip and indel placement).
+      0.25% leaves room for smoke-meth's small-sample noise while still failing
+      on a doubling of meth-twist's relocations.
     affected: meth_alignment
-    expected_drift_pct: 4.00
+    metric: confident_relocation
+    expected_drift_pct: 0.25
     samples: [meth-twist-emseq-5M, smoke-meth]
 
   - id: FG-SUPP-ADDITIONS

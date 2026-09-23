@@ -34,9 +34,11 @@ import pandas as pd
 
 from bwa_mem3_bench import REPO_ROOT
 from bwa_mem3_bench.registry import (
+    CONCORDANCE,
     DEFAULT_REGISTRY_PATH,
     DivergenceEntry,
     allowed_drift_pct,
+    gate_metric,
     load_registry,
 )
 from bwa_mem3_bench.report.tables import md_table
@@ -187,12 +189,22 @@ def _baseline_budget(conc_df: pd.DataFrame, registry: list[DivergenceEntry]) -> 
     """Gate #1: compare observed vs-upstream drift against each sample's budget.
 
     ``conc_df`` has columns ``sample, arch, baseline_concordance`` (min over
-    reps). Returns the same rows plus ``observed_drift_pct``, ``allowed_drift_pct``,
-    and a ``verdict`` of ``ok`` / ``over_budget``. Empty in, empty out.
+    reps) and optionally ``placement_relocated_pct`` (max over reps) and
+    ``placement_missing`` (reps with no placement block, or a null percentage
+    because no read was confident). Each sample is scored
+    on the metric its registry entries declare (`registry.gate_metric`):
+    ``100 - baseline_concordance`` for `concordance`, ``placement_relocated_pct``
+    for `confident_relocation`. Returns the rows plus ``metric``,
+    ``observed_drift_pct``, ``allowed_drift_pct`` and a ``verdict`` of ``ok`` /
+    ``over_budget`` / ``missing_placement``. The last fails closed: a sample
+    budgeted on placement with ANY rep lacking a placement measurement has not
+    been fully measured, and must not pass on the reps that were. Empty in,
+    empty out.
     """
     cols = [
         "sample",
         "arch",
+        "metric",
         "baseline_concordance",
         "observed_drift_pct",
         "allowed_drift_pct",
@@ -201,11 +213,30 @@ def _baseline_budget(conc_df: pd.DataFrame, registry: list[DivergenceEntry]) -> 
     if conc_df.empty:
         return pd.DataFrame(columns=cols)
     out = conc_df.copy()
-    out["observed_drift_pct"] = 100.0 - out["baseline_concordance"]
-    out["allowed_drift_pct"] = out["sample"].map(lambda s: allowed_drift_pct(registry, s))
+    if "placement_relocated_pct" not in out.columns:
+        out["placement_relocated_pct"] = math.nan
+    if "placement_missing" not in out.columns:
+        out["placement_missing"] = out["placement_relocated_pct"].isna().astype(int)
+    out["metric"] = out["sample"].map(lambda s: gate_metric(registry, s))
+    out["observed_drift_pct"] = [
+        100.0 - conc if metric == CONCORDANCE else (math.nan if missing else relocated)
+        for metric, conc, relocated, missing in zip(
+            out["metric"],
+            out["baseline_concordance"],
+            out["placement_relocated_pct"],
+            out["placement_missing"],
+            strict=True,
+        )
+    ]
+    out["allowed_drift_pct"] = [
+        allowed_drift_pct(registry, sample, metric)
+        for sample, metric in zip(out["sample"], out["metric"], strict=True)
+    ]
     out["verdict"] = [
-        "over_budget" if obs > allowed + DRIFT_MARGIN_PCT else "ok"
-        for obs, allowed in zip(out["observed_drift_pct"], out["allowed_drift_pct"], strict=False)
+        "missing_placement"
+        if pd.isna(obs)
+        else ("over_budget" if obs > allowed + DRIFT_MARGIN_PCT else "ok")
+        for obs, allowed in zip(out["observed_drift_pct"], out["allowed_drift_pct"], strict=True)
     ]
     return out.sort_values(["sample", "arch"]).reset_index(drop=True)[cols]
 
@@ -600,7 +631,13 @@ def check_regression(
     baseline_conc = query_df(
         db_path,
         """
-        SELECT t.sample, t.arch, MIN(c.concordance_pct) AS baseline_concordance
+        SELECT t.sample, t.arch, MIN(c.concordance_pct) AS baseline_concordance,
+               MAX(json_extract(c.placement_json, '$.relocated_pct'))
+                   AS placement_relocated_pct,
+               -- MAX skips NULLs, so count the reps it would silently drop: no
+               -- placement block, or a null percentage (no confident reads).
+               SUM(json_extract(c.placement_json, '$.relocated_pct') IS NULL)
+                   AS placement_missing
         FROM trials t
         JOIN comparisons c ON c.trial_id = t.id AND c.kind = ?
         WHERE t.fg_labs_sha = ?
@@ -609,7 +646,7 @@ def check_regression(
         params=(VS_BASELINE, new_sha),
     )
     budget = _baseline_budget(baseline_conc, registry)
-    budget_fails = budget[budget["verdict"] == "over_budget"]
+    budget_fails = budget[budget["verdict"] != "ok"]
 
     # Gate #1 fails *closed*: every cell that has an upstream baseline counterpart
     # must have produced a vs-baseline comparison. Intersecting the run's cells
@@ -645,7 +682,10 @@ def check_regression(
         f"# Regression gate: {verdict}",
         "",
         f"- Gate #1 (vs upstream): observed drift must stay within the "
-        f"per-sample registry budget (margin {DRIFT_MARGIN_PCT}%).",
+        f"per-sample registry budget (margin {DRIFT_MARGIN_PCT}%). Scored on the "
+        f"metric the budget declares: `concordance` (100 - concordance) or "
+        f"`confident_relocation` (% of confidently-mapped primaries placed at a "
+        f"different locus).",
         f"- Gate #2 (vs golden / last release): concordance ≥ {CONCORDANCE_THRESHOLD}%.",
         f"- Gate #3 (thread scaling): efficiency may drop at most "
         f"{scaling_cfg.max_efficiency_drop_pp} pp vs the last release; when the "
@@ -704,6 +744,7 @@ def check_regression(
                 [
                     "sample",
                     "arch",
+                    "metric",
                     "baseline_concordance",
                     "observed_drift_%",
                     "budget_%",
@@ -713,6 +754,7 @@ def check_regression(
                     [
                         "sample",
                         "arch",
+                        "metric",
                         "baseline_concordance",
                         "observed_drift_pct",
                         "allowed_drift_pct",
@@ -742,8 +784,17 @@ def check_regression(
         lines.append("")
         lines.append(
             md_table(
-                ["sample", "arch", "observed_drift_%", "budget_%"],
-                budget_fails[["sample", "arch", "observed_drift_pct", "allowed_drift_pct"]]
+                ["sample", "arch", "metric", "observed_drift_%", "budget_%", "verdict"],
+                budget_fails[
+                    [
+                        "sample",
+                        "arch",
+                        "metric",
+                        "observed_drift_pct",
+                        "allowed_drift_pct",
+                        "verdict",
+                    ]
+                ]
                 .to_records(index=False)
                 .tolist(),
                 float_fmt="{:.4f}",

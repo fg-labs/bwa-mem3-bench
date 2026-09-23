@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use compare_bams::config::{DEFAULT_CONFIDENT_MAPQ, DEFAULT_RELOCATION_BP};
 use compare_bams::{compare, CompareOptions};
 
 /// Reject anything that is not a well-formed SAM aux tag name.
@@ -86,6 +87,16 @@ struct Args {
     /// Permitted absolute MAPQ difference before classifying as discordant.
     #[arg(long, default_value_t = 0)]
     mapq_tolerance: u8,
+
+    /// MAPQ at or above which a side counts as confident for the `placement`
+    /// block of the report.
+    #[arg(long, default_value_t = DEFAULT_CONFIDENT_MAPQ)]
+    confident_mapq: u8,
+
+    /// Largest distance (bp) between unclipped 5' ends that the `placement`
+    /// block still counts as the same locus.
+    #[arg(long, default_value_t = DEFAULT_RELOCATION_BP)]
+    relocation_bp: u32,
 }
 
 /// Exit code for a tag-guard failure.
@@ -105,6 +116,8 @@ fn main() -> Result<()> {
         expect_tags: args.expect_tags.into_iter().collect(),
         absent_ok_tags: args.absent_ok_tags.into_iter().collect(),
         mapq_tolerance: args.mapq_tolerance,
+        confident_mapq: args.confident_mapq,
+        relocation_bp: args.relocation_bp,
         tag_guard: !args.no_tag_guard,
     };
 
@@ -123,6 +136,15 @@ fn main() -> Result<()> {
     eprintln!(
         "compare-bams: total={}, concordant={}, concordance={:.4}%",
         report.total_reads, report.concordant, report.concordance_pct,
+    );
+    eprintln!(
+        "compare-bams: placement: confident={}, relocated={} ({})",
+        report.placement.confident_reads,
+        report.placement.relocated,
+        report
+            .placement
+            .relocated_pct
+            .map_or_else(|| "n/a".to_string(), |pct| format!("{pct:.4}%")),
     );
 
     if !report.tag_guard_violations.is_empty() {

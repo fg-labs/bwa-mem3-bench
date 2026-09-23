@@ -51,7 +51,11 @@ densified on-disk SA.
 The three named **gates** a bless exists to check (see `rule bless_release` in
 `workflow/Snakefile`):
 
-- **Gate #1 — vs-upstream:** concordance against `bwa-mem2 v2.2.1` (x86 only).
+- **Gate #1 — vs-upstream:** drift against a different aligner, within each
+  sample's budget in `docs/expected-divergences.yaml` (x86 only). DNA samples
+  are scored on concordance against `bwa-mem2 v2.2.1`; meth samples on confident
+  relocation against `bwameth` (the share of primaries either aligner maps at
+  MAPQ >= 20 that the two place at a different locus).
 - **Gate #2 — vs-golden:** concordance against the previous blessed release
   (`--golden-ref-sha`); requires `>= 99.999%` on every golden-backed cell.
 - **Gate #3 — thread scaling:** pipeline efficiency across the thread ladder.

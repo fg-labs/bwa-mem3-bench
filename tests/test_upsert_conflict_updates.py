@@ -180,6 +180,7 @@ CASES: tuple[UpsertCase, ...] = (
             "concordance_pct": 90.0,
             "by_class_json": '{"a": 1}',
             "supp_json": '{"supp_total": 1}',
+            "placement_json": '{"relocated": 1}',
         },
         second={
             "concordant": 995,
@@ -187,6 +188,7 @@ CASES: tuple[UpsertCase, ...] = (
             "concordance_pct": 99.4,
             "by_class_json": '{"a": 2}',
             "supp_json": '{"supp_total": 2}',
+            "placement_json": '{"relocated": 2}',
         },
     ),
     UpsertCase(

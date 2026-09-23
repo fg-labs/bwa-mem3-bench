@@ -105,14 +105,17 @@ the tag policy is a property of the comparison rather than the sample:
 
 | kind | compared against | skipped |
 |---|---|---|
-| `vs_baseline` | upstream bwa-mem2 (or bwameth, meth samples) | `MQ`, `HN` — plus, on meth, `NM` `MD` `XA` `SA` `XM` `XG` `XR` `YD` `YC` `RG` |
+| `vs_baseline` | upstream bwa-mem2 (or bwameth, meth samples) | `MQ`, `HN` — plus, on meth, `NM` `MD` `XA` `SA` `XS` `XM` `XG` `XR` `YD` `YC` `RG` |
 | `vs_golden` / `vs_x86` | bwa-mem3, same search settings | nothing |
 | `vs_default` | bwa-mem3 `--fast` vs default | `XS` `HN` `XA` `SA` `MQ` |
 
 Two rules generate those lists. **Cross-tool**: exclude any tag one side never
 writes, or that *is* (or embeds) a reference-relative edit distance — bwameth
 computes `NM`/`MD` against a C→T/G→A converted genome, and `XA`/`SA` carry both
-that edit distance and doubled-reference contig names like `fchr1`.
+that edit distance and doubled-reference contig names like `fchr1`. Against
+bwameth `XS` is skipped too: it describes the candidate set rather than the
+chosen alignment, and two different aligners' candidate sets differ by design
+(the same reason `vs_default` skips it).
 **`--fast` vs default**: same binary, but not the same *behaviour* — the preset
 prunes the candidate set on purpose, so the tags describing that set diverge
 mechanically (`XS` 18.8%, `XA` 17.2%, `SA` 39.8%, `HN` 7.1% of reads on wgs-5M)

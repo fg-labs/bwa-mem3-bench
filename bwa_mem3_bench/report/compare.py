@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from bwa_mem3_bench.registry import CONCORDANCE, gate_metric, load_registry
 from bwa_mem3_bench.registry import DEFAULT_REGISTRY_PATH as REGISTRY_PATH
-from bwa_mem3_bench.registry import load_registry
 from bwa_mem3_bench.report.tables import md_table
 from bwa_mem3_bench.storage import VS_BASELINE, VS_DEFAULT
 from bwa_mem3_bench.storage.queries import query_df
@@ -105,7 +105,9 @@ def _render_concordance_sections(df: pd.DataFrame, lines: list[str], *, heading:
 def generate_compare(*, db_path: Path, fg_labs_sha: str, out_md: Path) -> None:
     df = _load_comparisons(db_path, fg_labs_sha, kind=VS_BASELINE)
     registry = load_registry(REGISTRY_PATH)
-    expected_total = sum(e.expected_drift_pct for e in registry)
+    # Only concordance-metric budgets are comparable to the concordance drift
+    # this report shows; `confident_relocation` budgets measure something else.
+    expected_total = sum(e.expected_drift_pct for e in registry if e.metric == CONCORDANCE)
 
     lines = [f"# Drift report vs upstream: `{fg_labs_sha}`", ""]
 
@@ -119,18 +121,28 @@ def generate_compare(*, db_path: Path, fg_labs_sha: str, out_md: Path) -> None:
 
         lines.append("## Registry cross-check")
         lines.append("")
-        lines.append(f"- Expected drift (sum of registry entries): {expected_total:.4f}%")
-        observed_mean = df["drift_pct"].mean()
-        lines.append(f"- Observed drift (mean across trials): {observed_mean:.4f}%")
+        lines.append(
+            f"- Expected drift (sum of `concordance` registry entries): {expected_total:.4f}%"
+        )
+        # Same scope as expected_total: samples gated on concordance. A sample
+        # gated on confident relocation (meth vs bwameth) is still shown in the
+        # tables above, but its concordance drift has no budget in that total.
+        gated_on_concordance = df["sample"].map(lambda s: gate_metric(registry, s) == CONCORDANCE)
+        observed = (
+            f"{df.loc[gated_on_concordance, 'drift_pct'].mean():.4f}%"
+            if gated_on_concordance.any()
+            else "n/a (no `concordance`-gated trials)"
+        )
+        lines.append(f"- Observed drift (mean across `concordance`-gated trials): {observed}")
         if registry:
             lines.append("")
             lines.append("### Registered divergences")
             lines.append("")
             lines.append(
                 md_table(
-                    ["id", "pr", "date", "affected", "expected_drift_pct", "summary"],
+                    ["id", "pr", "date", "affected", "metric", "expected_drift_pct", "summary"],
                     [
-                        (e.id, e.pr, e.date, e.affected, e.expected_drift_pct, e.summary)
+                        (e.id, e.pr, e.date, e.affected, e.metric, e.expected_drift_pct, e.summary)
                         for e in registry
                     ],
                     float_fmt="{:.4f}",

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::classify::{tag_str, Classification, Discordance};
 use crate::guard::TagGuardViolation;
+use crate::placement::PlacementReport;
 
 /// Per-class count and percentage bucket in a [`ConcordanceReport`].
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -167,6 +168,13 @@ pub struct ConcordanceReport {
     /// stand alone rather than to annotate this block.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tag_guard_violations: Vec<TagGuardViolation>,
+
+    /// Confident-placement agreement over the primaries — see
+    /// [`crate::placement`]. Unlike `concordance_pct` it ignores tags, CIGAR
+    /// detail and MAPQ values, and only counts reads at least one side is sure
+    /// about, so it stays meaningful against a different aligner.
+    #[serde(default)]
+    pub placement: PlacementReport,
 }
 
 /// Which non-primary alignment class a tally belongs to.
@@ -368,6 +376,7 @@ impl ConcordanceReport {
 
     /// Compute derived percentages. Call once after all records have been fed via [`Self::record`].
     pub fn finalize(&mut self) {
+        self.placement.finalize();
         #[allow(clippy::cast_precision_loss)]
         if self.total_reads > 0 {
             let total = self.total_reads as f64;
