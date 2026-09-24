@@ -70,7 +70,7 @@ The candidate's `release-allowances.yaml` entry is written **late** (step 7),
 not first: `submit` needs only the *prior* release's allowance, and writing the
 candidate's entry early would make it the newest ledger row — tripping the
 preflight's "golden is the most recent blessed release" check and the
-`ladder_problems` "arena-tail == newest release" invariant until the step-11
+`ladder_problems` "arena-tail == newest release" invariant until the step-12
 arena bump.
 
 1. **Rebuild the base image _only if the arena ladder changed_** (a new release
@@ -110,10 +110,21 @@ arena bump.
     run with fewer than `reps_release` reps (`--min-reps` overrides, for a
     deliberate exception). After copying it re-lists the golden and fails if any
     cell is missing; re-running it finishes an interrupted copy.
-11. **Bump the arena ladder for the _next_ bless.** Add this now-blessed release
+11. **Publish the results pages:**
+    `cli bench results --fg-labs-sha <sha> --version vX.Y.Z --previous-version <prev-version>`,
+    and commit `results/` in the bless PR. It snapshots the release's aggregates
+    from `benchmark.db` into `results/releases/vX.Y.Z/data.json` and re-renders
+    every page, including the `results/README.md` index. Published releases are
+    frozen: it refuses to overwrite one without `--force`. Its `--sweep-sa-stride`
+    and `--arena-sa-stride` default to the current config; pass `8` for both when
+    publishing a release at or before v0.12.0, which predates the denser index.
+    After changing the renderer, `cli bench results-render` rebuilds every page
+    from the committed snapshots; `tests/test_report_results.py` fails if the
+    committed pages are stale.
+12. **Bump the arena ladder for the _next_ bless.** Add this now-blessed release
     to `ARENA_RELEASES` (`arena.smk`) **and** a `RUN` block in `Dockerfile.base`,
     then rebuild the base image. `tests/test_arena_ladder.py` fails until both
-    are done — that is the guard that keeps step 11 from being forgotten (it was,
+    are done — that is the guard that keeps step 12 from being forgotten (it was,
     for v0.10.0).
 
 ## Why not a single auto-run button?

@@ -52,6 +52,8 @@ def main(argv: list[str] | None = None) -> None:
                 "arena": bench_module.arena,
                 "release-speedup": bench_module.release_speedup,
                 "docs": bench_module.docs,
+                "results": bench_module.results,
+                "results-render": bench_module.results_render,
             },
             "aws": {
                 "jobs": aws_module.jobs,

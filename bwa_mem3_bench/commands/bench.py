@@ -7,6 +7,7 @@ from pathlib import Path
 
 from bwa_mem3_bench import DB_PATH, LOCAL_MIRROR_ROOT, REPO_ROOT
 from bwa_mem3_bench.registry import DEFAULT_REGISTRY_PATH
+from bwa_mem3_bench.release_allowances import DEFAULT_ALLOWANCES_PATH, load_allowances
 from bwa_mem3_bench.report.accuracy import generate_accuracy
 from bwa_mem3_bench.report.arena import generate_arena, generate_release_speedup
 from bwa_mem3_bench.report.compare import generate_compare
@@ -14,12 +15,17 @@ from bwa_mem3_bench.report.docs import generate_docs, parse_releases
 from bwa_mem3_bench.report.full_report import generate_full_report
 from bwa_mem3_bench.report.performance import generate_performance
 from bwa_mem3_bench.report.regression import check_regression
+from bwa_mem3_bench.report.results import rerender, write_release
+from bwa_mem3_bench.report.results_data import build_snapshot
 from bwa_mem3_bench.report.speedup import generate_speedup
 from bwa_mem3_bench.report.summary import generate_summary
 from bwa_mem3_bench.report.trend import generate_trend
 from bwa_mem3_bench.workflow_config import load_config
 
 _DEFAULT_UPSTREAM_TAG = "v2.2.1"
+
+# The committed results tree (see bwa_mem3_bench/report/results.py).
+RESULTS_ROOT = REPO_ROOT / "results"
 
 
 def _resolve_upstream_tag(explicit: str | None) -> str:
@@ -212,3 +218,53 @@ def accuracy(*, fg_labs_sha: str, out: Path | None = None) -> None:
         print(text)
     else:
         print(f"wrote {out}")
+
+
+def results(  # noqa: PLR0913
+    *,
+    fg_labs_sha: str,
+    version: str,
+    previous_version: str,
+    sweep_sa_stride: int = 0,
+    arena_sa_stride: int = 0,
+    out: Path = RESULTS_ROOT,
+    force: bool = False,
+) -> None:
+    """Publish a blessed release's results pages under ``results/``.
+
+    Snapshots the release's aggregates from ``benchmark.db`` into
+    ``results/releases/<version>/data.json`` and re-renders every page. Run
+    after ``bless-golden``; commit the result in the bless PR.
+
+    :param fg_labs_sha: the blessed golden SHA the release was benched at.
+    :param version: the release version, e.g. ``v0.12.0``.
+    :param previous_version: the prior blessed release, e.g. ``v0.11.0``.
+    :param sweep_sa_stride: suffix-array stride of the sweep's bwa-mem3 index.
+        ``0`` takes it from the current config -- pass ``8`` for a release at or
+        before v0.12.0, which predates the denser index.
+    :param arena_sa_stride: the same for the arena's bwa-mem3 arms.
+    :param out: results root.
+    :param force: overwrite an already-published release.
+    """
+    config = load_config(REPO_ROOT / "config")
+    snap = build_snapshot(
+        db_path=DB_PATH,
+        fg_labs_sha=fg_labs_sha,
+        version=version,
+        previous_version=previous_version,
+        allowances=load_allowances(DEFAULT_ALLOWANCES_PATH),
+        config=config,
+        sweep_sa_stride=sweep_sa_stride or 1 << config.sweep_dense_sa_shift,
+        arena_sa_stride=arena_sa_stride or 1 << config.arena.dense_sa_shift,
+    )
+    for path in write_release(out, snap, force=force):
+        print(f"wrote {path}")
+
+
+def results_render(*, out: Path = RESULTS_ROOT) -> None:
+    """Re-render every results page from the committed ``data.json`` snapshots.
+
+    :param out: results root.
+    """
+    for path in rerender(out):
+        print(f"wrote {path}")
