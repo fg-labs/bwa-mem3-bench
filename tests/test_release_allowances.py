@@ -198,7 +198,12 @@ allowances:
         patch.object(bless_golden_module, "run_cmd") as mock_cp,
     ):
         bless_golden(
-            fg_labs_sha=sha, bucket="B", allowances_path=authorized, from_s3=True, dry_run=True
+            fg_labs_sha=sha,
+            bucket="B",
+            allowances_path=authorized,
+            from_s3=True,
+            min_reps=1,
+            dry_run=True,
         )
     mock_ls.assert_called_once()
     copied = [call.args[0] for call in mock_cp.call_args_list]
@@ -356,3 +361,219 @@ allowances:
     )
     with pytest.raises(ValueError, match=r"aliases.*must be a list"):
         load_allowances(p)
+
+
+def _authorized(tmp_path: Path, sha: str) -> Path:
+    return _write(
+        tmp_path / "a.yaml",
+        f"""
+allowances:
+  - to_sha: {sha}
+    pr: fg-labs/bwa-mem3#1
+    date: 2026-06-07
+    summary: "intentional"
+    expected_drift_pct: 0.1
+""".strip(),
+    )
+
+
+def _run_listing(sha: str, cells: list[tuple[str, str]], reps: int) -> str:
+    return "\n".join(
+        f"2026 100 runs/{sha}/{sample}/{arch}/rep-{rep}/aligned.bam"
+        for sample, arch in cells
+        for rep in range(1, reps + 1)
+    )
+
+
+def test_bless_refuses_an_under_replicated_run(tmp_path: Path) -> None:
+    """A sweep that ran at one rep (the v0.13.0 failure) is not blessable by default."""
+    sha = "deadbeef"
+    ls = _run_listing(sha, [("wgs-5M", "c6a"), ("wes-5M", "c6a")], reps=1)
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=ls, stderr="")
+    with (
+        patch.object(bless_golden_module.subprocess, "run", return_value=completed),
+        patch.object(bless_golden_module, "run_cmd") as mock_cp,
+        pytest.raises(ValueError, match="at most 1 rep"),
+    ):
+        bless_golden(
+            fg_labs_sha=sha,
+            bucket="B",
+            allowances_path=_authorized(tmp_path, sha),
+            from_s3=True,
+            min_reps=5,
+            dry_run=True,
+        )
+    mock_cp.assert_not_called()
+
+
+def test_bless_refuses_a_run_with_no_replicate_bams(tmp_path: Path) -> None:
+    """An empty run is under-replicated too; it must not report a successful no-op bless."""
+    sha = "deadbeef"
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+    with (
+        patch.object(bless_golden_module.subprocess, "run", return_value=completed),
+        patch.object(bless_golden_module, "run_cmd") as mock_cp,
+        pytest.raises(ValueError, match="at most 0 rep"),
+    ):
+        bless_golden(
+            fg_labs_sha=sha,
+            bucket="B",
+            allowances_path=_authorized(tmp_path, sha),
+            from_s3=True,
+            min_reps=5,
+            dry_run=True,
+        )
+    mock_cp.assert_not_called()
+
+
+def test_bless_accepts_single_rep_cells_when_the_sweep_is_replicated(tmp_path: Path) -> None:
+    """Single-rep-by-design cells (the ALT arms) do not trip the guard."""
+    sha = "deadbeef"
+    ls = "\n".join(
+        [
+            _run_listing(sha, [("wgs-5M", "c6a")], reps=5),
+            _run_listing(sha, [("wgs-5M-alt", "c6a")], reps=1),
+        ]
+    )
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=ls, stderr="")
+    with (
+        patch.object(bless_golden_module.subprocess, "run", return_value=completed),
+        patch.object(bless_golden_module, "run_cmd") as mock_cp,
+    ):
+        bless_golden(
+            fg_labs_sha=sha,
+            bucket="B",
+            allowances_path=_authorized(tmp_path, sha),
+            from_s3=True,
+            min_reps=5,
+            dry_run=True,
+        )
+    assert mock_cp.call_count == 2  # noqa: PLR2004
+
+
+def test_bless_refuses_a_cell_without_a_rep1_bam_from_s3(tmp_path: Path) -> None:
+    """A cell with only higher reps would otherwise be silently left out of the golden."""
+    sha = "deadbeef"
+    ls = "\n".join(
+        [
+            _run_listing(sha, [("wgs-5M", "c6a")], reps=5),
+            f"2026 100 runs/{sha}/wes-5M/c6a/rep-2/aligned.bam",
+        ]
+    )
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=ls, stderr="")
+    with (
+        patch.object(bless_golden_module.subprocess, "run", return_value=completed),
+        patch.object(bless_golden_module, "run_cmd") as mock_cp,
+        pytest.raises(ValueError, match=r"1 run cell\(s\) have no rep-1 aligned.bam: wes-5M/c6a"),
+    ):
+        bless_golden(
+            fg_labs_sha=sha,
+            bucket="B",
+            allowances_path=_authorized(tmp_path, sha),
+            from_s3=True,
+            min_reps=5,
+            dry_run=True,
+        )
+    mock_cp.assert_not_called()
+
+
+def _local_run(root: Path, sha: str, cell: tuple[str, str], rep_dirs: list[str]) -> None:
+    for rep_dir in rep_dirs:
+        bam = root / "runs" / sha / cell[0] / cell[1] / rep_dir / "aligned.bam"
+        bam.parent.mkdir(parents=True, exist_ok=True)
+        bam.touch()
+
+
+def test_bless_local_ignores_non_numeric_rep_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Four real reps plus a ``rep-backup`` is still under-replicated at a minimum of 5."""
+    _isolate_runs_root(monkeypatch, tmp_path)
+    sha = "deadbeef"
+    _local_run(tmp_path, sha, ("wgs-5M", "c6a"), ["rep-1", "rep-2", "rep-3", "rep-4", "rep-backup"])
+    with (
+        patch.object(bless_golden_module, "run_cmd") as mock_cp,
+        pytest.raises(ValueError, match="at most 4 rep"),
+    ):
+        bless_golden(
+            fg_labs_sha=sha,
+            bucket="B",
+            allowances_path=_authorized(tmp_path, sha),
+            min_reps=5,
+            dry_run=True,
+        )
+    mock_cp.assert_not_called()
+
+
+def test_bless_local_refuses_a_cell_without_a_rep1_bam(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate_runs_root(monkeypatch, tmp_path)
+    sha = "deadbeef"
+    _local_run(tmp_path, sha, ("wgs-5M", "c6a"), [f"rep-{r}" for r in range(1, 6)])
+    _local_run(tmp_path, sha, ("wes-5M", "c6a"), ["rep-2"])
+    with (
+        patch.object(bless_golden_module, "run_cmd") as mock_cp,
+        pytest.raises(ValueError, match=r"have no rep-1 aligned.bam: wes-5M/c6a"),
+    ):
+        bless_golden(
+            fg_labs_sha=sha,
+            bucket="B",
+            allowances_path=_authorized(tmp_path, sha),
+            min_reps=5,
+            dry_run=True,
+        )
+    mock_cp.assert_not_called()
+
+
+def test_bless_fails_when_the_golden_is_incomplete_after_copy(tmp_path: Path) -> None:
+    """An interrupted copy (the v0.12.0 failure) must fail loudly, naming the gap."""
+    sha = "deadbeef"
+    cells = [("hic-1M", "c6a"), ("wes-5M", "c6a"), ("wgs-5M", "c6a")]
+    run_ls = _run_listing(sha, cells, reps=5)
+    # Only the first cell made it into the golden.
+    golden_ls = f"2026 100 golden/fg-labs-{sha}/hic-1M/c6a/aligned.bam"
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        out = golden_ls if "/golden/" in argv[-1] else run_ls
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=out, stderr="")
+
+    golden_mod = importlib.import_module("bwa_mem3_bench.golden")
+    with (
+        patch.object(bless_golden_module.subprocess, "run", side_effect=fake_run),
+        patch.object(golden_mod.subprocess, "run", side_effect=fake_run),
+        patch.object(bless_golden_module, "run_cmd"),
+        pytest.raises(RuntimeError, match=r"2 cell\(s\) missing: wes-5M/c6a, wgs-5M/c6a"),
+    ):
+        bless_golden(
+            fg_labs_sha=sha,
+            bucket="B",
+            allowances_path=_authorized(tmp_path, sha),
+            from_s3=True,
+            min_reps=5,
+        )
+
+
+def test_bless_passes_when_the_golden_is_complete_after_copy(tmp_path: Path) -> None:
+    sha = "deadbeef"
+    cells = [("wes-5M", "c6a"), ("wgs-5M", "c6a")]
+    run_ls = _run_listing(sha, cells, reps=5)
+    golden_ls = "\n".join(f"2026 100 golden/fg-labs-{sha}/{s}/{a}/aligned.bam" for s, a in cells)
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        out = golden_ls if "/golden/" in argv[-1] else run_ls
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=out, stderr="")
+
+    golden_mod = importlib.import_module("bwa_mem3_bench.golden")
+    with (
+        patch.object(bless_golden_module.subprocess, "run", side_effect=fake_run),
+        patch.object(golden_mod.subprocess, "run", side_effect=fake_run),
+        patch.object(bless_golden_module, "run_cmd"),
+    ):
+        bless_golden(
+            fg_labs_sha=sha,
+            bucket="B",
+            allowances_path=_authorized(tmp_path, sha),
+            from_s3=True,
+            min_reps=5,
+        )

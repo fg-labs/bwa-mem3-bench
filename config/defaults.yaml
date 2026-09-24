@@ -13,6 +13,12 @@ bwa_version: "0.7.19"
 threads: 16
 reps_default: 1
 reps_baseline: 5
+# Reps a release bless must be measured at. `cli submit --target bless_release`
+# applies it when `--reps` is not given, and `bless-golden` refuses to promote a
+# run with fewer. Both guards exist because the v0.13.0 bless was driven from
+# outside `cli submit`, silently took `reps_default` (1), and so shipped a golden
+# with one rep per cell and no measurable spread.
+reps_release: 5
 
 # Batch size in bases, passed as `-K` to BOTH bwa-mem3 and upstream bwa-mem2 on
 # every alignment the concordance comparisons read.

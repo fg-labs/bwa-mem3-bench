@@ -17,6 +17,12 @@ _CANDIDATE = "f" * 40
 _MIN_RELEASES_FOR_STALE_TEST = 2
 
 
+@pytest.fixture(autouse=True)
+def _complete_golden(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the preflight off S3: every golden is complete unless a test says otherwise."""
+    monkeypatch.setattr(_bless_release, "missing_golden_cells", lambda _bucket, _sha: [])
+
+
 def _newest_golden() -> str:
     return load_allowances(DEFAULT_ALLOWANCES_PATH)[-1].to_sha
 
@@ -102,3 +108,46 @@ def test_non_strict_prints_plan_even_on_failure(
     out = capsys.readouterr().out
     assert "[FAIL]" in out
     assert "Plan (see docs/RELEASE.md" in out
+
+
+def test_incomplete_golden_fails(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        _bless_release,
+        "missing_golden_cells",
+        lambda _bucket, _sha: [("wes-5M", "c6a"), ("wgs-5M", "c6a")],
+    )
+    with pytest.raises(SystemExit):
+        bless_release(fg_labs_sha=_CANDIDATE, golden_ref_sha=_newest_golden(), strict=True)
+    out = capsys.readouterr().out
+    assert "[FAIL] golden holds every cell" in out
+    assert "2 cell(s) missing, e.g. wes-5M/c6a, wgs-5M/c6a" in out
+
+
+def test_unlistable_golden_is_a_clean_fail(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(_bucket: str, _sha: str) -> list[tuple[str, str]]:
+        raise RuntimeError("AccessDenied")
+
+    monkeypatch.setattr(_bless_release, "missing_golden_cells", boom)
+    bless_release(fg_labs_sha=_CANDIDATE, golden_ref_sha=_newest_golden())
+    out = capsys.readouterr().out
+    assert "could not list S3: AccessDenied" in out
+    assert "Preflight found failing checks" in out
+
+
+def test_missing_aws_cli_is_a_clean_fail(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No `aws` on PATH raises FileNotFoundError; the preflight must still print a line."""
+
+    def no_aws(_bucket: str, _sha: str) -> list[tuple[str, str]]:
+        raise FileNotFoundError("[Errno 2] No such file or directory: 'aws'")
+
+    monkeypatch.setattr(_bless_release, "missing_golden_cells", no_aws)
+    bless_release(fg_labs_sha=_CANDIDATE, golden_ref_sha=_newest_golden())
+    out = capsys.readouterr().out
+    assert "could not list S3" in out
+    assert "Preflight found failing checks" in out

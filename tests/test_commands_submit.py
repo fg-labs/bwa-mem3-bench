@@ -9,8 +9,10 @@ from unittest.mock import patch
 
 import pytest
 
+from bwa_mem3_bench import REPO_ROOT
 from bwa_mem3_bench.commands import _submit as submit_module
 from bwa_mem3_bench.release_allowances import ReleaseAllowance
+from bwa_mem3_bench.workflow_config import load_config
 
 
 def _captured_archs(call_args_list: list[Any]) -> str | None:
@@ -314,3 +316,28 @@ def test_forcerun_omitted_sets_no_env() -> None:
         submit_module.submit(fg_labs_sha="deadbeef", target="all")
 
     assert _captured_env(mock_run.call_args_list, "FORCERUN") is None
+
+
+def test_target_bless_release_auto_fills_reps_release() -> None:
+    """A release bless must be measured with a spread: with no ``--reps`` it takes
+    ``reps_release`` rather than the workflow's single-rep ``reps_default``."""
+    with patch.object(submit_module, "run_cmd") as mock_run:
+        submit_module.submit(
+            fg_labs_sha="deadbeef", target="bless_release", golden_ref_sha="prevsha"
+        )
+    expected = load_config(REPO_ROOT / "config").reps_release
+    assert _captured_env(mock_run.call_args_list, "REPS") == str(expected)
+
+
+def test_explicit_reps_override_wins_for_bless_release() -> None:
+    with patch.object(submit_module, "run_cmd") as mock_run:
+        submit_module.submit(
+            fg_labs_sha="deadbeef", target="bless_release", golden_ref_sha="prevsha", reps=2
+        )
+    assert _captured_env(mock_run.call_args_list, "REPS") == "2"
+
+
+def test_non_release_target_leaves_reps_to_the_workflow_default() -> None:
+    with patch.object(submit_module, "run_cmd") as mock_run:
+        submit_module.submit(fg_labs_sha="deadbeef", target="all")
+    assert _captured_env(mock_run.call_args_list, "REPS") is None

@@ -50,7 +50,7 @@ def submit(  # noqa: PLR0913
     target: str = "smoke",
     samples: str = "",
     archs: str = "",
-    reps: int = 1,
+    reps: int = 0,
     make_target: str = "",
     golden_ref_sha: str = "",
     ladder: str = "",
@@ -72,7 +72,9 @@ def submit(  # noqa: PLR0913
         ``full_archs`` for ``all`` / ``baseline_all`` (so "full benchmark"
         actually sweeps every arch), and to ``core_arch`` for everything else
         (so ad-hoc rule invocations stay cheap).
-    :param reps: replicate count.
+    :param reps: replicate count. ``0`` (default) leaves it to the workflow's
+        ``reps_default`` -- except for ``bless_release``, which is auto-set to
+        ``reps_release`` because a release must be measured with a spread.
     :param make_target: fg-labs/bwa-mem3 Makefile target used at build time.
         Must match the ``--make-target`` passed to ``build`` for the same SHA.
         Empty (default) selects the vanilla image tag ``<sha>`` and writes
@@ -130,6 +132,9 @@ def submit(  # noqa: PLR0913
     if not archs and target in _FULL_SWEEP_TARGETS:
         archs = ",".join(load_config(Path(REPO_ROOT) / "config").full_archs)
         print(f"[submit] target={target}: auto-set --archs={archs}")
+    if not reps and target == "bless_release":
+        reps = load_config(Path(REPO_ROOT) / "config").reps_release
+        print(f"[submit] target={target}: auto-set --reps={reps}")
     env_overrides: list[dict[str, str]] = [
         {"name": "FG_LABS_SHA", "value": fg_labs_sha},
         {"name": "TARGET", "value": target},
