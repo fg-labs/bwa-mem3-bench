@@ -173,7 +173,7 @@ def _plan(fg_labs_sha: str, golden_ref_sha: str) -> list[str]:
     declaration lands AFTER collect (it is what ``bench full-report`` and
     ``bless-golden`` consume), not before submit -- writing it early would make
     the candidate the newest ledger entry and break checks #2/#4 and the ladder
-    guard until the step-11 arena bump.
+    guard until the step-12 arena bump.
     """
     cli = "pixi run python -m bwa_mem3_bench.cli"
     # The plan is command text a human may paste into a shell; shell-quote the
@@ -204,6 +204,8 @@ def _plan(fg_labs_sha: str, golden_ref_sha: str) -> list[str]:
         "HUMAN APPROVAL: review the report; blessing is a decision, never automatic.",
         f"Promote: {cli} bless-golden --fg-labs-sha {sha}  "
         "(+ bless-baseline if the upstream tag moved).",
+        f"Publish the results pages: {cli} bench results --fg-labs-sha {sha} "
+        "--version <vX.Y.Z> --previous-version <prev vX.Y.Z>, and commit results/.",
         "Bump the arena ladder for the NEXT bless: add this release to arena.smk + "
         "Dockerfile.base (test_arena_ladder.py enforces this) and rebuild the base.",
     ]
