@@ -30,6 +30,12 @@ stale comparison:
   `workflow/rules/arena.smk` all agree, and the arena's prior-release arm is the
   newest blessed golden. (This is the check that would have caught v0.10.0 being
   blessed but never added to the arena ladder.)
+- the **golden is complete** — every `(sample, arch)` its own run produced has a
+  BAM under `golden/fg-labs-<golden>/`. Gate #2 compares only the samples the
+  golden holds, so a partially copied golden quietly drops samples from the
+  comparison instead of failing. This is the one check that reads S3 (two
+  `aws s3 ls --recursive` listings); the fix it prints is to re-run
+  `bless-golden --from-s3` for the golden SHA, which is idempotent.
 
 `tests/test_arena_ladder.py` enforces the same ladder invariant in
 `pixi run check`, so a stale ladder fails CI even if this preflight is skipped.
@@ -39,8 +45,8 @@ stale comparison:
 stride-2 (`arena.dense_sa_shift: 1` → `references/hg38-u1`), and the sweep +
 thread-scaling use stride-4 (`sweep_dense_sa_shift: 2` → `references/hg38-u2`
 and `references/hg38-meth-u2`). Upload all three once (see `docs/data-setup.md`
-→ "Stride-2 arena index" and "Stride-4 sweep indexes"); the preflight is offline
-and cannot check S3, so a missing copy surfaces only when a worker fails at
+→ "Stride-2 arena index" and "Stride-4 sweep indexes"); the preflight does not
+check the reference copies, so a missing one surfaces only when a worker fails at
 input staging deep into the paid run. The bless plan prints this reminder. To
 skip either feature, set the corresponding `*_dense_sa_shift: 3` — and set both
 to `3` when blessing a pre-#510 (≤ v0.12.0) SHA, whose binary cannot read a
@@ -80,7 +86,11 @@ arena bump.
 4. **Submit the release matrix:**
    `cli submit --fg-labs-sha <sha> --target bless_release --golden-ref-sha <prev>`.
    `<prev>` is the *previous* release — already in the ledger, and the arena's
-   prior-release arm.
+   prior-release arm. `submit` sets `--reps` to `reps_release` (5, in
+   `config/defaults.yaml`) and `--archs` to the full sweep when they are not
+   given. **Anything that drives the workflow without `cli submit` must pass
+   `reps` and `archs` itself** — otherwise the workflow's `reps_default` (1)
+   applies, which is how v0.13.0 ended up measured at one rep per cell.
 5. **Watch to completion:** `cli watch`. **Surface spot-capacity stalls** (e.g.
    c7i / Sapphire Rapids droughts) rather than letting the coordinator hang
    silently — indefinitely-`RUNNABLE` jobs never self-fail.
@@ -96,7 +106,10 @@ arena bump.
    auto-promote.
 10. **Promote:** `cli bless-golden --fg-labs-sha <sha>` (and
     `cli bless-baseline --upstream-tag <tag>` if the upstream tag moved).
-    `bless-golden` refuses a SHA the step-7 allowance does not authorize.
+    `bless-golden` refuses a SHA the step-7 allowance does not authorize, and a
+    run with fewer than `reps_release` reps (`--min-reps` overrides, for a
+    deliberate exception). After copying it re-lists the golden and fails if any
+    cell is missing; re-running it finishes an interrupted copy.
 11. **Bump the arena ladder for the _next_ bless.** Add this now-blessed release
     to `ARENA_RELEASES` (`arena.smk`) **and** a `RUN` block in `Dockerfile.base`,
     then rebuild the base image. `tests/test_arena_ladder.py` fails until both

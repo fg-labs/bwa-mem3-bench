@@ -39,6 +39,7 @@ CONFIG_DIR = REPO_ROOT / "config"
 EXPECTED_THREADS = 16
 EXPECTED_REPS_DEFAULT = 1
 EXPECTED_REPS_BASELINE = 5
+EXPECTED_REPS_RELEASE = 5
 
 
 def _write_minimal_config(
@@ -203,6 +204,7 @@ def test_load_config_returns_expected_defaults() -> None:
     assert cfg.threads == EXPECTED_THREADS
     assert cfg.reps_default == EXPECTED_REPS_DEFAULT
     assert cfg.reps_baseline == EXPECTED_REPS_BASELINE
+    assert cfg.reps_release == EXPECTED_REPS_RELEASE
 
 
 def test_unknown_sample_raises() -> None:

@@ -511,6 +511,8 @@ class WorkflowConfig:
     threads: int
     reps_default: int
     reps_baseline: int
+    # Minimum reps for a release bless; see config/defaults.yaml.
+    reps_release: int
     # `-K` in bases, passed to BOTH bwa-mem3 and upstream bwa-mem2 so their output
     # is thread-invariant and the golden does not depend on `threads`. See the long
     # rationale in config/defaults.yaml; the short version is that the default batch
@@ -1349,6 +1351,7 @@ def load_config(config_dir: Path) -> WorkflowConfig:
         threads=int(defaults["threads"]),
         reps_default=int(defaults["reps_default"]),
         reps_baseline=int(defaults["reps_baseline"]),
+        reps_release=_as_positive_int("defaults.yaml", "reps_release", defaults["reps_release"]),
         batch_bases=_as_positive_int("defaults.yaml", "batch_bases", defaults["batch_bases"]),
         thread_scaling=_thread_scaling_from(
             defaults["thread_scaling"], samples=samples, archs=archs

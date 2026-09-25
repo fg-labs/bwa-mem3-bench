@@ -18,7 +18,9 @@ from __future__ import annotations
 import re
 import shlex
 
+from bwa_mem3_bench import aws_config
 from bwa_mem3_bench.arena_ladder import ladder_problems
+from bwa_mem3_bench.golden import missing_golden_cells
 from bwa_mem3_bench.release_allowances import (
     DEFAULT_ALLOWANCES_PATH,
     ReleaseAllowance,
@@ -28,6 +30,9 @@ from bwa_mem3_bench.release_allowances import (
 )
 
 _FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
+
+# How many missing golden cells check #6 names before truncating.
+_MAX_MISSING_SHOWN = 5
 
 
 def _resolve(allowances: list[ReleaseAllowance], sha: str) -> tuple[ReleaseAllowance | None, str]:
@@ -112,6 +117,12 @@ def bless_release(
     problems = ladder_problems(allowances)
     checks.append((not problems, "arena ladder is consistent (ledger/Dockerfile/arena.smk)"))
 
+    # 6. The golden is complete. Gate #2 compares only the samples the golden
+    #    contains, so a partially copied golden silently drops samples from the
+    #    comparison -- v0.13.0 was blessed with no vs-golden check on wgs-5M or
+    #    wes-5M because the v0.12.0 golden copy had stopped partway.
+    checks.append(_golden_complete_check(golden_allowance.to_sha if golden_allowance else ""))
+
     print(f"bless-release preflight: candidate {fg_labs_sha}\n")
     all_ok = True
     for ok, label in checks:
@@ -130,6 +141,28 @@ def bless_release(
             raise SystemExit(1)
     else:
         print("\nPreflight passed.")
+
+
+def _golden_complete_check(golden_sha: str) -> tuple[bool, str]:
+    """Preflight check #6: every cell of the golden's own run is in the golden.
+
+    A failed or unreadable S3 listing is a FAIL line, never a traceback -- the
+    preflight's contract is one PASS/FAIL line per check.
+    """
+    label = "golden holds every cell its run produced (Gate #2 compares all samples)"
+    if not golden_sha:
+        return False, f"{label} (no resolvable golden)"
+    try:
+        missing = missing_golden_cells(aws_config.load().bucket, golden_sha)
+    except (RuntimeError, OSError) as exc:  # OSError: no `aws` CLI on PATH
+        return False, f"{label} (could not list S3: {exc})"
+    if missing:
+        shown = ", ".join(f"{s}/{a}" for s, a in missing[:_MAX_MISSING_SHOWN])
+        return False, (
+            f"{label} -- {len(missing)} cell(s) missing, e.g. {shown}; "
+            f"re-run bless-golden --from-s3 --fg-labs-sha {golden_sha}"
+        )
+    return True, label
 
 
 def _plan(fg_labs_sha: str, golden_ref_sha: str) -> list[str]:
@@ -160,7 +193,8 @@ def _plan(fg_labs_sha: str, golden_ref_sha: str) -> list[str]:
         f"Verify the ECR push settled and match the digest buildx printed "
         f"(aws ecr describe-images ... imageTag={sha}).",
         f"Submit the release matrix: {cli} submit --fg-labs-sha {sha} "
-        f"--target bless_release --golden-ref-sha {golden}",
+        f"--target bless_release --golden-ref-sha {golden}  (auto-sets --reps to "
+        "reps_release; a driver that bypasses `cli submit` must pass reps and archs itself)",
         f"Watch to completion: {cli} watch  (surface, do not ignore, spot-capacity stalls)",
         f"Collect + ingest: {cli} collect --fg-labs-sha {sha}",
         "Write the candidate's docs/release-allowances.yaml entry (to_sha, pr, "

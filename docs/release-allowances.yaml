@@ -696,9 +696,15 @@ allowances:
       cell; the arena is the release-over-release claim. Intentional (release
       continuity, no output change), accepted.
     expected_drift_pct: 0.0
-    # Golden lives under 64420af4 -- the release-please #507 head, benched at
-    # reps=5 (target bless_release) across the six sweep archs, plus the arena
-    # (m8a/m8g) and the thread-scaling ladder. #507 merged to the shipped v0.13.0
+    # Golden lives under 64420af4 -- the release-please #507 head, benched with
+    # target bless_release across the six sweep archs, plus the arena (m8a/m8g,
+    # 3 interleaved reps) and the thread-scaling ladder. CORRECTION: the sweep ran
+    # at ONE rep per cell, not the reps=5 this note originally claimed -- it was
+    # driven outside `cli submit`, so the workflow's reps_default (1) applied. Its
+    # sweep timings have no measurable spread; the arena numbers above are
+    # unaffected. Gate #2 was also partial: the v0.12.0 golden copy had stopped
+    # after sim-wgs-vars-compat, so vs-golden compared only hic-1M, sbx-1M,
+    # panel-agilent-qxt-5M and meth (19 cells) and never wgs-5M or wes-5M. #507 merged to the shipped v0.13.0
     # tag (e3904dd) on 2026-09-23; the two commits share tree d84035f4, so the
     # shipped tag is the same binary as this golden (case 1 in
     # `ReleaseAllowance.aliases`). Aliased so a vs-golden run pinned to the tag
