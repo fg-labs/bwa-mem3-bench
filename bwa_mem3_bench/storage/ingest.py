@@ -12,6 +12,7 @@ from pathlib import Path
 from statistics import median
 from typing import Any, NamedTuple
 
+from bwa_mem3_bench.golden import is_rep_dir
 from bwa_mem3_bench.storage import VS_BASELINE, VS_DEFAULT, VS_GOLDEN, VS_X86
 from bwa_mem3_bench.storage.sqlite import (
     upsert_accuracy,
@@ -362,7 +363,7 @@ def late_cells(
     for sample_dir in sorted(d for d in sha_dir.iterdir() if d.is_dir()):
         for arch_dir in sorted(d for d in sample_dir.iterdir() if d.is_dir()):
             for rep_dir in sorted(d for d in arch_dir.iterdir() if d.is_dir()):
-                if not rep_dir.name.startswith("rep-"):
+                if not is_rep_dir(rep_dir.name):
                     continue
                 when = _measured_at(rep_dir)
                 if when is None:
@@ -420,7 +421,7 @@ def ingest_run(
         for arch_dir in sorted(d for d in sample_dir.iterdir() if d.is_dir()):
             arch = arch_dir.name
             for rep_dir in sorted(d for d in arch_dir.iterdir() if d.is_dir()):
-                if not rep_dir.name.startswith("rep-"):
+                if not is_rep_dir(rep_dir.name):
                     continue
                 rep = int(rep_dir.name.split("-", 1)[1])
                 if (sample, arch, rep) in exclude:
@@ -555,7 +556,7 @@ def ingest_baseline(
         for arch_dir in sorted(d for d in sample_dir.iterdir() if d.is_dir()):
             arch = arch_dir.name
             for rep_dir in sorted(d for d in arch_dir.iterdir() if d.is_dir()):
-                if not rep_dir.name.startswith("rep-"):
+                if not is_rep_dir(rep_dir.name):
                     continue
                 rep = int(rep_dir.name.split("-", 1)[1])
 
@@ -652,7 +653,7 @@ def ingest_minibwa(
         for arch_dir in sorted(d for d in sample_dir.iterdir() if d.is_dir()):
             arch = arch_dir.name
             for rep_dir in sorted(d for d in arch_dir.iterdir() if d.is_dir()):
-                if not rep_dir.name.startswith("rep-"):
+                if not is_rep_dir(rep_dir.name):
                     continue
                 rep = int(rep_dir.name.split("-", 1)[1])
 
@@ -845,7 +846,7 @@ def ingest_accuracy(
         for arch_dir in sorted(d for d in sample_dir.iterdir() if d.is_dir()):
             arch = arch_dir.name
             for rep_dir in sorted(d for d in arch_dir.iterdir() if d.is_dir()):
-                if not rep_dir.name.startswith("rep-"):
+                if not is_rep_dir(rep_dir.name):
                     continue
                 rep = int(rep_dir.name.split("-", 1)[1])
                 if (sample, arch, rep) in exclude:
