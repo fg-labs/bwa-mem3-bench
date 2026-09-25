@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import time
 from datetime import UTC, datetime
@@ -154,6 +155,17 @@ def test_late_cells_finds_the_control_reps(tmp_path: Path) -> None:
     # In the ordinary shape the foreign cells FOLLOW the run, so none of them is
     # early and `collect` skips all of them. The inverted shape is below.
     assert not any(c.is_early for c in late)
+
+
+def test_late_cells_skips_non_replicate_dirs(tmp_path: Path) -> None:
+    """A stray `rep-backup` / `rep-0` is neither dated nor reported as a late rep."""
+    root = tmp_path / "runs"
+    _build_run(root, stamped=True)
+    rep1 = root / SHA / "wgs-5M" / "m7i" / "rep-1"
+    for name in ("rep-backup", "rep-0"):
+        shutil.copytree(rep1, rep1.parent / name)
+    late = late_cells(runs_root=root, fg_labs_sha=SHA)
+    assert [(c.sample, c.arch, c.rep) for c in late] == [("wgs-5M", "m7i", 6), ("wgs-5M", "m7i", 7)]
 
 
 def test_the_runs_own_cells_come_out_early_when_the_control_is_the_majority(

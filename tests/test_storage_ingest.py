@@ -905,3 +905,60 @@ def test_ingest_run_tolerates_a_cell_without_a_host_probe(db_path: Path, tmp_pat
     assert ingest_run(conn, runs_root=tmp_path, fg_labs_sha=sha) == 1
     assert conn.execute("SELECT COUNT(*) FROM host_probes").fetchone()[0] == 0
     conn.close()
+
+
+# --------------------------------------------------------------------------- #
+# Stray non-replicate directories (`rep-backup`, `rep-0`) next to real reps.
+# --------------------------------------------------------------------------- #
+
+_STRAY_REP_DIRS = ("rep-backup", "rep-0")
+
+
+def _add_stray_rep_dirs(root: Path) -> None:
+    """Copy every `rep-1/` under ``root`` to non-replicate siblings.
+
+    Copies (rather than empty dirs) so each stray dir holds exactly what the
+    walkers read — a walker that fails to skip one ingests it or crashes on it.
+    """
+    for rep1 in sorted(root.rglob("rep-1")):
+        for name in _STRAY_REP_DIRS:
+            shutil.copytree(rep1, rep1.parent / name)
+
+
+def test_ingest_run_skips_non_replicate_dirs(db_path: Path, tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    shutil.copytree(FIXTURE, runs_root)
+    _add_stray_rep_dirs(runs_root)
+    conn = connect(db_path)
+    assert ingest_run(conn, runs_root=runs_root, fg_labs_sha="abc1234") == 1
+    assert conn.execute("SELECT rep FROM trials").fetchall() == [(1,)]
+    conn.close()
+
+
+def test_ingest_baseline_skips_non_replicate_dirs(db_path: Path, tmp_path: Path) -> None:
+    baseline_root = tmp_path / "baseline"
+    shutil.copytree(BASELINE_FIXTURE, baseline_root)
+    _add_stray_rep_dirs(baseline_root)
+    conn = connect(db_path)
+    n = ingest_baseline(conn, baseline_root=baseline_root, tool_version="v2.2.1")
+    assert n == EXPECTED_BASELINE_TRIALS
+    conn.close()
+
+
+def test_ingest_minibwa_skips_non_replicate_dirs(db_path: Path, tmp_path: Path) -> None:
+    root = tmp_path / "minibwa"
+    _write_minibwa_trial(root, "cafe", ("wgs-5M", "c8g", 1), 30.0)
+    _add_stray_rep_dirs(root)
+    conn = connect(db_path)
+    assert ingest_minibwa(conn, minibwa_root=root, minibwa_sha="cafe") == 1
+    conn.close()
+
+
+def test_ingest_accuracy_skips_non_replicate_dirs(db_path: Path, tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    sha = "abc1234"
+    _write_eval_cell(runs_root, sha, ("sim-wgs-vars", "c6a", 1), "fg-labs", meth=False)
+    _add_stray_rep_dirs(runs_root)
+    conn = connect(db_path)
+    assert ingest_accuracy(conn, runs_root=runs_root, fg_labs_sha=sha) == 1
+    conn.close()
