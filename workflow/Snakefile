@@ -67,12 +67,14 @@ PORTABLE_IMAGES = str(config.get("portable_images", "false")).lower() == "true"
 #     PR #84). Crashes on hosts below the tier.
 #
 # The mapping is driven by `arch.baseline_arch` in `config/archs.yaml`. Each
-# rule's `resources.container_image` lambda calls `image_for_arch` below;
-# our snakemake-executor-plugin-aws-batch fork reads the resource and uses
-# it as the SubmitJob job-def's `containerProperties.image`. When unset
-# (e.g. future rules that don't care about arch), the profile's
-# `container-image` falls back. Build-side: `cli build --baseline-arch
-# <tier>` produces the matching ECR tag.
+# arch-routed rule sets `resources.aws_batch_container_image` to
+# `image_for_arch` below; the executor pinned in docker/Dockerfile reads that
+# resource and uses it as the SubmitJob job-def's `containerProperties.image`.
+# When it is unset the executor silently falls back to the profile's
+# `container-image`, so tests/test_workflow_config.py requires it on every
+# arch-routed rule. (`resources.container_image` was read only by the executor
+# pinned before #110; no pinned build reads it now.) Build-side:
+# `cli build --baseline-arch <tier>` produces the matching ECR tag.
 # ---------------------------------------------------------------------------
 
 from bwa_mem3_bench import aws_config as _aws_config
@@ -81,7 +83,12 @@ from bwa_mem3_bench.arena_arms import DenseSaPolicy, front_load_fast_arms
 from bwa_mem3_bench.golden import golden_backed_samples
 
 _AWS = _aws_config.load()
-_ECR_REPO_URI = _AWS.ecr_repo_uri
+# `--config ecr_repo_uri=<uri>` names the worker image repository explicitly.
+# docker/coordinator-entrypoint.sh passes the same BWA_MEM3_BENCH_ECR_REPO it
+# renders the profile from (`render-profile --ecr-repo-uri` takes it too), and a
+# coordinator running from a fresh clone without cdk/outputs.json or that env
+# can pass it directly; otherwise every image reference would be a bare `:<tag>`.
+_ECR_REPO_URI = config.get("ecr_repo_uri") or _AWS.ecr_repo_uri
 
 # Bucket for the golden listing below. On the coordinator `aws_config.load()`
 # resolves the bucket from the Batch job-def env; worker jobs re-parse this

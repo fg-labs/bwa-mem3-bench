@@ -410,10 +410,10 @@ class Arch:
 
         The build side (``cli build --baseline-arch <tier>``) produces the
         matching tag; both sides read this dataclass field so they stay in
-        sync. The workflow's per-rule ``resources.container_image`` lambda
-        calls into this method, and our snakemake-executor-plugin-aws-batch
-        fork uses the resource as the SubmitJob job-def's
-        ``containerProperties.image``.
+        sync. The workflow's per-rule ``resources.aws_batch_container_image``
+        lambda calls into this method, and the pinned
+        snakemake-executor-plugin-aws-batch uses the resource as the SubmitJob
+        job-def's ``containerProperties.image``.
 
         ``portable=True`` ignores `baseline_arch` and returns the portable tag: the
         run-level escape hatch (``--config portable_images=true``) for a SHA that

@@ -535,7 +535,7 @@ rule align_arena:
     resources:
         batch_queue = lambda wc: arena_queue_for(wc.arch),
         mem_mb = ARENA_MEM_MB,
-        container_image = lambda wc: image_for_arch(wc.arch),
+        aws_batch_container_image = lambda wc: image_for_arch(wc.arch),
         # The arena is long by construction: an interleaved warmup + N measured
         # cycles across 13-14 arms. The profile default (7200 s) can be tight
         # once reps > 3; match the ladder's own bump.

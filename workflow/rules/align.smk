@@ -376,7 +376,7 @@ rule align_fg_labs:
         batch_queue = lambda wc: batch_queue_for(wc.arch),
         mem_mb = lambda wc: _mem_mb_for(wc.sample),
         shared_memory_size_mb = lambda wc: _shm_size_mb_for(wc.sample),
-        container_image = lambda wc: image_for_arch(wc.arch),
+        aws_batch_container_image = lambda wc: image_for_arch(wc.arch),
     # Declared as a snakemake `threads:` directive, NOT a param, because our
     # snakemake-executor-plugin-aws-batch fork derives the Batch job's VCPU
     # resourceRequirement from it (batch_job_builder.py: `vcpu = max(1,
@@ -516,7 +516,7 @@ rule align_baseline:
     resources:
         batch_queue = lambda wc: batch_queue_for(wc.arch),
         mem_mb = lambda wc: _mem_mb_for(wc.sample),
-        container_image = lambda wc: image_for_arch(wc.arch),
+        aws_batch_container_image = lambda wc: image_for_arch(wc.arch),
     # See align_fg_labs: `threads:` (not a param) so the executor plugin
     # reserves the vCPUs the aligner actually uses. The baseline must match the
     # fg-labs rule exactly or the two arms would be timed under different

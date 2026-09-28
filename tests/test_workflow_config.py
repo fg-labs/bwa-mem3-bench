@@ -1,6 +1,7 @@
 """Unit tests for workflow_config loader."""
 
 import dataclasses
+import re
 from pathlib import Path
 
 import pytest
@@ -1494,6 +1495,58 @@ def test_the_snakefile_threads_portable_images_into_every_worker_image() -> None
     snakefile = (CONFIG_DIR.parent / "workflow" / "Snakefile").read_text()
     assert 'config.get("portable_images", "false")' in snakefile
     assert "portable=PORTABLE_IMAGES," in snakefile
+
+
+def test_every_batch_routed_rule_sets_its_arch_image() -> None:
+    """Every rule routed to an arch's Batch queue must also pick that arch's image.
+
+    The pinned executor reads a rule's image from `resources.aws_batch_container_image`
+    and silently falls back to the profile's single default image when it is unset,
+    so a rule missing it runs green on the wrong build -- which is how per-arch
+    images went unused from #110 until this check existed. `container_image` is read
+    by no pinned executor; it must not come back as a look-alike that does nothing.
+    """
+    queue = re.compile(r"^\s*batch_queue\s*=\s*lambda wc: \w+_queue_for\(wc\.arch\),\s*$")
+    image = re.compile(
+        r"^\s*aws_batch_container_image\s*=\s*lambda wc: image_for_arch\(wc\.arch\),\s*$"
+    )
+    dead_key = re.compile(r"^\s*container_image\s*=")
+    rule_start = re.compile(r"^(?:rule|checkpoint)\s+(\w+)")
+    rules_dir = CONFIG_DIR.parent / "workflow" / "rules"
+    routed = 0
+    for path in sorted(rules_dir.glob("*.smk")):
+        blocks: dict[str, list[str]] = {}
+        current = None
+        for line in path.read_text().splitlines():
+            m = rule_start.match(line)
+            if m:
+                current = m.group(1)
+                blocks[current] = []
+            elif current is not None:
+                blocks[current].append(line)
+            assert not dead_key.match(line), f"{path.name}: container_image is read by no executor"
+        for rule, body in blocks.items():
+            if any(queue.match(line) for line in body):
+                routed += 1
+                assert any(image.match(line) for line in body), f"{path.name}: rule {rule}"
+    assert routed > 0, "no rule is routed to an arch queue; did the rules move?"
+
+
+def test_local_and_image_executor_pins_agree() -> None:
+    """pixi.toml and docker/Dockerfile must pin the same executor revision.
+
+    The per-rule image resource the workflow sets is only honored by some
+    revisions; a local environment on a different revision than the coordinator
+    image dry-runs and tests a workflow the real run does not execute.
+    """
+    root = CONFIG_DIR.parent
+    pin = re.compile(
+        r"snakemake-executor-plugin-aws-batch\.git(?:@|\"[^\n]*rev = \")([0-9a-f]{40})"
+    )
+    pixi = pin.findall((root / "pixi.toml").read_text())
+    docker = pin.findall((root / "docker" / "Dockerfile").read_text())
+    assert len(pixi) == 1 and len(docker) == 1, (pixi, docker)
+    assert pixi == docker
 
 
 def test_image_variants_lists_what_a_build_must_publish() -> None:
