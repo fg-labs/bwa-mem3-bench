@@ -31,6 +31,7 @@ from bwa_mem3_bench.workflow_config import (
     load_config,
     parse_ladder_override,
     resolve_worker_image_sha,
+    variant_platform,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -104,18 +105,45 @@ def test_load_config_returns_expected_archs() -> None:
 
 
 def test_arch_baseline_arch_field() -> None:
-    """Every arch currently uses the portable image (`baseline_arch=""`).
+    """Every x86 arch uses the portable image; Graviton4 sweep archs are core-tuned.
 
-    The per-rule image plumbing is wired end-to-end and tested, but the
-    AVX-512BW image variant produced by `BASELINE_ARCH=avx512bw` is not
+    The AVX-512BW image variant produced by `BASELINE_ARCH=avx512bw` is not
     a perf win on this workload (per the fg-labs/bwa-mem3 AVX-512
     baseline-build Phase C benchmarking). When upstream lands a fix,
     set c7a / c7i / m7i back to "avx512bw" here.
+
+    c7g (Graviton3) must stay portable: `-mcpu=neoverse-v2` emits SVE2, which
+    it lacks. m8g (Graviton4) stays portable so the arena's candidate is built
+    the same way as its generically-compiled historical arms.
     """
     cfg = load_config(CONFIG_DIR)
-    for arch in ("c6a", "c7a", "c7i", "c7g", "c8g", "m7i"):
+    for arch in ("c6a", "c7a", "c7i", "c7g", "m7i", "m8a", "m8g"):
         assert cfg.archs[arch].baseline_arch == "", (
             f"{arch}.baseline_arch should be parked at ''; got {cfg.archs[arch].baseline_arch!r}"
+        )
+    for arch in ("c8g", "c8g64"):
+        assert cfg.archs[arch].baseline_arch == "neoverse-v2", arch
+
+
+def test_arch_rejects_a_baseline_arch_its_platform_cannot_build() -> None:
+    """A mismatched tuning names a tag no build publishes; fail at config load."""
+    with pytest.raises(ValueError, match="does not match platform"):
+        Arch(
+            name="c6a",
+            instance_type="c6a.4xlarge",
+            batch_queue="q",
+            simd="avx2",
+            platform="linux/amd64",
+            baseline_arch="neoverse-v2",
+        )
+    with pytest.raises(ValueError, match="does not match platform"):
+        Arch(
+            name="c8g",
+            instance_type="c8g.4xlarge",
+            batch_queue="q",
+            simd="neon",
+            platform="linux/arm64",
+            baseline_arch="avx512bw",
         )
 
 
@@ -123,14 +151,17 @@ _TEST_ECR = "550079046206.dkr.ecr.us-east-1.amazonaws.com/bwa-mem3-bench"
 _TEST_SHA = "abcdef0"
 
 
-def test_arch_image_uri_all_archs_use_portable_tag_today() -> None:
-    """Every arch resolves to the bare `<sha>` portable tag right now —
-    matches the parked `baseline_arch=""` config (see test above)."""
+def test_arch_image_uri_matches_the_configured_variants() -> None:
+    """Parked archs resolve to the bare `<sha>` portable tag; Graviton4 sweep
+    archs to the `<sha>-neoverse-v2` core-tuned tag (see test above)."""
     cfg = load_config(CONFIG_DIR)
-    for arch in ("c6a", "c7a", "c7i", "c7g", "c8g", "m7i"):
+    for arch in ("c6a", "c7a", "c7i", "c7g", "m7i"):
         uri = cfg.archs[arch].image_uri(ecr_repo_uri=_TEST_ECR, fg_labs_sha=_TEST_SHA)
         assert uri == f"{_TEST_ECR}:{_TEST_SHA}", f"{arch}: {uri}"
         assert "-" not in uri.split(":")[-1], f"{arch} unexpected suffix in {uri}"
+    for arch in ("c8g", "c8g64"):
+        uri = cfg.archs[arch].image_uri(ecr_repo_uri=_TEST_ECR, fg_labs_sha=_TEST_SHA)
+        assert uri == f"{_TEST_ECR}:{_TEST_SHA}-neoverse-v2", f"{arch}: {uri}"
 
 
 def test_arch_image_uri_with_baseline_arch_set_appends_suffix() -> None:
@@ -1448,3 +1479,31 @@ def test_pa_is_expected_only_on_alt_aware_samples() -> None:
     assert "pa" not in cfg.expect_tags(non_alt, "vs_baseline"), (
         f"{non_alt} is not ALT-aware, so an observed pa should fail the guard"
     )
+
+
+def test_portable_images_drops_every_variant_suffix() -> None:
+    """The run-level escape hatch for a SHA that cannot build its archs' variants."""
+    cfg = load_config(CONFIG_DIR)
+    for name, arch in cfg.archs.items():
+        uri = arch.image_uri(ecr_repo_uri=_TEST_ECR, fg_labs_sha=_TEST_SHA, portable=True)
+        assert uri == f"{_TEST_ECR}:{_TEST_SHA}", name
+
+
+def test_the_snakefile_threads_portable_images_into_every_worker_image() -> None:
+    """`image_for_arch` is the one place every rule's image comes from."""
+    snakefile = (CONFIG_DIR.parent / "workflow" / "Snakefile").read_text()
+    assert 'config.get("portable_images", "false")' in snakefile
+    assert "portable=PORTABLE_IMAGES," in snakefile
+
+
+def test_image_variants_lists_what_a_build_must_publish() -> None:
+    """Exactly the routed host-locked variants, each with its one platform."""
+    assert load_config(CONFIG_DIR).image_variants() == [("neoverse-v2", "linux/arm64")]
+
+
+@pytest.mark.parametrize(
+    ("variant", "expected"),
+    [("", None), ("neoverse-v2", "linux/arm64"), ("avx512bw", "linux/amd64")],
+)
+def test_variant_platform(variant: str, expected: str | None) -> None:
+    assert variant_platform(variant) == expected

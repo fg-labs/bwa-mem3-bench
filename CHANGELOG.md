@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Graviton4 core-tuned bwa-mem3 image for c8g / c8g64.** `baseline_arch:
+  neoverse-v2` routes both to `<sha>-neoverse-v2`, a linux/arm64-only image
+  built with the fg-labs Makefile's `ARM_CPU=neoverse-v2 ARM_CACHE_LINE=64`
+  (`cli build --baseline-arch neoverse-v2`; the CI `build-tuned` job builds it
+  on every `per-sha` run). c7g (Graviton3, no SVE2) and m8g (arena leg, whose
+  historical arms are generic builds) stay on the portable tag. Needs fg-labs
+  v0.10.0+; the Dockerfile refuses a tuned build of an older SHA. ECR tagged
+  retention rises from 90 to 120 for the fourth tag per SHA (needs `cdk
+  deploy`). Expect a one-time step in c8g wall-time trends at the first tuned
+  run, and a c8g minibwa ratio that now favours bwa-mem3 by the tuning (c7g is
+  the clean same-ISA comparison).
+- **Image-variant provenance.** Every image bakes in its variant and
+  `emit-host-meta` records it; `trials.image_variant` (schema v13) stores it.
+  `collect` refuses a cell whose reps ran different variants
+  (`--ingest-mixed-variants` overrides), the perf gate reports a cell whose
+  variant changed since the previous release as `variant_changed` (shown, not
+  gated), and results snapshots freeze `image_variants` per arch.
+- **`submit --portable-images`** (`portable_images` config): every arch pulls
+  the portable `<sha>` image. Required for fg-labs SHAs older than v0.10.0.
+
 - **SA densification for `> v0.12.0` fg-labs alignments (opt-in,
   fg-labs/bwa-mem3#510).** Arms newer than v0.12.0 align against a pre-built,
   denser `re-sa` copy of the index, staged separately from the stock stride-8
@@ -30,6 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Variant tag suffix order** is now `<sha>-<make_target>-<baseline_arch>`
+  (was `<sha>-<baseline_arch>-<make_target>`), matching the tag workers compose
+  (`BUILD_VARIANT` then `baseline_arch`). The old order was never pullable.
+- **`cli build --baseline-arch <x86 tier>`** now builds `linux/amd64` only by
+  default and refuses other platforms; a fleet build previously published a
+  generic arm64 image under the tier's tag.
 - **Arena moved from c8a/c8g (32 GB) to m8a/m8g (64 GB) on-demand hosts** — the
   general-purpose siblings of the same AMD / Graviton4 families (16 real cores,
   no SMT), whose extra RAM holds the stride-2 arm's ~27–28 GB peak RSS that does

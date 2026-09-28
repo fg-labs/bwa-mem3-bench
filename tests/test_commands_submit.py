@@ -341,3 +341,16 @@ def test_non_release_target_leaves_reps_to_the_workflow_default() -> None:
     with patch.object(submit_module, "run_cmd") as mock_run:
         submit_module.submit(fg_labs_sha="deadbeef", target="all")
     assert _captured_env(mock_run.call_args_list, "REPS") is None
+
+
+def test_portable_images_reaches_the_coordinator() -> None:
+    """The pre-v0.10.0 escape hatch must actually leave the laptop."""
+    with patch.object(submit_module, "run_cmd") as mock_run:
+        submit_module.submit(fg_labs_sha="deadbeef", portable_images=True)
+    assert _captured_env(mock_run.call_args_list, "PORTABLE_IMAGES") == "true"
+
+
+def test_portable_images_is_off_by_default() -> None:
+    with patch.object(submit_module, "run_cmd") as mock_run:
+        submit_module.submit(fg_labs_sha="deadbeef")
+    assert _captured_env(mock_run.call_args_list, "PORTABLE_IMAGES") is None

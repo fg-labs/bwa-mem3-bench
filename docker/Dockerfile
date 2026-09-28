@@ -36,6 +36,21 @@ ARG FG_LABS_SHA
 # uses `${BASELINE_ARCH:-avx2}` so make always sees an explicit non-empty
 # value.
 ARG BASELINE_ARCH=""
+# fg-labs/bwa-mem3 arm64 core tuning (Makefile `ARM_CPU` / `ARM_CACHE_LINE`,
+# added in v0.10.0). Empty ARM_CPU = the portable arm64 build: generic
+# scheduling and the Makefile's 128-byte cache-line default, runnable on every
+# Graviton. `cli build --baseline-arch neoverse-v2` sets both, producing an
+# image host-locked to Graviton4 (`-mcpu=neoverse-v2` emits SVE2, which
+# Graviton3 lacks).
+#
+# Deliberately NOT named ARM_CPU / ARM_CACHE_LINE: BuildKit exports every ARG
+# into the RUN environment, and make imports the environment as variables, so
+# an empty `ARM_CACHE_LINE` ARG would reach the Makefile set-but-empty, defeat
+# its `ARM_CACHE_LINE ?= 128`, and fail the PORTABLE arm64 build on its
+# "must be 64 or 128" guard -- the BASELINE_ARCH trap above, in another form.
+# The make variables are set explicitly, and only when tuning.
+ARG TUNE_ARM_CPU=""
+ARG TUNE_ARM_CACHE_LINE=""
 # fg-labs/bwa-mem3 Makefile target. Empty = default (`make` → `bwa-mem3`).
 # Supported alternatives:
 #   lto-build  → `make lto-build` (Link-Time Optimization). Output is
@@ -125,11 +140,28 @@ RUN git clone --recursive "${FG_LABS_REPO}" fg-labs && \
 # The output filename was also renamed `bwa-mem2` → `bwa-mem3` (PR-rename).
 # We install it under the legacy `bwa-mem2.fg-labs` path so the workflow
 # rules that invoke `bwa-mem2.fg-labs mem` keep working untouched.
+#
+# A tuned build refuses a Makefile that predates ARM_CPU: make silently ignores
+# an unknown command-line variable, which would publish a generic binary under
+# the `-<tuning>` tag. Likewise refused on amd64, where it would be ignored too.
 RUN cd fg-labs && \
     BUILT_BIN=bwa-mem3 && \
+    if [ -n "${TUNE_ARM_CPU}" ]; then \
+        if [ "$TARGETARCH" != "arm64" ]; then \
+            echo "ERROR: TUNE_ARM_CPU=${TUNE_ARM_CPU} set for TARGETARCH=${TARGETARCH}" >&2 ; \
+            exit 1 ; \
+        fi && \
+        if ! grep -qF '$(ARM_CPU)' Makefile || ! grep -qF '$(ARM_CACHE_LINE)' Makefile; then \
+            echo "ERROR: fg-labs ${FG_LABS_SHA} Makefile lacks ARM_CPU/ARM_CACHE_LINE (needs v0.10.0+)" >&2 ; \
+            exit 1 ; \
+        fi ; \
+    fi && \
     case "${FG_LABS_MAKE_TARGET:-}" in \
       "" ) \
-        if [ "$TARGETARCH" = "arm64" ]; then \
+        if [ -n "${TUNE_ARM_CPU}" ]; then \
+            make arch=arm64 ARM_CPU="${TUNE_ARM_CPU}" ARM_CACHE_LINE="${TUNE_ARM_CACHE_LINE}" \
+                -j"$(nproc)" CXX=clang++ CC=clang; \
+        elif [ "$TARGETARCH" = "arm64" ]; then \
             make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
         else \
             make BASELINE_ARCH="${BASELINE_ARCH:-avx2}" -j"$(nproc)" CXX=clang++ CC=clang; \
@@ -140,7 +172,13 @@ RUN cd fg-labs && \
         # would resolve to the build host's microarch rather than the bench
         # target's — set it explicitly so the LTO binary matches the
         # corresponding non-LTO build on the same arch.
-        if [ "$TARGETARCH" = "arm64" ]; then \
+        # lto-build's inner make clears MAKEFLAGS/MAKEOVERRIDES, but make still
+        # exports command-line variables into recipe environments, so ARM_CPU /
+        # ARM_CACHE_LINE reach it (verified on Debian bookworm's make 4.3).
+        if [ -n "${TUNE_ARM_CPU}" ]; then \
+            make lto-build LTO_ARCH=arm64 ARM_CPU="${TUNE_ARM_CPU}" \
+                ARM_CACHE_LINE="${TUNE_ARM_CACHE_LINE}" -j"$(nproc)" CXX=clang++ CC=clang; \
+        elif [ "$TARGETARCH" = "arm64" ]; then \
             make lto-build LTO_ARCH=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
         else \
             make lto-build LTO_ARCH="${BASELINE_ARCH:-avx2}" -j"$(nproc)" CXX=clang++ CC=clang; \
@@ -267,6 +305,16 @@ RUN chmod +x /usr/local/bin/coordinator-entrypoint.sh
 # snakemake rule — see the script header for why that records the wrong machine).
 COPY docker/emit-host-meta.sh /usr/local/bin/emit-host-meta
 RUN chmod +x /usr/local/bin/emit-host-meta
+
+# Which host-locked build this image is: "" for the portable image, else its
+# `baseline_arch` (e.g. `neoverse-v2`). Baked in rather than passed by the
+# workflow so the recorded value is a property of the binary that actually ran,
+# not of whatever config the coordinator believed was in force. emit-host-meta
+# copies it into every meta.json; ingest stores it as `trials.image_variant` so
+# a tuned and a portable measurement are never pooled or compared as one cell.
+# Declared this late so changing it invalidates no earlier layer.
+ARG IMAGE_VARIANT=""
+ENV BWA_MEM3_BENCH_IMAGE_VARIANT=${IMAGE_VARIANT}
 
 # Host memory-contention probe, invoked from inside the thread-scaling ladder for
 # the same reason emit-host-meta is invoked from inside the align rules: only the

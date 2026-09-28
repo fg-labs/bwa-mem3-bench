@@ -158,8 +158,9 @@ def render_speedup_markdown(
                 "- **`minibwa_speedup`** — `fg_labs_s / minibwa_s`; `>1` means "
                 "minibwa is faster than bwa-mem3 on that cell. x86 archs run "
                 "minibwa's SSE4.2 build vs bwa-mem3's AVX2/AVX-512, so they carry "
-                "an ISA-maturity gap; the NEON archs (c7g/c8g) are the clean "
-                "same-ISA comparison.",
+                "an ISA-maturity gap. c7g is the clean same-ISA comparison; "
+                "on c8g bwa-mem3 is the `neoverse-v2` core-tuned build while "
+                "minibwa is generic, so c8g rows favour bwa-mem3 by the tuning.",
                 "",
             ]
         )

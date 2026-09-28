@@ -256,6 +256,76 @@ def _meta_measured_at(meta: dict[str, Any]) -> str | None:
     return value
 
 
+def _meta_image_variant(meta: dict[str, Any]) -> str | None:
+    """`meta.json`'s `image_variant`: "" for portable, the variant, or None if unrecorded.
+
+    None covers both a record written before the field existed and the
+    `unknown` sentinel `emit-host-meta` writes for an image that predates the
+    baked-in value. Kept distinct from "" in the DB so an unrecorded cell is
+    never claimed to be portable; the reports read NULL as "" (see `trials`).
+    """
+    value = meta.get("image_variant")
+    if not isinstance(value, str) or value == _UNKNOWN_HOST:
+        return None
+    return value
+
+
+class MixedVariantCell(NamedTuple):
+    """A (sample, arch) cell whose reps were measured by different image variants."""
+
+    sample: str
+    arch: str
+    # variant ("" = portable or unrecorded) -> the reps it measured, ascending.
+    reps_by_variant: dict[str, list[int]]
+
+
+def mixed_variant_cells(*, runs_root: Path, fg_labs_sha: str) -> list[MixedVariantCell]:
+    """Cells whose reps ran on different host-locked builds of the aligner.
+
+    WHY. Snakemake skips outputs that already exist, and a worker's image is a
+    rule *resource*, not a rerun trigger. So topping a SHA up to more reps after
+    an arch's `baseline_arch` changed -- the first bless after c8g moved to the
+    `neoverse-v2` build, for a SHA already benched on c8g at one rep -- keeps the
+    old generic rep and adds tuned ones. Ingesting that cell would median two
+    different binaries into one number. There is no safe automatic choice of
+    which reps to keep, so `collect` refuses and names the cells.
+
+    An unrecorded variant counts as portable (""): every image built before the
+    field existed was portable for the sweep archs. Without that, the one real
+    mixing case -- an old generic rep beside new tuned ones -- would go unseen.
+
+    :param runs_root: local mirror of the S3 ``runs/`` prefix.
+    :param fg_labs_sha: the run's SHA.
+    :return: every mixed cell, sorted by (sample, arch).
+    """
+    sha_dir = runs_root / fg_labs_sha
+    if not sha_dir.is_dir():
+        return []
+    mixed: list[MixedVariantCell] = []
+    for sample_dir in sorted(d for d in sha_dir.iterdir() if d.is_dir()):
+        for arch_dir in sorted(d for d in sample_dir.iterdir() if d.is_dir()):
+            reps_by_variant: dict[str, list[int]] = {}
+            for rep_dir in sorted(d for d in arch_dir.iterdir() if d.is_dir()):
+                if not is_rep_dir(rep_dir.name):
+                    continue
+                if not (rep_dir / "benchmarks" / "timing.tsv").exists():
+                    continue
+                meta_path = rep_dir / "benchmarks" / "meta.json"
+                meta = _parse_json_file(meta_path) if meta_path.exists() else {}
+                variant = _meta_image_variant(meta) or ""
+                rep = int(rep_dir.name.split("-", 1)[1])
+                reps_by_variant.setdefault(variant, []).append(rep)
+            if len(reps_by_variant) > 1:
+                mixed.append(
+                    MixedVariantCell(
+                        sample=sample_dir.name,
+                        arch=arch_dir.name,
+                        reps_by_variant={v: sorted(r) for v, r in reps_by_variant.items()},
+                    )
+                )
+    return mixed
+
+
 class LateCell(NamedTuple):
     """A cell whose artifacts were written far outside the run's own window."""
 
@@ -471,6 +541,7 @@ def ingest_run(
                     ),
                     instance_id=(str(meta.get("instance_id")) if meta.get("instance_id") else None),
                     measured_at=_meta_measured_at(meta),
+                    image_variant=_meta_image_variant(meta),
                     spot_price=None,
                     status="ok",
                     process_seconds=process_seconds,

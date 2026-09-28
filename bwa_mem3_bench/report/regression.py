@@ -23,6 +23,13 @@ samples (graded by holodeck, run one rep by design, and already excluded from
 Gate #1) are dropped from the perf table entirely by `_build_perf_cells` — they
 get no perf row and no verdict at all, not a `noisy` one. Neither can fail the
 gate.
+
+A third kind is `variant_changed`: the two SHAs' cells were measured by
+different image variants (`trials.image_variant`), e.g. the first release after
+c8g moved from the portable build to the `neoverse-v2` core-tuned one. The delta
+then mixes a codegen change with a compiler-tuning change, so it is shown but
+never gated -- otherwise the tuning gain would silently absorb a real
+regression of up to its own size.
 """
 
 from __future__ import annotations
@@ -117,17 +124,34 @@ def _cv_pct(series: pd.Series) -> float:
     return float(series.std(ddof=1) / mean * 100.0)
 
 
+def _cell_variant(variants: pd.Series) -> str:
+    """One label for the image variant(s) that measured a cell's reps.
+
+    NULL (unrecorded) reads as "" -- every sweep image was portable before the
+    field existed. A cell `collect` was told to ingest despite mixed variants
+    gets every variant joined, which never equals a single-variant label and so
+    can never be gated against one.
+    """
+    return "+".join(sorted({"" if pd.isna(v) else str(v) for v in variants}))
+
+
 def _aggregate_perf(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
-        return pd.DataFrame(columns=["sample", "arch", "n", "median", "min", "max", "cv_pct"])
-    grouped = df.groupby(["sample", "arch"])["wall_seconds"]
+        return pd.DataFrame(
+            columns=["sample", "arch", "n", "median", "min", "max", "cv_pct", "variant"]
+        )
+    if "image_variant" not in df.columns:
+        df = df.assign(image_variant=None)
+    grouped = df.groupby(["sample", "arch"])
+    walls = grouped["wall_seconds"]
     return pd.DataFrame(
         {
-            "n": grouped.count(),
-            "median": grouped.median(),
-            "min": grouped.min(),
-            "max": grouped.max(),
-            "cv_pct": grouped.apply(_cv_pct),
+            "n": walls.count(),
+            "median": walls.median(),
+            "min": walls.min(),
+            "max": walls.max(),
+            "cv_pct": walls.apply(_cv_pct),
+            "variant": grouped["image_variant"].agg(_cell_variant),
         }
     ).reset_index()
 
@@ -170,8 +194,12 @@ def _build_perf_cells(
         (cells["median_new"] - cells["median_prev"]) / cells["median_prev"]
     ) * 100.0
     cells["verdict"] = [
-        _classify(d, (nmn, nmx, nn), (pmn, pmx, pn))
-        for d, nmn, nmx, pmn, pmx, nn, pn in zip(
+        # A matched cell measured by a different image variant on each side is
+        # never gated; see the module docstring. `vp` is NaN for a new-only cell.
+        "variant_changed"
+        if isinstance(vp, str) and vn != vp
+        else _classify(d, (nmn, nmx, nn), (pmn, pmx, pn))
+        for d, nmn, nmx, pmn, pmx, nn, pn, vn, vp in zip(
             cells["delta_pct"],
             cells["min_new"],
             cells["max_new"],
@@ -179,6 +207,8 @@ def _build_perf_cells(
             cells["max_prev"],
             cells["n_new"],
             cells["n_prev"],
+            cells["variant_new"],
+            cells["variant_prev"],
             strict=False,
         )
     ]
@@ -590,7 +620,7 @@ def check_regression(
     new_df = query_df(
         db_path,
         """
-        SELECT t.sample, t.arch, t.rep, t.wall_seconds,
+        SELECT t.sample, t.arch, t.rep, t.wall_seconds, t.image_variant,
                c.concordance_pct AS golden_concordance
         FROM trials t
         LEFT JOIN comparisons c
@@ -601,7 +631,7 @@ def check_regression(
     )
     prev_df = query_df(
         db_path,
-        "SELECT sample, arch, rep, wall_seconds FROM trials WHERE fg_labs_sha = ?",
+        "SELECT sample, arch, rep, wall_seconds, image_variant FROM trials WHERE fg_labs_sha = ?",
         params=(prev_sha,),
     )
 
@@ -698,7 +728,10 @@ def check_regression(
         "  overlap (otherwise `noisy`, which does not fail the gate). Cells with",
         f"  < {_MIN_REPS_FOR_PERF_GATE} reps on either side are `noisy` (no range to",
         "  test); `truth:` accuracy samples are excluded from this table and the",
-        "  gate entirely (not a perf target). Neither fails the gate.",
+        "  gate entirely (not a perf target). `variant_changed` cells were",
+        "  measured by different image builds on each side (e.g. c8g's first",
+        "  `neoverse-v2` release), so the delta is shown but not gated. None of",
+        "  these fails the gate.",
         "",
         "## Per-cell summary",
         "",

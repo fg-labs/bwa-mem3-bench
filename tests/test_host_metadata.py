@@ -330,3 +330,55 @@ def test_script_rejects_a_malformed_argument_list(args: list[str]) -> None:
     assert out.returncode == USAGE_EXIT, f"expected a usage failure, got {out.returncode}"
     assert out.stdout == "", "a usage error must not write a metadata record"
     assert "usage:" in out.stderr
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="bash script")
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        ("neoverse-v2", "neoverse-v2"),  # a host-locked variant
+        ("", ""),  # the portable image
+        (None, "unknown"),  # an image built before the variant was recorded
+        ('x", "rep": 99, "y": "', "unknown"),  # never trusted into printf JSON
+    ],
+)
+@pytest.mark.parametrize("degraded", [False, True])
+def test_the_record_carries_the_image_variant(
+    tmp_path: Path, env_value: str | None, expected: str, degraded: bool
+) -> None:
+    """Which build produced a measurement, on both the normal and fallback paths.
+
+    A tuned c8g rep and a portable one are different binaries; without this field
+    ingest pools them into one median and the perf gate compares them as one cell.
+    The degraded path matters as much as the normal one: it is what a worker with
+    no python3 writes, and it must not lose the variant along with the host.
+    """
+    env = {**os.environ, **DEAD_IMDS_ENV}
+    env.pop("BWA_MEM3_BENCH_IMAGE_VARIANT", None)
+    if env_value is not None:
+        env["BWA_MEM3_BENCH_IMAGE_VARIANT"] = env_value
+    if degraded:
+        only_date = tmp_path / "bin"
+        only_date.mkdir()
+        date_bin = shutil.which("date")
+        assert date_bin, "no `date` on PATH to build the partial environment from"
+        (only_date / "date").symlink_to(date_bin)
+        env["PATH"] = str(only_date)
+    out = subprocess.run(
+        [str(SCRIPT), "deadbeef", "wgs-5M", "c8g", str(FIXTURE_REP)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+        env=env,
+    )
+    payload = json.loads(out.stdout)
+    assert payload["image_variant"] == expected
+    assert payload["rep"] == FIXTURE_REP
+
+
+def test_the_image_bakes_its_variant_for_emit_host_meta() -> None:
+    """The variant must be a property of the image, and `build` must set it."""
+    text = DOCKERFILE.read_text()
+    assert re.search(r"^ARG IMAGE_VARIANT=\"\"$", text, re.MULTILINE)
+    assert re.search(r"^ENV BWA_MEM3_BENCH_IMAGE_VARIANT=\$\{IMAGE_VARIANT\}$", text, re.MULTILINE)

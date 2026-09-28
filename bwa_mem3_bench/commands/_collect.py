@@ -14,6 +14,7 @@ from bwa_mem3_bench.commands._run import run_cmd
 from bwa_mem3_bench.storage.ingest import (
     LATE_CELL_THRESHOLD_HOURS,
     LateCell,
+    MixedVariantCell,
     ingest_accuracy,
     ingest_arena,
     ingest_baseline,
@@ -21,6 +22,7 @@ from bwa_mem3_bench.storage.ingest import (
     ingest_run,
     ingest_scaling,
     late_cells,
+    mixed_variant_cells,
 )
 from bwa_mem3_bench.storage.sqlite import connect
 from bwa_mem3_bench.workflow_config import load_config
@@ -188,12 +190,13 @@ def _report_late_cells(
         )
 
 
-def collect(
+def collect(  # noqa: PLR0913 — one CLI flag per argument
     *,
     fg_labs_sha: str,
     bucket: str = _DEFAULT_BUCKET,
     ingest: bool = True,
     ingest_late_cells: bool = False,
+    ingest_mixed_variants: bool = False,
     dry_run: bool = False,
 ) -> None:
     """Pull S3 artifacts (benchmarks, compare, meta) for a completed run.
@@ -218,7 +221,14 @@ def collect(
     :param ingest_late_cells: also ingest cells measured outside the run's
         window. Use when a run legitimately spans days (e.g. resumed after a
         failure), NOT to silence the warning on a control run.
+    :param ingest_mixed_variants: ingest even when a (sample, arch) cell's reps
+        were measured by different image variants (e.g. a generic c8g rep beside
+        `neoverse-v2` ones), which would median two binaries into one number.
+        Without it, `collect` refuses and names the cells; the usual fix is to
+        re-run them with ``submit --forcerun`` so every rep uses one build.
     :param dry_run: print commands only.
+    :raises ValueError: if a cell mixes image variants and
+        ``ingest_mixed_variants`` is not set.
     """
     runs_root = LOCAL_MIRROR_ROOT / "runs"
     baseline_root = LOCAL_MIRROR_ROOT / "baseline"
@@ -272,7 +282,28 @@ def collect(
             scaling_root=scaling_root,
             arena_root=arena_root,
             ingest_late_cells=ingest_late_cells,
+            ingest_mixed_variants=ingest_mixed_variants,
         )
+
+
+def _mixed_variant_problem(cells: list[MixedVariantCell]) -> str:
+    """The refusal message for cells whose reps ran different image variants."""
+    lines = [
+        f"{len(cells)} cell(s) mix image variants across reps; ingesting them would "
+        "median different binaries into one number:",
+    ]
+    for cell in cells:
+        parts = ", ".join(
+            f"{variant or 'portable'}: reps {reps}"
+            for variant, reps in sorted(cell.reps_by_variant.items())
+        )
+        lines.append(f"  {cell.sample} / {cell.arch} -- {parts}")
+    lines.append(
+        "Re-run those cells so every rep uses one build (e.g. `submit --forcerun "
+        "align_fg_labs` scoped with --samples/--archs), or pass "
+        "--ingest-mixed-variants to ingest them anyway."
+    )
+    return "\n".join(lines)
 
 
 def _reconcile_mirror(
@@ -323,8 +354,16 @@ def _ingest_all(  # noqa: PLR0913 — one argument per synced prefix, all requir
     scaling_root: Path,
     arena_root: Path,
     ingest_late_cells: bool,
+    ingest_mixed_variants: bool = False,
 ) -> None:
     """Populate every table from the freshly-synced mirror."""
+    # Checked before anything is written, like the late-cell report below: a
+    # refusal must leave the DB exactly as it was.
+    mixed = mixed_variant_cells(runs_root=runs_root, fg_labs_sha=fg_labs_sha)
+    if mixed and not ingest_mixed_variants:
+        raise ValueError(_mixed_variant_problem(mixed))
+    if mixed:
+        print(f"warning: {_mixed_variant_problem(mixed)}", file=sys.stderr)
     # Resolved from the tree before anything is written to the DB, so the operator
     # sees the warning even if ingest later fails.
     late = late_cells(runs_root=runs_root, fg_labs_sha=fg_labs_sha)

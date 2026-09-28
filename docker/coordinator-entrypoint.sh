@@ -19,6 +19,10 @@
 #                    `fg_labs_sha` when set, e.g. to pull a manually-tagged
 #                    debug image while the run still writes outputs under
 #                    its own `fg_labs_sha` S3 namespace.
+#   PORTABLE_IMAGES — "true" makes every arch pull the portable `<sha>` image,
+#                    ignoring `baseline_arch` (snakemake `portable_images`).
+#                    Needed for an fg-labs SHA older than v0.10.0, which cannot
+#                    build the `-neoverse-v2` variant c8g/c8g64 otherwise pull.
 #   BUILD_VARIANT  — non-default fg-labs/bwa-mem3 Makefile target (e.g.
 #                    `lto-build`). When set, both the image tag and the
 #                    snakemake `fg_labs_sha` config are suffixed
@@ -60,6 +64,7 @@ CONFIG_ARGS=("fg_labs_sha=${FG_LABS_SHA}")
 # computable, so Gate #3 no-ops for that run by design.
 [[ -n "${LADDER:-}" ]]     && CONFIG_ARGS+=("ladder=${LADDER}")
 [[ -n "${IMAGE_TAG:-}" ]]  && CONFIG_ARGS+=("image_tag=${IMAGE_TAG}")
+[[ -n "${PORTABLE_IMAGES:-}" ]] && CONFIG_ARGS+=("portable_images=${PORTABLE_IMAGES}")
 # Thread the bucket through snakemake config so worker jobs resolve it too.
 # Workers re-parse the Snakefile but their job definitions don't carry this
 # env, so without this the golden listing (golden_backed_samples) falls back to

@@ -18,7 +18,15 @@
 # deleted: the manifest list references those images, and the benchmark repo's
 # lifecycle rule 1 expires UNTAGGED images after 7 days, so untagging them would
 # break every image a week after it was built. The retention count in
-# cdk/stacks/storage_stack.py accounts for the 3 tags per SHA.
+# cdk/stacks/storage_stack.py accounts for the 3 tags per SHA, plus one per
+# core-tuned variant.
+#
+# CORE-TUNED VARIANTS. A per-sha build also runs `build-tuned`, which publishes
+# each host-locked variant `config/archs.yaml` routes an arch to -- today
+# `<sha>-neoverse-v2`, the Graviton4 image c8g / c8g64 pull. It is a single-
+# platform image under its final tag, so it needs no join, and it is kept out of
+# `join`'s `needs` so a failing variant (e.g. an fg-labs SHA older than the
+# Makefile's ARM_CPU knob) cannot block the portable manifest list.
 #
 # RECOVERING A HALF-FAILED RUN. Prefer "Re-run failed jobs" over "Re-run all
 # jobs", but the two targets fail differently and neither is harmless:
@@ -241,6 +249,62 @@ jobs:
               --make-target "${make_target}" \
               --push
           fi
+
+  build-tuned:
+    needs: prepare
+    if: inputs.target == 'per-sha'
+    environment: image-build
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # Must equal the set of non-empty `baseline_arch` values in
+        # config/archs.yaml, each on a native runner for its platform --
+        # tests/test_image_build_workflow.py enforces both.
+        include:
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            tuning: neoverse-v2
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: prefix-dev/setup-pixi@14c8aabd75893f83f4ab30c03e7cf853c8208961 # v0.8.10
+        with:
+          pixi-version: v0.71.0
+          environments: default
+          cache: true
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_IMAGE_BUILD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2.1.6
+      # No --arch-tag: the variant is single-platform by construction, so it is
+      # pushed straight to its final `<sha>-<tuning>` tag. `build()` refuses a
+      # tuning on any platform but the one it targets, and never moves :latest.
+      - name: build and push ${{ matrix.tuning }}
+        env:
+          FG_LABS_SHA: ${{ inputs.fg_labs_sha }}
+          MAKE_TARGET: ${{ inputs.make_target }}
+          PLATFORM: ${{ matrix.platform }}
+          TUNING: ${{ matrix.tuning }}
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          make_target="${MAKE_TARGET}"
+          if [ "${make_target}" = "default" ]; then make_target=""; fi
+          pixi run python -m bwa_mem3_bench.cli build \
+            --fg-labs-sha "${FG_LABS_SHA}" \
+            --image-name "${REGISTRY}/bwa-mem3-bench" \
+            --platforms "${PLATFORM}" \
+            --baseline-arch "${TUNING}" \
+            --make-target "${make_target}" \
+            --push
 
   join:
     needs: [prepare, build]

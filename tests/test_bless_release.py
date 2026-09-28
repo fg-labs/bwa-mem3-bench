@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import dataclasses
+import re
+
 import pytest
 
+from bwa_mem3_bench import REPO_ROOT
 from bwa_mem3_bench.commands import _bless_release
 from bwa_mem3_bench.commands._bless_release import bless_release
 from bwa_mem3_bench.release_allowances import DEFAULT_ALLOWANCES_PATH, load_allowances
+from bwa_mem3_bench.workflow_config import load_config
 
 # A synthetic full-length SHA that is absent from the allowance ledger (no ledger
 # to_sha starts with `f`), so it stands in for an unblessed candidate without
@@ -151,3 +156,36 @@ def test_missing_aws_cli_is_a_clean_fail(
     out = capsys.readouterr().out
     assert "could not list S3" in out
     assert "Preflight found failing checks" in out
+
+
+def _plan_variants() -> set[str]:
+    """The `--baseline-arch <v>` values the release plan asks to build."""
+    plan = "\n".join(_bless_release._plan("a" * 40, "b" * 40))
+    return set(re.findall(r"--baseline-arch (\S+) --push", plan))
+
+
+def test_plan_builds_exactly_the_variants_workers_pull() -> None:
+    """One build per host-locked variant `config/archs.yaml` routes an arch to.
+
+    The expectation is computed here, from the config directly, so a bug in the
+    plan's own helper cannot make the check agree with itself.
+    """
+    archs = load_config(REPO_ROOT / "config").archs.values()
+    assert _plan_variants() == {a.baseline_arch for a in archs if a.baseline_arch}
+
+
+def test_plan_follows_routing_not_the_tuning_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A routed x86 tier is built; a defined-but-unrouted arm tuning is not.
+
+    Reading `ARM_CPU_TUNINGS` instead of the routing would get both wrong: a bless
+    after re-enabling `avx512bw` on c7a would die at image pull on c7a, and every
+    bless would build a tuning nothing pulls.
+    """
+    real = load_config(REPO_ROOT / "config")
+    rerouted = {
+        name: dataclasses.replace(arch, baseline_arch="avx512bw" if name == "c7a" else "")
+        for name, arch in real.archs.items()
+    }
+    fake = dataclasses.replace(real, archs=rerouted)
+    monkeypatch.setattr(_bless_release, "load_config", lambda _path: fake)
+    assert _plan_variants() == {"avx512bw"}

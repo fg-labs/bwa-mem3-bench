@@ -93,12 +93,14 @@ def test_regression_fails_on_perf_regression_over_5_percent(tmp_path: Path) -> N
     assert "REGRESSION" in report
 
 
-def _seed_multi(
+def _seed_multi(  # noqa: PLR0913 — a fixture builder; each axis is exercised
     db: Path,
     *,
     new_walls: list[float],
     prev_walls: list[float],
     golden_pct: float = 99.9999,
+    new_variant: str | None = None,
+    prev_variant: str | None = None,
 ) -> None:
     """Seed multi-rep wall_seconds for one (sample, arch) cell on each SHA."""
     conn = connect(db)
@@ -121,6 +123,7 @@ def _seed_multi(
             instance_type=None,
             availability_zone=None,
             spot_price=None,
+            image_variant=prev_variant,
             status="ok",
         )
     for rep, wall in enumerate(new_walls, start=1):
@@ -140,6 +143,7 @@ def _seed_multi(
             instance_type=None,
             availability_zone=None,
             spot_price=None,
+            image_variant=new_variant,
             status="ok",
         )
         upsert_comparison(
@@ -644,3 +648,46 @@ def test_gate1_does_not_false_fail_truth_samples(sample: str, tmp_path: Path) ->
     ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old")
     assert ok is True, report
     assert "PASS" in report
+
+
+def test_a_changed_image_variant_is_shown_but_never_gated(tmp_path: Path) -> None:
+    """The first tuned release must not be gated against the last generic one.
+
+    A clean, non-overlapping 7% slowdown would FAIL between two builds of the same
+    kind. Across a variant change the delta mixes codegen with compiler tuning, so
+    it is reported as `variant_changed` and the gate passes -- otherwise the
+    tuning gain would silently absorb a real regression up to its own size.
+    """
+    db = tmp_path / "b.db"
+    _seed_multi(
+        db,
+        new_walls=[107, 108, 109],
+        prev_walls=[100, 100.5, 101],
+        new_variant="neoverse-v2",
+        prev_variant=None,
+    )
+    ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old")
+    assert ok is True, report
+    assert "variant_changed" in report
+    assert "REGRESSION" not in report.split("## Per-cell summary", 1)[1]
+
+
+@pytest.mark.parametrize(
+    ("new_variant", "prev_variant"),
+    [("neoverse-v2", "neoverse-v2"), ("", None), (None, "")],
+)
+def test_the_same_variant_on_both_sides_is_still_gated(
+    tmp_path: Path, new_variant: str | None, prev_variant: str | None
+) -> None:
+    """Only a real variant change is excused; unrecorded (NULL) means portable ("")."""
+    db = tmp_path / "b.db"
+    _seed_multi(
+        db,
+        new_walls=[107, 108, 109],
+        prev_walls=[100, 100.5, 101],
+        new_variant=new_variant,
+        prev_variant=prev_variant,
+    )
+    ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old")
+    assert ok is False
+    assert "REGRESSION" in report

@@ -472,6 +472,27 @@ def _previous_release(allowances: list[ReleaseAllowance], sha: str) -> ReleaseAl
     return None
 
 
+def _image_variants(db_path: Path, sha: str) -> dict[str, str]:
+    """The image variant(s) that measured each arch's trials: "" portable, else the variant.
+
+    Frozen into the snapshot because a release page outlives the config: from the
+    first `neoverse-v2` release on, c8g wall times include a compiler-tuning gain
+    that a page from an earlier release does not, and nothing else on the page
+    says so. NULL (unrecorded) reads as "" -- every sweep image was portable
+    before the field existed. An arch whose trials mixed variants gets them all,
+    joined with ``+``.
+    """
+    df = query_df(
+        db_path,
+        "SELECT DISTINCT arch, image_variant FROM trials WHERE fg_labs_sha = ?",
+        params=(sha,),
+    )
+    variants: dict[str, set[str]] = {}
+    for arch, variant in zip(df["arch"], df["image_variant"], strict=True):
+        variants.setdefault(str(arch), set()).add(variant if isinstance(variant, str) else "")
+    return {arch: "+".join(sorted(v)) for arch, v in sorted(variants.items())}
+
+
 def build_snapshot(  # noqa: PLR0913
     *,
     db_path: Path,
@@ -531,6 +552,7 @@ def build_snapshot(  # noqa: PLR0913
         "batch_bases": config.batch_bases,
         "sweep_sa_stride": sweep_sa_stride,
         "arena_sa_stride": arena_sa_stride,
+        "image_variants": _image_variants(db_path, fg_labs_sha),
         "comparators": {
             "bwa": config.bwa_version,
             "bwa-mem2": config.upstream_tag,

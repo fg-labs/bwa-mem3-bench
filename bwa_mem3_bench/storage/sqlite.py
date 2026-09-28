@@ -47,6 +47,8 @@ EXPECTED_SCHEMA_VERSION = SCHEMA_VERSION
 #              executescript, no ALTER needed.
 #   v11 → v12: added comparisons.placement_json (compare-bams confident-
 #              placement axis).
+#   v12 → v13: added trials.image_variant — c8g/c8g64 moved to a core-tuned
+#              image, and nothing recorded which binary measured a cell.
 # Only versions whose step needs an ALTER get a constant; v4 does not (its step
 # added a whole table).
 _SCHEMA_V1 = 1
@@ -58,6 +60,7 @@ _SCHEMA_V8 = 8
 _SCHEMA_V9 = 9
 _SCHEMA_V10 = 10
 _SCHEMA_V11 = 11
+_SCHEMA_V12 = 12
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -72,6 +75,11 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
     ).fetchone()
     return row is not None
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """Whether `table` already has `column` -- the column analogue of `_table_exists`."""
+    return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({table})"))
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -193,6 +201,11 @@ def _forward_migrate(conn: sqlite3.Connection, existing_version: int) -> None:
     # v11 -> v12. `comparisons` exists in every schema, so no lower bound.
     if existing_version <= _SCHEMA_V11:
         conn.execute("ALTER TABLE comparisons ADD COLUMN placement_json TEXT")
+    # v12 -> v13. `trials` exists in every schema, so no lower bound. Guarded on
+    # the column too, for the reason `_table_exists` gives: a DB stamped with an
+    # older version need not actually lack every column that version implies.
+    if existing_version <= _SCHEMA_V12 and not _column_exists(conn, "trials", "image_variant"):
+        conn.execute("ALTER TABLE trials ADD COLUMN image_variant TEXT")
 
 
 def upsert_run(  # noqa: PLR0913
@@ -238,6 +251,7 @@ def upsert_trial(  # noqa: PLR0913
     spot_price: float | None,
     instance_id: str | None = None,
     measured_at: str | None = None,
+    image_variant: str | None = None,
     status: str,
     process_seconds: float | None = None,
     index_read_seconds: float | None = None,
@@ -248,16 +262,17 @@ def upsert_trial(  # noqa: PLR0913
         """
         INSERT INTO trials (
             fg_labs_sha, sample, arch, rep, instance_type, availability_zone,
-            instance_id, measured_at, spot_price, wall_seconds, max_rss_mb, cpu_time,
-            io_read_mb, io_write_mb, mean_load, reads_processed, status,
-            process_seconds, index_read_seconds
+            instance_id, measured_at, image_variant, spot_price, wall_seconds,
+            max_rss_mb, cpu_time, io_read_mb, io_write_mb, mean_load, reads_processed,
+            status, process_seconds, index_read_seconds
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(fg_labs_sha, sample, arch, rep) DO UPDATE SET
             instance_type = excluded.instance_type,
             availability_zone = excluded.availability_zone,
             instance_id = excluded.instance_id,
             measured_at = excluded.measured_at,
+            image_variant = excluded.image_variant,
             spot_price = excluded.spot_price,
             wall_seconds = excluded.wall_seconds,
             max_rss_mb = excluded.max_rss_mb,
@@ -280,6 +295,7 @@ def upsert_trial(  # noqa: PLR0913
             availability_zone,
             instance_id,
             measured_at,
+            image_variant,
             spot_price,
             wall_seconds,
             max_rss_mb,

@@ -284,9 +284,11 @@ def test_build_base_matches_build_on_the_platform_and_builder_guards() -> None:
     # rather than at anything meaningful.
     body = inspect.getsource(build_module.build_base)
 
-    assert "platforms or (" in body, (
-        "build_base must short-circuit platform resolution so an explicit "
-        "--platforms still works on a host whose arch cannot be mapped"
+    # Both resolve through the shared helper, which holds the short-circuit.
+    assert "_resolve_platforms(" in body, "build_base must share build's platform resolution"
+    assert "platforms or (" in inspect.getsource(build_module._resolve_platforms), (
+        "platform resolution must short-circuit so an explicit --platforms still "
+        "works on a host whose arch cannot be mapped"
     )
     assert "default_platforms = " not in body, (
         "build_base still resolves the default eagerly, which raises before an "

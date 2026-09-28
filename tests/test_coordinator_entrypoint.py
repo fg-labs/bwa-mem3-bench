@@ -285,3 +285,14 @@ def test_config_args_are_not_glob_expanded(stubbed_path: str, tmp_path: Path) ->
     )
     assert "samples=samples_*" in line
     assert "samples_decoy.txt" not in line
+
+
+def test_portable_images_passes_through_to_config(stubbed_path: str) -> None:
+    """`submit --portable-images` is inert unless it becomes snakemake config."""
+    line = _run_entrypoint({"FG_LABS_SHA": "deadbeef", "PORTABLE_IMAGES": "true"}, stubbed_path)
+    assert "portable_images=true" in line
+
+
+def test_portable_images_absent_when_env_unset(stubbed_path: str) -> None:
+    line = _run_entrypoint({"FG_LABS_SHA": "deadbeef"}, stubbed_path)
+    assert "portable_images=" not in line
