@@ -174,8 +174,7 @@ def _routed_variants() -> list[str]:
     request -- including an x86 ``BASELINE_ARCH`` tier, should one be re-enabled.
     The CI ``build-tuned`` matrix is pinned to the same set by a test.
     """
-    archs = load_config(REPO_ROOT / "config").archs.values()
-    return sorted({arch.baseline_arch for arch in archs if arch.baseline_arch})
+    return [variant for variant, _ in load_config(REPO_ROOT / "config").image_variants()]
 
 
 def _plan(fg_labs_sha: str, golden_ref_sha: str) -> list[str]:

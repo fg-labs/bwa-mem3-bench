@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 # Increment this whenever the schema changes in a backward-incompatible way.
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # The table definitions only. `user_version` is deliberately NOT set here:
 # `storage.sqlite.connect` stamps it from SCHEMA_VERSION in the same transaction
@@ -42,6 +42,15 @@ CREATE TABLE IF NOT EXISTS trials (
     -- cells, benched three days after the release. NULL for trials predating the
     -- stamp -- `late_cells` falls back to artifact mtime for those.
     measured_at         TEXT,
+    -- Which host-locked build produced this cell, from meta.json: "" for the
+    -- portable image, else its `baseline_arch` (e.g. `neoverse-v2` on c8g).
+    -- Baked into the image, so it describes the binary that actually ran. A
+    -- tuned and a portable measurement are different binaries and must never be
+    -- pooled into one median or compared across SHAs as one cell. NULL for
+    -- trials measured before the field existed -- every sweep image was
+    -- portable then (all `baseline_arch` values were parked), so reports read
+    -- NULL as "".
+    image_variant       TEXT,
     spot_price          REAL,
     wall_seconds        REAL,
     max_rss_mb          REAL,

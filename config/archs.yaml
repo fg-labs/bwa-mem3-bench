@@ -2,7 +2,9 @@
 # to compile the non-kernel TUs of the single binary on x86 (added by fg-labs
 # PR #84). The plumbing is wired end-to-end (`Arch.image_uri` →
 # `resources.container_image` → snakemake-executor-plugin-aws-batch fork),
-# but every arch is currently set to `""` (use the portable `:<sha>` tag).
+# but every x86 arch is currently set to `""` (use the portable `:<sha>` tag).
+# arm64 is different -- c8g / c8g64 are routed to a core-tuned variant; see the
+# arm64 paragraph below.
 #
 # Why parked: empirical data on this workload (3-rep medians on c7a / c7i /
 # m7i, hg38 + 5M-pair samples, fg-labs/bwa-mem3 `316dba62`) shows
@@ -22,7 +24,9 @@
 # fg-labs Makefile's `ARM_CPU=neoverse-v2 ARM_CACHE_LINE=64` and publishes
 # `<sha>-neoverse-v2`, a linux/arm64-only image. It targets Graviton4 and emits
 # SVE2, which Graviton3 (c7g, Neoverse-V1) lacks, so c7g stays on the portable
-# tag. Needs fg-labs/bwa-mem3 v0.10.0+ (the image build refuses older SHAs).
+# tag. Needs fg-labs/bwa-mem3 v0.10.0+ (the image build refuses older SHAs);
+# bench an older SHA with `submit --portable-images`, which makes every arch
+# pull the portable `<sha>` tag for that run.
 #
 # m8g is Graviton4 too but deliberately stays portable: it is an arena leg, and
 # the arena's historical release arms are compiled generically in the base

@@ -406,3 +406,55 @@ def test_collect_ingests_late_cells_when_asked(
     err = capsys.readouterr().err
     assert "SKIPPING 0, INGESTING 1" in err
     assert "--ingest-late-cells was passed" in err, "the reason must be named"
+
+
+def _mark_variants(runs_root: Path, sha: str, variants: dict[int, str]) -> None:
+    """Stamp `image_variant` into the meta.json of the given reps of `_build_run`'s cell."""
+    for rep, variant in variants.items():
+        meta_path = runs_root / sha / "wgs-5M" / "m7i" / f"rep-{rep}" / "benchmarks" / "meta.json"
+        meta = json.loads(meta_path.read_text())
+        meta["image_variant"] = variant
+        meta_path.write_text(json.dumps(meta))
+
+
+def _stub_collect_io(monkeypatch: pytest.MonkeyPatch, mirror: Path, db: Path) -> None:
+    monkeypatch.setattr(collect_mod, "LOCAL_MIRROR_ROOT", mirror)
+    monkeypatch.setattr(collect_mod, "DB_PATH", db)
+    monkeypatch.setattr(collect_mod, "_sync_prefix", lambda *a, **k: None)
+    monkeypatch.setattr(collect_mod, "_baseline_tool_versions", list)
+    monkeypatch.setattr(collect_mod, "_s3_keys", lambda bucket, prefix: set())
+
+
+def test_collect_refuses_a_cell_that_mixes_image_variants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two binaries must not be medianed into one number, and the DB stays untouched.
+
+    rep 1 has no recorded variant (a pre-tuning image, i.e. generic); reps 2-3 are
+    `neoverse-v2` -- what topping a c8g cell up after the switch produces.
+    """
+    mirror = tmp_path / "mirror"
+    _build_run(mirror / "runs", SHA, (0.0, 0.1, 0.2))
+    _mark_variants(mirror / "runs", SHA, {2: "neoverse-v2", 3: "neoverse-v2"})
+    _stub_collect_io(monkeypatch, mirror, tmp_path / "db.sqlite")
+
+    with pytest.raises(ValueError, match=r"wgs-5M / m7i -- portable: reps \[1\], neoverse-v2"):
+        collect_mod.collect(fg_labs_sha=SHA, bucket="b")
+    conn = connect(tmp_path / "db.sqlite")
+    assert conn.execute("select count(*) from trials").fetchone() == (0,)
+
+
+def test_collect_ingests_mixed_variants_only_when_told_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The override ingests every rep and still names the mix."""
+    mirror = tmp_path / "mirror"
+    _build_run(mirror / "runs", SHA, (0.0, 0.1, 0.2))
+    _mark_variants(mirror / "runs", SHA, {2: "neoverse-v2", 3: "neoverse-v2"})
+    _stub_collect_io(monkeypatch, mirror, tmp_path / "db.sqlite")
+
+    collect_mod.collect(fg_labs_sha=SHA, bucket="b", ingest_mixed_variants=True)
+    conn = connect(tmp_path / "db.sqlite")
+    rows = conn.execute("select rep, image_variant from trials order by rep").fetchall()
+    assert rows == [(1, None), (2, "neoverse-v2"), (3, "neoverse-v2")]
+    assert "mix image variants" in capsys.readouterr().err

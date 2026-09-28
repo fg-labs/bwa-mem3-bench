@@ -352,6 +352,25 @@ ARM_CPU_TUNINGS: dict[str, int] = {"neoverse-v2": 64}
 #: The only platform an `ARM_CPU_TUNINGS` variant can be built for or run on.
 ARM_PLATFORM = "linux/arm64"
 
+#: The only platform an x86 `BASELINE_ARCH` tier variant can be built for or run on.
+X86_PLATFORM = "linux/amd64"
+
+
+def variant_platform(baseline_arch: str) -> str | None:
+    """The single platform a host-locked image variant is built for, or None if portable.
+
+    The one place the two meanings of `baseline_arch` are told apart: a key of
+    `ARM_CPU_TUNINGS` is an arm64 `-mcpu` tuning, any other non-empty value an x86
+    `BASELINE_ARCH` tier, and "" the portable multi-arch image. `Arch` validation,
+    the image build's platform choice, and the CI matrix all route through here.
+
+    :param baseline_arch: an arch's `baseline_arch` value.
+    :return: `ARM_PLATFORM`, `X86_PLATFORM`, or None for the portable image.
+    """
+    if not baseline_arch:
+        return None
+    return ARM_PLATFORM if baseline_arch in ARM_CPU_TUNINGS else X86_PLATFORM
+
 
 @dataclass(frozen=True)
 class Arch:
@@ -374,18 +393,15 @@ class Arch:
 
         :raises ValueError: if `baseline_arch` does not match `platform`.
         """
-        if not self.baseline_arch:
-            return
-        is_arm_tuning = self.baseline_arch in ARM_CPU_TUNINGS
-        is_arm_platform = self.platform == ARM_PLATFORM
-        if is_arm_tuning != is_arm_platform:
+        built_for = variant_platform(self.baseline_arch)
+        if built_for is not None and built_for != self.platform:
             raise ValueError(
                 f"arch {self.name!r}: baseline_arch {self.baseline_arch!r} does not "
                 f"match platform {self.platform!r}. arm64 archs take one of "
                 f"{sorted(ARM_CPU_TUNINGS)}; x86 archs take a BASELINE_ARCH tier."
             )
 
-    def image_uri(self, *, ecr_repo_uri: str, fg_labs_sha: str) -> str:
+    def image_uri(self, *, ecr_repo_uri: str, fg_labs_sha: str, portable: bool = False) -> str:
         """Fully-qualified ECR image URI for this arch's worker jobs.
 
         Derived from `baseline_arch`:
@@ -398,8 +414,14 @@ class Arch:
         calls into this method, and our snakemake-executor-plugin-aws-batch
         fork uses the resource as the SubmitJob job-def's
         ``containerProperties.image``.
+
+        ``portable=True`` ignores `baseline_arch` and returns the portable tag: the
+        run-level escape hatch (``--config portable_images=true``) for a SHA that
+        cannot build the variant, e.g. an fg-labs SHA older than v0.10.0, whose
+        Makefile lacks the ``ARM_CPU`` knob the ``neoverse-v2`` variant needs.
         """
-        tag = fg_labs_sha + (f"-{self.baseline_arch}" if self.baseline_arch else "")
+        variant = "" if portable else self.baseline_arch
+        tag = fg_labs_sha + (f"-{variant}" if variant else "")
         return f"{ecr_repo_uri}:{tag}"
 
 
@@ -585,6 +607,21 @@ class WorkflowConfig:
     # SHA (bisect / historical re-run) or its align job reads an index it cannot
     # parse. Defaults to stock (off) when absent; the shipped config sets `2`.
     sweep_dense_sa_shift: int = STOCK_SA_SHIFT
+
+    def image_variants(self) -> list[tuple[str, str]]:
+        """Every host-locked image variant some arch pulls, as ``(variant, platform)``.
+
+        The set a per-SHA build must publish beyond the portable image, or the
+        arches routed to a missing variant fail at image pull. The release plan
+        and the CI ``build-tuned`` matrix are both held to it. Sorted.
+        """
+        return sorted(
+            {
+                (arch.baseline_arch, platform)
+                for arch in self.archs.values()
+                if (platform := variant_platform(arch.baseline_arch)) is not None
+            }
+        )
 
     def _resolve_tags(self, sample_name: str, kind: str, key: str) -> set[str]:
         """Union of a kind's default tag list and the sample's addition to it.

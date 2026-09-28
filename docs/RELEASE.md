@@ -79,14 +79,16 @@ arena bump.
    content-addressed, so this publishes a new tag and leaves old ones
    rebuildable. Skip when the ladder is unchanged.
 2. **Build + push the per-SHA image:**
-   `cli build --fg-labs-sha <sha> --image-name <ecr> --push`, **plus** the
-   Graviton4 core-tuned variant that c8g / c8g64 pull:
-   `cli build --fg-labs-sha <sha> --image-name <ecr> --baseline-arch neoverse-v2 --push`
-   (publishes `<sha>-neoverse-v2`, linux/arm64 only). The `build-image` CI
-   workflow's `per-sha` target does both.
-3. **Verify the push settled.** `aws ecr describe-images ... imageTag=<sha>` (and
-   `imageTag=<sha>-neoverse-v2`) and match the digest `buildx` printed. Never submit before this — workers pull by
-   tag and a mid-propagation submit runs the previous image.
+   `cli build --fg-labs-sha <sha> --image-name <ecr> --push`, **plus** one push
+   per host-locked variant `config/archs.yaml` routes an arch to:
+   `cli build --fg-labs-sha <sha> --image-name <ecr> --baseline-arch <variant> --push`.
+   Today that is `neoverse-v2` (publishes `<sha>-neoverse-v2`, linux/arm64 only,
+   pulled by c8g / c8g64); `cli bless-release` lists the current set. The
+   `build-image` CI workflow's `per-sha` target does all of them.
+3. **Verify the push settled.** For each tag pushed in step 2, run
+   `aws ecr describe-images ... imageTag=<tag>` and match its digest against
+   the one `buildx` printed for that push. Never submit before this — workers
+   pull by tag and a mid-propagation submit runs the previous image.
 4. **Submit the release matrix:**
    `cli submit --fg-labs-sha <sha> --target bless_release --golden-ref-sha <prev>`.
    `<prev>` is the *previous* release — already in the ledger, and the arena's

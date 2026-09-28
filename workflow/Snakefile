@@ -24,6 +24,7 @@ from bwa_mem3_bench.workflow_config import (
     compat_sample_suffix,
     load_config,
     parse_ladder_override,
+    ARM_PLATFORM,
     resolve_worker_image_sha,
 )
 
@@ -46,17 +47,24 @@ BASELINE_ONLY = str(config.get("baseline_only", "false")).lower() == "true"
 # and `resolve_worker_image_sha`. None (not a fabricated default) when unset,
 # so the fallback to FG_LABS_SHA is unambiguous.
 IMAGE_TAG = config.get("image_tag")
+# `--config portable_images=true`: every arch pulls the portable `<sha>` image,
+# ignoring `baseline_arch`. The escape hatch for a SHA whose host-locked variant
+# cannot be built -- an fg-labs SHA older than v0.10.0 has no `ARM_CPU` Makefile
+# knob, so `<sha>-neoverse-v2` never exists and c8g/c8g64 would fail at pull.
+PORTABLE_IMAGES = str(config.get("portable_images", "false")).lower() == "true"
 
 # ---------------------------------------------------------------------------
 # Per-rule image selection.
 #
-# Each Batch worker pulls a different ECR image based on its arch:
-#   - portable (c7g, c8g): the bare `<sha>` tag — multi-arch manifest list
-#     (linux/amd64 + linux/arm64), `BASELINE_ARCH=avx2` x86 build.
-#   - avx2 (c6a):     `<sha>-avx2` (explicit, same content as portable today).
-#   - avx512bw-locked (c7a, c7i, m7i): `<sha>-avx512bw` — linux/amd64 only,
-#     non-kernel TUs compiled at AVX-512BW for ~10-15% better hot-path perf
-#     on AVX-512 hosts (fg-labs/bwa-mem3 PR #84). Crashes on AVX2-only hosts.
+# Each Batch worker pulls the image its arch's `baseline_arch` names:
+#   - portable (every x86 arch, c7g, m8g): the bare `<sha>` tag — multi-arch
+#     manifest list (linux/amd64 + linux/arm64), `BASELINE_ARCH=avx2` x86 build.
+#   - neoverse-v2 (c8g, c8g64): `<sha>-neoverse-v2` — linux/arm64 only, built
+#     with `ARM_CPU=neoverse-v2 ARM_CACHE_LINE=64`. Emits SVE2, so it would
+#     SIGILL on Graviton3 (c7g). Needs fg-labs v0.10.0+; see PORTABLE_IMAGES.
+#   - an x86 tier (e.g. `avx512bw`, parked today): `<sha>-<tier>` —
+#     linux/amd64 only, non-kernel TUs compiled at that tier (fg-labs/bwa-mem3
+#     PR #84). Crashes on hosts below the tier.
 #
 # The mapping is driven by `arch.baseline_arch` in `config/archs.yaml`. Each
 # rule's `resources.container_image` lambda calls `image_for_arch` below;
@@ -98,11 +106,13 @@ def image_for_arch(arch_name: str) -> str:
     """Fully-qualified ECR image URI for a worker on `arch_name`.
 
     Honors an explicit `--config image_tag=<sha>` override (IMAGE_TAG) in
-    place of FG_LABS_SHA -- see `resolve_worker_image_sha`.
+    place of FG_LABS_SHA -- see `resolve_worker_image_sha` -- and
+    `--config portable_images=true` (PORTABLE_IMAGES).
     """
     return CONFIG.archs[arch_name].image_uri(
         ecr_repo_uri=_ECR_REPO_URI,
         fg_labs_sha=resolve_worker_image_sha(FG_LABS_SHA, IMAGE_TAG),
+        portable=PORTABLE_IMAGES,
     )
 
 
@@ -123,7 +133,7 @@ def _has_upstream_baseline(arch: str) -> bool:
 
 
 BASELINE_ARCHS = [a for a in ARCHS if _has_upstream_baseline(a)]
-ARM_ARCHS = [a for a in ARCHS if CONFIG.archs[a].platform == "linux/arm64"]
+ARM_ARCHS = [a for a in ARCHS if CONFIG.archs[a].platform == ARM_PLATFORM]
 # Archs the minibwa probe runs on (private/minibwa-bench branch only). Drops
 # m7i, which exists in full_archs only for meth-FMI memory headroom — minibwa
 # has no meth path. Every other arch in the user's selection is kept so
@@ -1026,8 +1036,11 @@ rule minibwa:
     ingests the timing TSVs into benchmark.db as the `minibwa` tool dimension.
 
     The x86 archs run minibwa's SSE4.2 build while bwa-mem3 runs AVX2/AVX-512,
-    so x86 rows include an ISA-maturity gap (minibwa AVX is upstream WIP); the
-    NEON archs (c7g/c8g) are the clean same-ISA algorithmic comparison.
+    so x86 rows include an ISA-maturity gap (minibwa AVX is upstream WIP). c7g
+    is the clean same-ISA algorithmic comparison. c8g is NOT: bwa-mem3 there
+    is the `neoverse-v2` core-tuned build while minibwa stays generic (its
+    timings are cached by minibwa SHA, not by image), so c8g rows fold a
+    compiler-tuning advantage into bwa-mem3's side of the ratio.
 
     Usage:
         snakemake -s workflow/Snakefile --profile workflow/profiles/aws-batch \\

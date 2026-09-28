@@ -141,7 +141,9 @@ REF_ROOT=~/refs/hg38-meth-u2 \
 
 To disable, set `sweep_dense_sa_shift: 3`. Set it to `3` too when benchmarking a
 **pre-#510 (≤ v0.12.0) SHA** (bisect / historical re-run) — that binary cannot
-read a densified on-disk SA.
+read a densified on-disk SA. For a SHA older than **v0.10.0**, also submit with
+`--portable-images`: its Makefile has no `ARM_CPU` knob, so the `neoverse-v2`
+image c8g/c8g64 normally pull cannot be built.
 
 ---
 

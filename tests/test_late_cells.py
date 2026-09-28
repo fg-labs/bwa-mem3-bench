@@ -32,10 +32,12 @@ import pytest
 
 from bwa_mem3_bench.storage.ingest import (
     LATE_CELL_THRESHOLD_HOURS,
+    MixedVariantCell,
     _measured_at,
     ingest_accuracy,
     ingest_run,
     late_cells,
+    mixed_variant_cells,
 )
 from bwa_mem3_bench.storage.sqlite import connect
 
@@ -422,3 +424,50 @@ def test_a_stamp_the_lateness_check_cannot_read_is_not_persisted(tmp_path: Path)
     ingest_run(conn, runs_root=root, fg_labs_sha=SHA)
     (value,) = conn.execute("select measured_at from trials where rep = 1").fetchone()
     assert value is None
+
+
+def _write_variant_cell(root: Path, *, arch: str, rep: int, variant: str | None) -> None:
+    """A minimal ingestable cell whose meta.json records `variant` (None = no field)."""
+    bench = root / SHA / "wgs-5M" / arch / f"rep-{rep}" / "benchmarks"
+    bench.mkdir(parents=True)
+    (bench / "timing.tsv").write_text(TIMING + "10\t0:00:10\t1.0\t1.0\t1.0\t1.0\t0\t0\t100\t10\n")
+    meta: dict[str, object] = {"fg_labs_sha": SHA, "sample": "wgs-5M", "arch": arch, "rep": rep}
+    if variant is not None:
+        meta["image_variant"] = variant
+    (bench / "meta.json").write_text(json.dumps(meta))
+
+
+def test_image_variant_reaches_the_trials_table(tmp_path: Path) -> None:
+    """Recorded variant stored verbatim; unrecorded and `unknown` stored as NULL."""
+    root = tmp_path / "runs"
+    _write_variant_cell(root, arch="c8g", rep=1, variant="neoverse-v2")
+    _write_variant_cell(root, arch="c7g", rep=1, variant="")
+    _write_variant_cell(root, arch="c6a", rep=1, variant=None)
+    _write_variant_cell(root, arch="m7i", rep=1, variant="unknown")
+    conn = connect(tmp_path / "db.sqlite")
+    ingest_run(conn, runs_root=root, fg_labs_sha=SHA)
+    got = dict(conn.execute("select arch, image_variant from trials").fetchall())
+    assert got == {"c8g": "neoverse-v2", "c7g": "", "c6a": None, "m7i": None}
+
+
+def test_mixed_variant_cells_names_a_generic_rep_beside_tuned_ones(tmp_path: Path) -> None:
+    """The real case: an old unrecorded (generic) rep topped up with tuned reps.
+
+    Unrecorded must count as portable, or this -- the only way the mix arises in
+    practice -- would go unseen.
+    """
+    root = tmp_path / "runs"
+    _write_variant_cell(root, arch="c8g", rep=1, variant=None)
+    _write_variant_cell(root, arch="c8g", rep=2, variant="neoverse-v2")
+    _write_variant_cell(root, arch="c8g", rep=3, variant="neoverse-v2")
+    _write_variant_cell(root, arch="c7g", rep=1, variant=None)
+    _write_variant_cell(root, arch="c7g", rep=2, variant="")
+    assert mixed_variant_cells(runs_root=root, fg_labs_sha=SHA) == [
+        MixedVariantCell(
+            sample="wgs-5M", arch="c8g", reps_by_variant={"": [1], "neoverse-v2": [2, 3]}
+        )
+    ]
+
+
+def test_mixed_variant_cells_on_a_missing_tree_is_empty(tmp_path: Path) -> None:
+    assert mixed_variant_cells(runs_root=tmp_path, fg_labs_sha=SHA) == []

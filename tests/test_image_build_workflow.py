@@ -201,37 +201,84 @@ def test_every_fleet_platform_is_built_on_a_native_runner() -> None:
         )
 
 
-def test_an_arm_core_tuning_builds_arm64_only_under_its_own_tag() -> None:
-    """The tuned binary can SIGILL on Graviton3, so it must never be portable.
+def _build_args(cmd: list[str]) -> dict[str, str]:
+    """The ``--build-arg`` pairs of a buildx command, as a dict."""
+    return dict(arg.split("=", 1) for flag, arg in pairwise(cmd) if flag == "--build-arg")
 
-    It defaults to arm64 even on a push (whose ordinary default is the whole
-    fleet), carries the Makefile knobs as TUNE_* build-args rather than as an x86
-    BASELINE_ARCH tier, and leaves `:latest` alone.
+
+#: The variant-selecting build-args, exactly, for each kind of variant. An exact
+#: slice rather than a subset: a TUNE_* value leaking into an x86 tier build would
+#: send the amd64 leg into the Dockerfile's TARGETARCH refusal, and an empty
+#: IMAGE_VARIANT on a tuned build would record its measurements as portable.
+_VARIANT_BUILD_ARGS = {
+    "": {"BASELINE_ARCH": "", "TUNE_ARM_CPU": "", "TUNE_ARM_CACHE_LINE": "", "IMAGE_VARIANT": ""},
+    "avx512bw": {
+        "BASELINE_ARCH": "avx512bw",
+        "TUNE_ARM_CPU": "",
+        "TUNE_ARM_CACHE_LINE": "",
+        "IMAGE_VARIANT": "avx512bw",
+    },
+    "neoverse-v2": {
+        "BASELINE_ARCH": "",
+        "TUNE_ARM_CPU": "neoverse-v2",
+        "TUNE_ARM_CACHE_LINE": "64",
+        "IMAGE_VARIANT": "neoverse-v2",
+    },
+}
+
+
+@pytest.mark.parametrize("variant", sorted(_VARIANT_BUILD_ARGS))
+def test_each_variant_passes_exactly_its_build_args(variant: str) -> None:
+    """Every variant key is always passed, and holds exactly this variant's value."""
+    args = _build_args(_buildx_command(baseline_arch=variant, push=True))
+    assert {k: args[k] for k in _VARIANT_BUILD_ARGS[variant]} == _VARIANT_BUILD_ARGS[variant]
+
+
+@pytest.mark.parametrize(
+    ("variant", "platform"), [("neoverse-v2", "linux/arm64"), ("avx512bw", "linux/amd64")]
+)
+@pytest.mark.parametrize("explicit", [False, True])
+def test_a_variant_builds_only_its_platform_under_its_own_tag(
+    variant: str, platform: str, explicit: bool
+) -> None:
+    """A host-locked variant defaults to its platform even on a push, never moves `:latest`.
+
+    The explicit form is what CI's `build-tuned` passes (`--platforms linux/arm64`),
+    so it must be accepted, not just the default.
     """
-    cmd = _buildx_command(baseline_arch="neoverse-v2", push=True)
-    assert cmd[cmd.index("--platform") + 1] == "linux/arm64"
-    build_args = {arg for flag, arg in pairwise(cmd) if flag == "--build-arg"}
-    assert {
-        "BASELINE_ARCH=",
-        "TUNE_ARM_CPU=neoverse-v2",
-        "TUNE_ARM_CACHE_LINE=64",
-    } <= build_args
+    cmd = _buildx_command(
+        baseline_arch=variant, push=True, **({"platforms": platform} if explicit else {})
+    )
+    assert cmd[cmd.index("--platform") + 1] == platform
     tags = [arg for flag, arg in pairwise(cmd) if flag == "--tag"]
-    assert tags == [f"test:{'0' * 40}-neoverse-v2"]
+    assert tags == [f"test:{'0' * 40}-{variant}"]
 
 
-def test_a_portable_build_passes_empty_arm_tuning() -> None:
-    """Explicitly empty, so the Dockerfile takes the generic arm64 path."""
-    cmd = _buildx_command(push=True)
-    build_args = {arg for flag, arg in pairwise(cmd) if flag == "--build-arg"}
-    assert {"TUNE_ARM_CPU=", "TUNE_ARM_CACHE_LINE="} <= build_args
+@pytest.mark.parametrize(
+    ("variant", "platforms"),
+    [
+        ("neoverse-v2", "linux/amd64"),
+        ("neoverse-v2", build_module.FLEET_PLATFORMS),
+        ("avx512bw", "linux/arm64"),
+        ("avx512bw", build_module.FLEET_PLATFORMS),
+    ],
+)
+def test_a_variant_refuses_any_other_platform(variant: str, platforms: str) -> None:
+    """The other half of a fleet build would ignore the variant and ship generic code.
+
+    It would do so under the variant's tag, where a worker of that architecture
+    could pull it.
+    """
+    with pytest.raises(ValueError, match="host-locked to"):
+        _buildx_command(baseline_arch=variant, platforms=platforms, push=True)
 
 
-@pytest.mark.parametrize("platforms", ["linux/amd64", build_module.FLEET_PLATFORMS])
-def test_an_arm_core_tuning_refuses_any_other_platform(platforms: str) -> None:
-    """An amd64 half would ignore the tuning and publish an image nothing pulls."""
-    with pytest.raises(ValueError, match="arm64 core tuning"):
-        _buildx_command(baseline_arch="neoverse-v2", platforms=platforms, push=True)
+#: `[ -n "${TUNE_ARM_CPU}" ]` sites in the Dockerfile: the Makefile/TARGETARCH
+#: guard block, plus one tuned branch each in the default and lto-build cases.
+_TUNED_GUARD_SITES = 3
+
+#: Branches of the `build` job's script: `build-base` and per-sha `build`.
+_BUILD_BRANCHES = 2
 
 
 def test_the_dockerfile_consumes_the_tuning_build_args_build_passes() -> None:
@@ -242,17 +289,31 @@ def test_the_dockerfile_consumes_the_tuning_build_args_build_passes() -> None:
     never declare the make variable names themselves: BuildKit exports ARGs into
     the RUN environment, and an empty `ARM_CACHE_LINE` there defeats the fg-labs
     Makefile's `?= 128` and fails the portable arm64 build.
+
+    Declaring the ARG is not enough, either: a rename inside the RUN body alone
+    (say `${TUNE_CPU}`) makes `[ -n ... ]` always false, skipping both the
+    v0.10.0 Makefile guard and the tuned make lines. So the body's uses are
+    pinned too, in the default and the lto-build branch alike.
     """
     dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
     declared = set(re.findall(r"^ARG\s+([A-Za-z_]+)", dockerfile, re.MULTILINE))
-    passed = {
-        arg.split("=", 1)[0]
-        for flag, arg in pairwise(_buildx_command(baseline_arch="neoverse-v2", push=True))
-        if flag == "--build-arg"
-    }
-    assert {"TUNE_ARM_CPU", "TUNE_ARM_CACHE_LINE"} <= passed
+    passed = set(_build_args(_buildx_command(baseline_arch="neoverse-v2", push=True)))
     assert passed <= declared, f"build-args no ARG consumes: {sorted(passed - declared)}"
     assert not {"ARM_CPU", "ARM_CACHE_LINE"} & declared
+
+    body = re.sub(r"\s*\\\n\s*", " ", dockerfile)  # join RUN line continuations
+    assert body.count('if [ -n "${TUNE_ARM_CPU}" ]') == _TUNED_GUARD_SITES, (
+        "expected the guard block plus one tuned branch each for default and lto-build"
+    )
+    assert (
+        'make arch=arm64 ARM_CPU="${TUNE_ARM_CPU}" ARM_CACHE_LINE="${TUNE_ARM_CACHE_LINE}"' in body
+    )
+    assert (
+        'make lto-build LTO_ARCH=arm64 ARM_CPU="${TUNE_ARM_CPU}" '
+        'ARM_CACHE_LINE="${TUNE_ARM_CACHE_LINE}"'
+    ) in body
+    assert "grep -qF '$(ARM_CPU)' Makefile" in body
+    assert '[ "$TARGETARCH" != "arm64" ]' in body
 
 
 def test_every_configured_variant_is_built_by_ci_on_a_native_runner() -> None:
@@ -261,14 +322,35 @@ def test_every_configured_variant_is_built_by_ci_on_a_native_runner() -> None:
     That failure lands on a worker long after submit, so the tuned matrix must
     cover exactly the variants `config/archs.yaml` routes an arch to.
     """
-    archs = load_config(REPO_ROOT / "config").archs.values()
-    wanted = {(a.baseline_arch, a.platform) for a in archs if a.baseline_arch}
+    wanted = set(load_config(REPO_ROOT / "config").image_variants())
     matrix = _workflow()["jobs"]["build-tuned"]["strategy"]["matrix"]["include"]
     built = {(leg["tuning"], leg["platform"]) for leg in matrix}
     assert built == wanted
     native_runner_platform = {"ubuntu-24.04": "linux/amd64", "ubuntu-24.04-arm": "linux/arm64"}
     for leg in matrix:
         assert native_runner_platform[leg["runner"]] == leg["platform"], leg
+
+
+def test_the_build_tuned_step_builds_the_matrix_variant() -> None:
+    """The matrix values must actually reach `cli build`.
+
+    Without `--baseline-arch "${TUNING}"` the leg is a plain default build:
+    `build()` would push an arm64-only `<sha>` AND `:latest`, racing the join's
+    portable manifest list, and x86 workers would die with exec-format errors.
+    """
+    steps = _workflow()["jobs"]["build-tuned"]["steps"]
+    step = next(s for s in steps if "build and push" in s.get("name", ""))
+    assert step["env"]["TUNING"] == "${{ matrix.tuning }}"
+    assert step["env"]["PLATFORM"] == "${{ matrix.platform }}"
+    assert '--baseline-arch "${TUNING}"' in step["run"]
+    assert '--platforms "${PLATFORM}"' in step["run"]
+    assert "--arch-tag" not in step["run"]
+
+
+def test_the_build_legs_suffix_their_arch() -> None:
+    """Without `--arch-tag` a leg pushes `<sha>` and `:latest` for one architecture."""
+    run = _run_scripts("build")
+    assert run.count('--arch-tag "${ARCH}"') == _BUILD_BRANCHES, "both the base and per-sha branch"
 
 
 def test_a_tuned_variant_cannot_block_the_portable_manifest_list() -> None:

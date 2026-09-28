@@ -11,11 +11,16 @@ from bwa_mem3_bench import REPO_ROOT
 from bwa_mem3_bench import minibwa_sha as _pinned_minibwa_sha
 from bwa_mem3_bench.base_image import base_image_tag, base_image_uri, base_pins
 from bwa_mem3_bench.commands._run import run_cmd
-from bwa_mem3_bench.workflow_config import ARM_CPU_TUNINGS, ARM_PLATFORM
+from bwa_mem3_bench.workflow_config import (
+    ARM_CPU_TUNINGS,
+    ARM_PLATFORM,
+    X86_PLATFORM,
+    variant_platform,
+)
 
 #: Platforms an image must carry to run on the whole bench fleet: x86 (c6a/c7i/c7a)
 #: and Graviton (c7g/c8g). Only meaningful for images that get pushed to ECR.
-FLEET_PLATFORMS = "linux/amd64,linux/arm64"
+FLEET_PLATFORMS = f"{X86_PLATFORM},{ARM_PLATFORM}"
 
 #: A full git object name: exactly 40 lowercase hex characters.
 #:
@@ -373,29 +378,62 @@ def _check_arch_tag(arch_tag: str, resolved_platforms: str) -> None:
 
 
 def _resolve_platforms(platforms: str | None, *, push: bool, baseline_arch: str) -> str:
-    """Return the buildx platform value for a per-SHA build.
+    """Return the buildx platform value for a per-SHA (or base) build.
 
-    A core-tuned arm64 build has exactly one valid platform, so it defaults to
-    that rather than to the fleet: the amd64 half of a fleet build would ignore
-    the tuning and push an image nothing ever pulls.
+    A portable build defaults to the whole fleet when pushed and to the host's
+    own architecture otherwise. A multi-arch build is only worth its cost when
+    the result is pushed as a manifest list for the fleet to pull; a local build
+    that is neither pushed nor loaded leaves its layers in the build cache and
+    nowhere else, so defaulting to both architectures there is pure cache growth.
+
+    The default is short-circuited, so `_native_platform()` runs ONLY when no
+    override was given. Evaluating it eagerly would make an unmappable host arch
+    raise even when `--platforms` was passed -- which is precisely the escape
+    hatch that error message recommends, so it has to still work on such a host.
+
+    A host-locked variant (see `variant_platform`) has exactly one valid platform,
+    so it defaults to that and refuses any other: the other half of a fleet build
+    would ignore the variant's build-args and publish a generic binary under the
+    variant's tag, which a worker of that architecture could then pull.
 
     :param platforms: the explicit ``--platforms`` value, if any.
     :param push: whether the build is pushed (selects the fleet default).
-    :param baseline_arch: the x86 tier or arm64 core tuning being built.
+    :param baseline_arch: the host-locked variant being built, or "" for portable.
     :return: the resolved platform value.
-    :raises ValueError: if an arm64 core tuning is asked to build another platform.
+    :raises ValueError: if a host-locked variant is asked to build another platform.
     """
-    if baseline_arch not in ARM_CPU_TUNINGS:
-        # Short-circuited, so `_native_platform()` runs ONLY when no override was
-        # given (see `build`).
+    built_for = variant_platform(baseline_arch)
+    if built_for is None:
         return platforms or (FLEET_PLATFORMS if push else _native_platform())
-    resolved = platforms or ARM_PLATFORM
-    if resolved != ARM_PLATFORM:
+    resolved = platforms or built_for
+    if resolved != built_for:
         raise ValueError(
-            f"--baseline-arch {baseline_arch} is an arm64 core tuning and builds "
-            f"only {ARM_PLATFORM}, but --platforms is {resolved}."
+            f"--baseline-arch {baseline_arch} is host-locked to {built_for} and "
+            f"builds only that platform, but --platforms is {resolved}."
         )
     return resolved
+
+
+def _variant_build_args(baseline_arch: str) -> dict[str, str]:
+    """The Dockerfile build-args that select a host-locked variant ("" = portable).
+
+    An arm64 tuning travels as ``TUNE_ARM_CPU`` / ``TUNE_ARM_CACHE_LINE``, never
+    as ``BASELINE_ARCH``, which the Dockerfile reads as an x86 tier. Every key is
+    always passed, empty when unused, so the Dockerfile never falls back to an ARG
+    default that differs from what this build meant. ``IMAGE_VARIANT`` is baked
+    into the image for ``emit-host-meta`` to record.
+
+    :param baseline_arch: the host-locked variant, or "" for the portable image.
+    :return: build-arg name -> value.
+    """
+    arm_cache_line = ARM_CPU_TUNINGS.get(baseline_arch)
+    is_arm = arm_cache_line is not None
+    return {
+        "BASELINE_ARCH": "" if is_arm else baseline_arch,
+        "TUNE_ARM_CPU": baseline_arch if is_arm else "",
+        "TUNE_ARM_CACHE_LINE": str(arm_cache_line) if is_arm else "",
+        "IMAGE_VARIANT": baseline_arch,
+    }
 
 
 def build(  # noqa: PLR0913
@@ -443,12 +481,14 @@ def build(  # noqa: PLR0913
         SIMD tiers. When set, the image is host-locked to that tier or
         higher and the SHA tag is suffixed (e.g. ``<sha>-avx512bw``); the
         portable ``:latest`` tag is NOT updated to avoid clobbering it with
-        a host-locked variant. Currently a no-op for the workflow because
-        every arch in ``config/archs.yaml`` is parked at
+        a host-locked variant. An x86 tier builds ``linux/amd64`` only (the
+        default when ``platforms`` is unset; any other platform is refused).
+        Every x86 arch in ``config/archs.yaml`` is currently parked at
         ``baseline_arch=""`` — empirical data showed the avx512bw variant
         is not a perf win on this workload (see the fg-labs/bwa-mem3 AVX-512
         baseline-build Phase C benchmarking). The flag is preserved for
-        re-enablement once upstream lands a fix.
+        re-enablement once upstream lands a fix. arm64 is NOT parked: c8g and
+        c8g64 pull the ``neoverse-v2`` variant described next.
 
         A key of ``ARM_CPU_TUNINGS`` (e.g. ``neoverse-v2``) instead builds a
         core-tuned arm64 image: it passes the fg-labs Makefile's ``ARM_CPU``
@@ -494,15 +534,6 @@ def build(  # noqa: PLR0913
     # shell, so a hostile value must never reach a step that has authenticated.
     _check_full_sha("fg_labs_sha", fg_labs_sha)
 
-    # A multi-arch build is only worth its cost when the result is pushed as a
-    # manifest list for the fleet to pull. A local build that is neither pushed
-    # nor loaded leaves its layers in the build cache and nowhere else, so
-    # defaulting to both architectures there is pure cache growth.
-    # Short-circuited, so `_native_platform()` runs ONLY when no override was
-    # given. Evaluating it eagerly would make an unmappable host arch raise even
-    # when `--platforms` was passed -- which is precisely the escape hatch that
-    # error message recommends, so it has to still work on such a host.
-    arm_cache_line = ARM_CPU_TUNINGS.get(baseline_arch)
     resolved_platforms = _resolve_platforms(platforms, push=push, baseline_arch=baseline_arch)
 
     # `--load` exports through the docker exporter, which writes into the local
@@ -593,14 +624,11 @@ def build(  # noqa: PLR0913
         "FG_LABS_REPO=https://github.com/fg-labs/bwa-mem3",
         "--build-arg",
         f"FG_LABS_SHA={fg_labs_sha}",
-        "--build-arg",
-        # An arm64 tuning travels as TUNE_ARM_CPU, not BASELINE_ARCH, which the
-        # Dockerfile reads as an x86 tier.
-        f"BASELINE_ARCH={'' if arm_cache_line is not None else baseline_arch}",
-        "--build-arg",
-        f"TUNE_ARM_CPU={baseline_arch if arm_cache_line is not None else ''}",
-        "--build-arg",
-        f"TUNE_ARM_CACHE_LINE={arm_cache_line if arm_cache_line is not None else ''}",
+        *(
+            arg
+            for name, value in _variant_build_args(baseline_arch).items()
+            for arg in ("--build-arg", f"{name}={value}")
+        ),
         "--build-arg",
         f"FG_LABS_MAKE_TARGET={make_target}",
         "--build-arg",
@@ -689,10 +717,7 @@ def build_base(  # noqa: PLR0913
     if push and load:
         raise ValueError("--push and --load are mutually exclusive")
 
-    # Short-circuited for the same reason as in `build` -- an explicit
-    # `--platforms` must still work on a host whose arch cannot be mapped, since
-    # that is the escape hatch `_native_platform()`'s error recommends.
-    resolved_platforms = platforms or (FLEET_PLATFORMS if push else _native_platform())
+    resolved_platforms = _resolve_platforms(platforms, push=push, baseline_arch="")
 
     # Same manifest-list limitation as `build` -- see the comment there.
     if load and "," in resolved_platforms:

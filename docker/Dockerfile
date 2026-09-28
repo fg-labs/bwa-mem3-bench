@@ -306,6 +306,16 @@ RUN chmod +x /usr/local/bin/coordinator-entrypoint.sh
 COPY docker/emit-host-meta.sh /usr/local/bin/emit-host-meta
 RUN chmod +x /usr/local/bin/emit-host-meta
 
+# Which host-locked build this image is: "" for the portable image, else its
+# `baseline_arch` (e.g. `neoverse-v2`). Baked in rather than passed by the
+# workflow so the recorded value is a property of the binary that actually ran,
+# not of whatever config the coordinator believed was in force. emit-host-meta
+# copies it into every meta.json; ingest stores it as `trials.image_variant` so
+# a tuned and a portable measurement are never pooled or compared as one cell.
+# Declared this late so changing it invalidates no earlier layer.
+ARG IMAGE_VARIANT=""
+ENV BWA_MEM3_BENCH_IMAGE_VARIANT=${IMAGE_VARIANT}
+
 # Host memory-contention probe, invoked from inside the thread-scaling ladder for
 # the same reason emit-host-meta is invoked from inside the align rules: only the
 # working shell is guaranteed to be on the working machine.

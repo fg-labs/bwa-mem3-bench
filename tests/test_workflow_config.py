@@ -31,6 +31,7 @@ from bwa_mem3_bench.workflow_config import (
     load_config,
     parse_ladder_override,
     resolve_worker_image_sha,
+    variant_platform,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1478,3 +1479,31 @@ def test_pa_is_expected_only_on_alt_aware_samples() -> None:
     assert "pa" not in cfg.expect_tags(non_alt, "vs_baseline"), (
         f"{non_alt} is not ALT-aware, so an observed pa should fail the guard"
     )
+
+
+def test_portable_images_drops_every_variant_suffix() -> None:
+    """The run-level escape hatch for a SHA that cannot build its archs' variants."""
+    cfg = load_config(CONFIG_DIR)
+    for name, arch in cfg.archs.items():
+        uri = arch.image_uri(ecr_repo_uri=_TEST_ECR, fg_labs_sha=_TEST_SHA, portable=True)
+        assert uri == f"{_TEST_ECR}:{_TEST_SHA}", name
+
+
+def test_the_snakefile_threads_portable_images_into_every_worker_image() -> None:
+    """`image_for_arch` is the one place every rule's image comes from."""
+    snakefile = (CONFIG_DIR.parent / "workflow" / "Snakefile").read_text()
+    assert 'config.get("portable_images", "false")' in snakefile
+    assert "portable=PORTABLE_IMAGES," in snakefile
+
+
+def test_image_variants_lists_what_a_build_must_publish() -> None:
+    """Exactly the routed host-locked variants, each with its one platform."""
+    assert load_config(CONFIG_DIR).image_variants() == [("neoverse-v2", "linux/arm64")]
+
+
+@pytest.mark.parametrize(
+    ("variant", "expected"),
+    [("", None), ("neoverse-v2", "linux/arm64"), ("avx512bw", "linux/amd64")],
+)
+def test_variant_platform(variant: str, expected: str | None) -> None:
+    assert variant_platform(variant) == expected

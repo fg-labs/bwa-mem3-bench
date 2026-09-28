@@ -436,3 +436,24 @@ def test_comparator_version_and_instance_count_come_from_the_snapshot(
     assert "v2.2.1" not in page
     # The fixture's datasets ran on three instance types (c6a, c8g, m7i).
     assert "across 3 AWS instance types" in results.render_release_readme(changed)
+
+
+def test_the_snapshot_freezes_which_build_measured_each_arch(
+    tmp_path: Path, config: WorkflowConfig
+) -> None:
+    """A release page outlives the config; it must say c8g ran the tuned build.
+
+    Unrecorded variants read as portable (""), matching the perf gate.
+    """
+    db = tmp_path / "bench.db"
+    _seed(db)
+    conn = connect(db)
+    conn.execute(
+        "UPDATE trials SET image_variant = 'neoverse-v2' WHERE fg_labs_sha = ? AND arch = 'c8g'",
+        (SHA,),
+    )
+    conn.commit()
+    conn.close()
+    variants = _snapshot(db, config)["image_variants"]
+    assert variants["c8g"] == "neoverse-v2"
+    assert variants["c6a"] == ""

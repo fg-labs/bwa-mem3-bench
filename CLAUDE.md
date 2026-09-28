@@ -42,6 +42,11 @@ All commands are `pixi run python -m bwa_mem3_bench.cli <subcommand>`.
    --push`. **Always required** when `workflow/`, `config/`, `docker/`, or the
    `bwa_mem3_bench` package changes — those are `COPY`ed into the image.
    This builds `FROM` the base image (see below), which must already be pushed.
+   **Plus one push per host-locked variant `config/archs.yaml` routes an arch
+   to** — today `build ... --baseline-arch neoverse-v2 --push`, the
+   `<sha>-neoverse-v2` image c8g/c8g64 pull (c8g is the `core_arch`, so this is
+   nearly every submit). The CI `build-image` workflow does both; `cli
+   bless-release` lists the variants from config.
 4b. **Build + push the BASE image** (`build-base --image-name <ecr-uri> --push`)
    — only after bumping a pin in `docker/build-arg-defaults.env` or editing
    `docker/Dockerfile.base`. The base carries the clang toolchain, the Rust
@@ -140,8 +145,11 @@ All commands are `pixi run python -m bwa_mem3_bench.cli <subcommand>`.
        --image-ids imageTag=<sha> --query 'imageDetails[].imageDigest' --output text
    ```
 
-   Run the same check for `imageTag=<sha>-neoverse-v2` before any submit that
-   includes c8g or c8g64 — those workers pull the core-tuned variant, not `<sha>`.
+   Run the same check, against the digest that push printed, for each
+   `<tag>-<baseline_arch>` variant routed in `config/archs.yaml` (today
+   `<sha>-neoverse-v2`) before any submit that includes an arch routed to it —
+   c8g/c8g64 pull the core-tuned variant, not `<sha>`. `<tag>` carries any
+   `-<make_target>` suffix: an LTO run pulls `<sha>-lto-build-neoverse-v2`.
 
    A "background build completed exit 0" notification is not a push-settled
    signal. The CI workflow's `join` step verifies the manifest list carries both
@@ -248,7 +256,14 @@ from `arch.baseline_arch` in `config/archs.yaml`:
   neoverse-v2` builds linux/arm64 only with the fg-labs Makefile's
   `ARM_CPU=neoverse-v2 ARM_CACHE_LINE=64` and pushes `<sha>-neoverse-v2`; the
   CI `build-tuned` job does this on every `per-sha` build. A submit whose SHA
-  lacks that tag fails at image pull on c8g. Three traps: (1) `-mcpu=neoverse-v2`
+  lacks that tag fails at image pull on c8g — for an fg-labs SHA older than
+  v0.10.0 (which cannot build it), submit with `--portable-images`, which makes
+  every arch pull `<sha>` for that run. Measurements record which build ran
+  them (`meta.json` / `trials.image_variant`, baked into the image): `collect`
+  refuses a cell whose reps mix variants (re-run it with `--forcerun`, or pass
+  `--ingest-mixed-variants`), and the perf gate marks a cell whose variant
+  differs from the previous release's `variant_changed` instead of gating it.
+  Three traps: (1) `-mcpu=neoverse-v2`
   emits SVE2, which Graviton3 lacks, so c7g stays portable; (2) m8g, though
   Graviton4, stays portable because the arena's historical arms are generic
   builds and tuning only the candidate would skew the release-over-release
@@ -654,7 +669,8 @@ comparison across architectures.
   `timing.minibwa.tsv` into `benchmark.db` as the `minibwa` tool dimension
   (synthetic SHA `minibwa-<sha>`). `bench speedup --minibwa-sha <sha>` adds
   `minibwa_speedup` (= `fg_labs_s / minibwa_s`, `>1` = minibwa faster) and
-  `minibwa_s` columns. NEON archs (c7g/c8g) are the clean same-ISA comparison;
+  `minibwa_s` columns. c7g is the clean same-ISA comparison (c8g is not: its
+  bwa-mem3 is the `neoverse-v2` core-tuned build, minibwa stays generic);
   x86 carries the SSE4.2-vs-AVX ISA-maturity gap.
 
 ### Submit recipe
@@ -663,6 +679,8 @@ comparison across architectures.
 git submodule update --init                    # populate vendor/minibwa
 pixi run python -m bwa_mem3_bench.cli build --fg-labs-sha <fg-sha> \
     --image-name <ecr> --push                  # MINIBWA_SHA defaults to the pin
+pixi run python -m bwa_mem3_bench.cli build --fg-labs-sha <fg-sha> \
+    --image-name <ecr> --baseline-arch neoverse-v2 --push   # c8g's image
 pixi run python -m bwa_mem3_bench.cli submit --fg-labs-sha <fg-sha> --target minibwa_smoke
 # then, once the smoke passes:
 pixi run python -m bwa_mem3_bench.cli submit --fg-labs-sha <fg-sha> --target minibwa

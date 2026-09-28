@@ -750,3 +750,21 @@ def test_a_failing_schema_script_rolls_back_and_releases_the_db(
     }
     raw.close()
     del excinfo
+
+
+def test_v12_db_migrates_to_v13_adding_image_variant(db_path: Path) -> None:
+    """A v12 DB gains trials.image_variant; existing trials survive with NULL (unrecorded)."""
+    conn = connect(db_path)
+    conn.execute("INSERT INTO runs(fg_labs_sha, status) VALUES ('old', 'complete')")
+    conn.execute("INSERT INTO trials(fg_labs_sha, sample, arch, rep) VALUES ('old', 's', 'a', 1)")
+    conn.execute("ALTER TABLE trials DROP COLUMN image_variant")
+    conn.execute("PRAGMA user_version = 12")
+    conn.commit()
+    conn.close()
+
+    conn = connect(db_path)
+    assert "image_variant" in _columns(conn, "trials")
+    (ver,) = conn.execute("PRAGMA user_version").fetchone()
+    assert ver == EXPECTED_SCHEMA_VERSION
+    assert conn.execute("SELECT image_variant FROM trials").fetchall() == [(None,)]
+    conn.close()

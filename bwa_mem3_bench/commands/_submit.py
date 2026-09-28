@@ -55,6 +55,7 @@ def submit(  # noqa: PLR0913
     golden_ref_sha: str = "",
     ladder: str = "",
     forcerun: str = "",
+    portable_images: bool = False,
     job_name: str | None = None,
     dry_run: bool = False,
 ) -> None:
@@ -100,6 +101,12 @@ def submit(  # noqa: PLR0913
         already aligned (after a compare-bams change, say) needs the rules named
         or the coordinator does nothing. Rules, never a bare flag: forcing
         everything on an aligned SHA re-runs the whole alignment sweep.
+    :param portable_images: make every arch pull the portable ``<sha>`` image,
+        ignoring the ``baseline_arch`` host-locked variants in
+        ``config/archs.yaml``. Required for an fg-labs SHA older than v0.10.0,
+        whose Makefile cannot build the ``neoverse-v2`` variant c8g and c8g64
+        otherwise pull (the build refuses it, so the pull would fail). The c8g
+        numbers are then generic-build numbers, like every pre-tuning run's.
     :param job_name: Batch job name; defaults to ``<target>-<sha>`` (or
         ``<target>-<sha>-<make_target>`` when make_target is set).
     :param dry_run: print the ``aws batch submit-job`` command without executing.
@@ -147,6 +154,8 @@ def submit(  # noqa: PLR0913
         env_overrides.append({"name": "REPS", "value": str(reps)})
     if ladder:
         env_overrides.append({"name": "LADDER", "value": ladder})
+    if portable_images:
+        env_overrides.append({"name": "PORTABLE_IMAGES", "value": "true"})
     if forcerun:
         env_overrides.append({"name": "FORCERUN", "value": forcerun})
     if golden_ref_sha:

@@ -31,6 +31,15 @@ fi
 
 SHA="$1"; SAMPLE="$2"; ARCH="$3"; REP="$4"
 
+# The image's host-locked variant, baked in by the Dockerfile ("" = portable).
+# Unset means an image built before the variant was recorded, reported as
+# "unknown". Restricted to tag-safe characters because the fallback below
+# writes it with printf rather than a JSON encoder.
+IMAGE_VARIANT="${BWA_MEM3_BENCH_IMAGE_VARIANT-unknown}"
+if ! [[ "$IMAGE_VARIANT" =~ ^[A-Za-z0-9._-]*$ ]]; then
+    IMAGE_VARIANT=unknown
+fi
+
 # `rep` is emitted as a JSON *number*, so a non-numeric value would produce a
 # record no downstream parser can read. Reject it here rather than in the writer.
 if ! [[ "$REP" =~ ^[0-9]+$ ]]; then
@@ -52,6 +61,7 @@ emit_fallback() {
         "$SHA" "$SAMPLE" "$ARCH" "$REP"
     printf '"instance_type": "unknown", "availability_zone": "unknown", '
     printf '"instance_id": "unknown", "kernel": "unknown", '
+    printf '"image_variant": "%s", ' "$IMAGE_VARIANT"
     printf '"measured_at": "%s"}' "${MEASURED_AT:-unknown}"
 }
 
@@ -112,7 +122,7 @@ KERNEL=$(uname -r 2>/dev/null || echo unknown)
 
 # Buffered, so a writer that dies mid-record cannot emit half a JSON object
 # followed by the fallback's whole one.
-export SHA SAMPLE ARCH REP INSTANCE_TYPE AZ INSTANCE_ID KERNEL MEASURED_AT
+export SHA SAMPLE ARCH REP INSTANCE_TYPE AZ INSTANCE_ID KERNEL MEASURED_AT IMAGE_VARIANT
 if PAYLOAD=$(python3 -c '
 import json, os, sys
 json.dump({
@@ -124,6 +134,7 @@ json.dump({
     "availability_zone": os.environ["AZ"],
     "instance_id": os.environ["INSTANCE_ID"],
     "kernel": os.environ["KERNEL"],
+    "image_variant": os.environ["IMAGE_VARIANT"],
     "measured_at": os.environ["MEASURED_AT"],
 }, sys.stdout)
 '); then
