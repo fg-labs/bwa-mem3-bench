@@ -71,6 +71,11 @@ CONFIG_ARGS=("fg_labs_sha=${FG_LABS_SHA}")
 # a wrong default bucket and a golden-gated run aborts. `--config` propagates to
 # workers (the job-def env does not), so this is the reliable channel.
 [[ -n "${BWA_MEM3_BENCH_S3_BUCKET:-}" ]] && CONFIG_ARGS+=("s3_bucket=${BWA_MEM3_BENCH_S3_BUCKET}")
+# Same channel for the worker image repository: the profile below is rendered
+# from BWA_MEM3_BENCH_ECR_REPO, and every per-rule image is
+# `<ecr_repo_uri>:<tag>` (image_for_arch in workflow/Snakefile), so both read
+# this one value rather than each resolving it independently.
+[[ -n "${BWA_MEM3_BENCH_ECR_REPO:-}" ]] && CONFIG_ARGS+=("ecr_repo_uri=${BWA_MEM3_BENCH_ECR_REPO}")
 
 # Render the Snakemake AWS Batch profile from its template using the
 # BWA_MEM3_BENCH_{ECR_REPO,S3_BUCKET} env vars baked into the coordinator

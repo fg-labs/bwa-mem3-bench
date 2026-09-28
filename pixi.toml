@@ -27,7 +27,7 @@ psutil = ">=5.9"
 mawk = ">=1.3.4"
 
 [feature.workflow.pypi-dependencies]
-snakemake-executor-plugin-aws-batch = { git = "https://github.com/nh13/snakemake-executor-plugin-aws-batch.git", rev = "71cbeeae37f8d6ed5e5cec832beece84345b9382" }
+snakemake-executor-plugin-aws-batch = { git = "https://github.com/nh13/snakemake-executor-plugin-aws-batch.git", rev = "ba24f2bc37e5b56e75a61320622623354fda61c8" }
 snakemake-storage-plugin-s3 = ">=0.2"
 
 [feature.analysis.dependencies]

@@ -128,7 +128,7 @@ rule align_thread_scaling:
         # 24576 (not 20480): the stride-4 dense index adds ~+4 GB, matching
         # `_shm_size_mb_for`'s non-meth value. Trivially fits the 128 GB host.
         shared_memory_size_mb = 24576,
-        container_image = lambda wc: image_for_arch(wc.arch),
+        aws_batch_container_image = lambda wc: image_for_arch(wc.arch),
         # The ladder is long by construction: the 1-thread rung alone is ~16x a
         # 16-thread run. DEAD for the aws-batch executor -- kept only as
         # in-DAG documentation of what this job actually needs. Our forked

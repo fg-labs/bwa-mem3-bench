@@ -78,7 +78,7 @@ rule align_minibwa:
         # cgroup the bwa-mem3 meth arm uses (m7i has 64 GB). Non-meth (~6.4 GB
         # `.mbw`) is fine at 28 GB.
         mem_mb = lambda wc: 48000 if _is_meth_sample(wc.sample) else 28000,
-        container_image = lambda wc: image_for_arch(wc.arch),
+        aws_batch_container_image = lambda wc: image_for_arch(wc.arch),
     # See align_fg_labs: a `threads:` directive (not a param) so the executor
     # plugin reserves the vCPUs minibwa actually uses. minibwa is the wall-time
     # probe the bwa-mem3 numbers are quoted against, so it must be scheduled

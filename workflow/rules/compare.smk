@@ -144,7 +144,7 @@ rule compare_vs_baseline:
     threads: 1
     resources:
         batch_queue = lambda wc: batch_queue_for(wc.arch),
-        container_image = lambda wc: image_for_arch(wc.arch),
+        aws_batch_container_image = lambda wc: image_for_arch(wc.arch),
         mem_mb = COMPARE_MEM_MB,
     params:
         tag_policy_args = lambda wc: _tag_policy_args(wc.sample, "vs_baseline"),
@@ -207,7 +207,7 @@ rule compare_compat_identity:
     threads: 4
     resources:
         batch_queue = lambda wc: batch_queue_for(wc.arch),
-        container_image = lambda wc: image_for_arch(wc.arch),
+        aws_batch_container_image = lambda wc: image_for_arch(wc.arch),
         mem_mb = COMPARE_MEM_MB,
     shell:
         r"""
@@ -286,7 +286,7 @@ rule compare_bwa_identity:
     threads: 4
     resources:
         batch_queue = lambda wc: batch_queue_for(wc.arch),
-        container_image = lambda wc: image_for_arch(wc.arch),
+        aws_batch_container_image = lambda wc: image_for_arch(wc.arch),
         mem_mb = COMPARE_MEM_MB,
     shell:
         r"""
@@ -344,7 +344,7 @@ rule compat_thread_invariance:
     threads: CONFIG.thread_scaling.max_threads
     resources:
         batch_queue = lambda wc: batch_queue_for(wc.arch),
-        container_image = lambda wc: image_for_arch(wc.arch),
+        aws_batch_container_image = lambda wc: image_for_arch(wc.arch),
         mem_mb = lambda wc: _mem_mb_for(wc.sample),
         shared_memory_size_mb = lambda wc: _shm_size_mb_for(wc.sample),
         runtime = 7200,
@@ -409,7 +409,7 @@ rule compare_vs_x86:
     threads: 1
     resources:
         batch_queue = lambda wc: batch_queue_for(wc.arch),
-        container_image = lambda wc: image_for_arch(wc.arch),
+        aws_batch_container_image = lambda wc: image_for_arch(wc.arch),
         mem_mb = COMPARE_MEM_MB,
     params:
         tag_policy_args = lambda wc: _tag_policy_args(wc.sample, "vs_x86"),
@@ -451,7 +451,7 @@ rule compare_vs_default:
     threads: 1
     resources:
         batch_queue = lambda wc: batch_queue_for(wc.arch),
-        container_image = lambda wc: image_for_arch(wc.arch),
+        aws_batch_container_image = lambda wc: image_for_arch(wc.arch),
         mem_mb = COMPARE_MEM_MB,
     params:
         tag_policy_args = lambda wc: _tag_policy_args(wc.sample, "vs_default"),
@@ -487,7 +487,7 @@ rule compare_vs_golden:
     threads: 1
     resources:
         batch_queue = lambda wc: batch_queue_for(wc.arch),
-        container_image = lambda wc: image_for_arch(wc.arch),
+        aws_batch_container_image = lambda wc: image_for_arch(wc.arch),
         mem_mb = COMPARE_MEM_MB,
     params:
         tag_policy_args = lambda wc: _tag_policy_args(wc.sample, "vs_golden"),

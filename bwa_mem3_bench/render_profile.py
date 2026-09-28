@@ -30,6 +30,7 @@ tag is read from the ``BWA_MEM3_BENCH_COST_CENTER`` env var; if unset, no
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from pathlib import Path
 from string import Template
@@ -47,6 +48,7 @@ def render_profile(
     template: Path = DEFAULT_TEMPLATE,
     output: Path = DEFAULT_OUTPUT,
     dry_run: bool = False,
+    ecr_repo_uri: str | None = None,
 ) -> None:
     """Render the Snakemake AWS Batch profile from its template.
 
@@ -54,12 +56,18 @@ def render_profile(
     :param output: rendered profile path. Snakemake reads ``--profile <dir>``,
         so this must be named ``config.yaml`` inside the profile directory.
     :param dry_run: print the rendered content to stdout without writing.
+    :param ecr_repo_uri: worker image repository, overriding ``cdk/outputs.json``
+        and ``BWA_MEM3_BENCH_ECR_REPO``. The same value the Snakefile takes as
+        ``--config ecr_repo_uri=<uri>``, so the profile's default image and the
+        per-rule images name one repository.
     """
     cfg = aws_config.load()
+    if ecr_repo_uri:
+        cfg = dataclasses.replace(cfg, ecr_repo_uri=ecr_repo_uri)
     if not cfg.ecr_repo_uri:
         raise RuntimeError(
             "ECR repository URI is not set. Run `cdk deploy` to populate "
-            "cdk/outputs.json, or set BWA_MEM3_BENCH_ECR_REPO."
+            "cdk/outputs.json, set BWA_MEM3_BENCH_ECR_REPO, or pass --ecr-repo-uri."
         )
     if not cfg.bucket:
         raise RuntimeError(

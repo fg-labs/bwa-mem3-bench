@@ -164,6 +164,26 @@ def test_s3_bucket_absent_from_config_when_env_unset(stubbed_path: str) -> None:
     assert "s3_bucket=" not in line
 
 
+def test_ecr_repo_env_propagates_to_config(stubbed_path: str) -> None:
+    """BWA_MEM3_BENCH_ECR_REPO must reach the Snakefile's `ecr_repo_uri` config.
+
+    Every per-arch worker image is `<ecr_repo_uri>:<tag>`. Threading the same value
+    the profile is rendered from into `--config` means the rendered default image and
+    the per-rule images name one repository, and a worker that re-parses the
+    Snakefile without the coordinator's env still resolves it.
+    """
+    line = _run_entrypoint(
+        {"FG_LABS_SHA": "deadbeef", "BWA_MEM3_BENCH_ECR_REPO": "123.dkr.ecr/bench"},
+        stubbed_path,
+    )
+    assert "ecr_repo_uri=123.dkr.ecr/bench" in line
+
+
+def test_ecr_repo_absent_from_config_when_env_unset(stubbed_path: str) -> None:
+    line = _run_entrypoint({"FG_LABS_SHA": "deadbeef"}, stubbed_path)
+    assert "ecr_repo_uri=" not in line
+
+
 def test_missing_fg_labs_sha_errors(stubbed_path: str) -> None:
     """FG_LABS_SHA is required — the entrypoint must exit non-zero if it's unset."""
     result = subprocess.run(

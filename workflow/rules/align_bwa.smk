@@ -100,7 +100,7 @@ rule align_bwa:
     resources:
         batch_queue = lambda wc: batch_queue_for(wc.arch),
         mem_mb = lambda wc: _mem_mb_for(wc.sample),
-        container_image = lambda wc: image_for_arch(wc.arch),
+        aws_batch_container_image = lambda wc: image_for_arch(wc.arch),
     # `threads:` (not a param) so the executor plugin reserves the vCPUs the
     # aligner actually uses, and so this arm is timed under the same contention
     # as the other two. See align_fg_labs.

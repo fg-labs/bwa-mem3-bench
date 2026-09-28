@@ -1,7 +1,7 @@
 # `baseline_arch` selects the fg-labs/bwa-mem3 `BASELINE_ARCH` build-arg used
 # to compile the non-kernel TUs of the single binary on x86 (added by fg-labs
 # PR #84). The plumbing is wired end-to-end (`Arch.image_uri` →
-# `resources.container_image` → snakemake-executor-plugin-aws-batch fork),
+# `resources.aws_batch_container_image` → snakemake-executor-plugin-aws-batch),
 # but every x86 arch is currently set to `""` (use the portable `:<sha>` tag).
 # arm64 is different -- c8g / c8g64 are routed to a core-tuned variant; see the
 # arm64 paragraph below.

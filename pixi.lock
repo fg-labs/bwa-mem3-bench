@@ -174,7 +174,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/urllib3-2.6.3-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/yte-1.9.4-pyhd8ed1ab_0.conda
       - pypi: ./
-      - pypi: git+https://github.com/nh13/snakemake-executor-plugin-aws-batch.git?rev=71cbeeae37f8d6ed5e5cec832beece84345b9382#71cbeeae37f8d6ed5e5cec832beece84345b9382
+      - pypi: git+https://github.com/nh13/snakemake-executor-plugin-aws-batch.git?rev=ba24f2bc37e5b56e75a61320622623354fda61c8#ba24f2bc37e5b56e75a61320622623354fda61c8
       - pypi: https://files.pythonhosted.org/packages/06/17/8ebe412bce7fe9b4ed3f79d717c589a95439748847bd2d2012eabc15d73e/snakemake_storage_plugin_s3-0.3.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/0b/73/3fab0755ae747827c3bb6c9030825fa52b0724c1c4ee86400bb0c2698b0c/aws_cdk_cloud_assembly_schema-53.17.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/14/2f/967ba146e6d58cf6a652da73885f52fc68001525b4197effc174321d70b4/jmespath-1.1.0-py3-none-any.whl
@@ -340,7 +340,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/urllib3-2.6.3-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/yte-1.9.4-pyhd8ed1ab_0.conda
       - pypi: ./
-      - pypi: git+https://github.com/nh13/snakemake-executor-plugin-aws-batch.git?rev=71cbeeae37f8d6ed5e5cec832beece84345b9382#71cbeeae37f8d6ed5e5cec832beece84345b9382
+      - pypi: git+https://github.com/nh13/snakemake-executor-plugin-aws-batch.git?rev=ba24f2bc37e5b56e75a61320622623354fda61c8#ba24f2bc37e5b56e75a61320622623354fda61c8
       - pypi: https://files.pythonhosted.org/packages/06/17/8ebe412bce7fe9b4ed3f79d717c589a95439748847bd2d2012eabc15d73e/snakemake_storage_plugin_s3-0.3.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/0b/73/3fab0755ae747827c3bb6c9030825fa52b0724c1c4ee86400bb0c2698b0c/aws_cdk_cloud_assembly_schema-53.17.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/14/2f/967ba146e6d58cf6a652da73885f52fc68001525b4197effc174321d70b4/jmespath-1.1.0-py3-none-any.whl
@@ -494,7 +494,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-64/yaml-0.2.5-h4132b18_3.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-64/zstd-1.5.7-h3eecb57_6.conda
       - pypi: ./
-      - pypi: git+https://github.com/nh13/snakemake-executor-plugin-aws-batch.git?rev=71cbeeae37f8d6ed5e5cec832beece84345b9382#71cbeeae37f8d6ed5e5cec832beece84345b9382
+      - pypi: git+https://github.com/nh13/snakemake-executor-plugin-aws-batch.git?rev=ba24f2bc37e5b56e75a61320622623354fda61c8#ba24f2bc37e5b56e75a61320622623354fda61c8
       - pypi: https://files.pythonhosted.org/packages/06/17/8ebe412bce7fe9b4ed3f79d717c589a95439748847bd2d2012eabc15d73e/snakemake_storage_plugin_s3-0.3.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/0b/73/3fab0755ae747827c3bb6c9030825fa52b0724c1c4ee86400bb0c2698b0c/aws_cdk_cloud_assembly_schema-53.17.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/14/2f/967ba146e6d58cf6a652da73885f52fc68001525b4197effc174321d70b4/jmespath-1.1.0-py3-none-any.whl
@@ -647,7 +647,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/yaml-0.2.5-h925e9cb_3.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zstd-1.5.7-hbf9d68e_6.conda
       - pypi: ./
-      - pypi: git+https://github.com/nh13/snakemake-executor-plugin-aws-batch.git?rev=71cbeeae37f8d6ed5e5cec832beece84345b9382#71cbeeae37f8d6ed5e5cec832beece84345b9382
+      - pypi: git+https://github.com/nh13/snakemake-executor-plugin-aws-batch.git?rev=ba24f2bc37e5b56e75a61320622623354fda61c8#ba24f2bc37e5b56e75a61320622623354fda61c8
       - pypi: https://files.pythonhosted.org/packages/06/17/8ebe412bce7fe9b4ed3f79d717c589a95439748847bd2d2012eabc15d73e/snakemake_storage_plugin_s3-0.3.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/0b/73/3fab0755ae747827c3bb6c9030825fa52b0724c1c4ee86400bb0c2698b0c/aws_cdk_cloud_assembly_schema-53.17.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/14/2f/967ba146e6d58cf6a652da73885f52fc68001525b4197effc174321d70b4/jmespath-1.1.0-py3-none-any.whl
@@ -835,7 +835,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/yte-1.9.4-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/zipp-3.23.1-pyhcf101f3_0.conda
       - pypi: ./
-      - pypi: git+https://github.com/nh13/snakemake-executor-plugin-aws-batch.git?rev=71cbeeae37f8d6ed5e5cec832beece84345b9382#71cbeeae37f8d6ed5e5cec832beece84345b9382
+      - pypi: git+https://github.com/nh13/snakemake-executor-plugin-aws-batch.git?rev=ba24f2bc37e5b56e75a61320622623354fda61c8#ba24f2bc37e5b56e75a61320622623354fda61c8
       - pypi: https://files.pythonhosted.org/packages/06/17/8ebe412bce7fe9b4ed3f79d717c589a95439748847bd2d2012eabc15d73e/snakemake_storage_plugin_s3-0.3.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/0b/73/3fab0755ae747827c3bb6c9030825fa52b0724c1c4ee86400bb0c2698b0c/aws_cdk_cloud_assembly_schema-53.17.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/14/2f/967ba146e6d58cf6a652da73885f52fc68001525b4197effc174321d70b4/jmespath-1.1.0-py3-none-any.whl
@@ -1015,7 +1015,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/yte-1.9.4-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/zipp-3.23.1-pyhcf101f3_0.conda
       - pypi: ./
-      - pypi: git+https://github.com/nh13/snakemake-executor-plugin-aws-batch.git?rev=71cbeeae37f8d6ed5e5cec832beece84345b9382#71cbeeae37f8d6ed5e5cec832beece84345b9382
+      - pypi: git+https://github.com/nh13/snakemake-executor-plugin-aws-batch.git?rev=ba24f2bc37e5b56e75a61320622623354fda61c8#ba24f2bc37e5b56e75a61320622623354fda61c8
       - pypi: https://files.pythonhosted.org/packages/06/17/8ebe412bce7fe9b4ed3f79d717c589a95439748847bd2d2012eabc15d73e/snakemake_storage_plugin_s3-0.3.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/0b/73/3fab0755ae747827c3bb6c9030825fa52b0724c1c4ee86400bb0c2698b0c/aws_cdk_cloud_assembly_schema-53.17.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/14/2f/967ba146e6d58cf6a652da73885f52fc68001525b4197effc174321d70b4/jmespath-1.1.0-py3-none-any.whl
@@ -1183,7 +1183,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-64/yaml-0.2.5-h4132b18_3.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-64/zstd-1.5.7-h3eecb57_6.conda
       - pypi: ./
-      - pypi: git+https://github.com/nh13/snakemake-executor-plugin-aws-batch.git?rev=71cbeeae37f8d6ed5e5cec832beece84345b9382#71cbeeae37f8d6ed5e5cec832beece84345b9382
+      - pypi: git+https://github.com/nh13/snakemake-executor-plugin-aws-batch.git?rev=ba24f2bc37e5b56e75a61320622623354fda61c8#ba24f2bc37e5b56e75a61320622623354fda61c8
       - pypi: https://files.pythonhosted.org/packages/06/17/8ebe412bce7fe9b4ed3f79d717c589a95439748847bd2d2012eabc15d73e/snakemake_storage_plugin_s3-0.3.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/0b/73/3fab0755ae747827c3bb6c9030825fa52b0724c1c4ee86400bb0c2698b0c/aws_cdk_cloud_assembly_schema-53.17.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/14/2f/967ba146e6d58cf6a652da73885f52fc68001525b4197effc174321d70b4/jmespath-1.1.0-py3-none-any.whl
@@ -1350,7 +1350,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/yaml-0.2.5-h925e9cb_3.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zstd-1.5.7-hbf9d68e_6.conda
       - pypi: ./
-      - pypi: git+https://github.com/nh13/snakemake-executor-plugin-aws-batch.git?rev=71cbeeae37f8d6ed5e5cec832beece84345b9382#71cbeeae37f8d6ed5e5cec832beece84345b9382
+      - pypi: git+https://github.com/nh13/snakemake-executor-plugin-aws-batch.git?rev=ba24f2bc37e5b56e75a61320622623354fda61c8#ba24f2bc37e5b56e75a61320622623354fda61c8
       - pypi: https://files.pythonhosted.org/packages/06/17/8ebe412bce7fe9b4ed3f79d717c589a95439748847bd2d2012eabc15d73e/snakemake_storage_plugin_s3-0.3.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/0b/73/3fab0755ae747827c3bb6c9030825fa52b0724c1c4ee86400bb0c2698b0c/aws_cdk_cloud_assembly_schema-53.17.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/14/2f/967ba146e6d58cf6a652da73885f52fc68001525b4197effc174321d70b4/jmespath-1.1.0-py3-none-any.whl
@@ -6449,14 +6449,14 @@ packages:
   - rich>=13
   - boto3>=1.35
   requires_python: '>=3.11'
-- pypi: git+https://github.com/nh13/snakemake-executor-plugin-aws-batch.git?rev=71cbeeae37f8d6ed5e5cec832beece84345b9382#71cbeeae37f8d6ed5e5cec832beece84345b9382
+- pypi: git+https://github.com/nh13/snakemake-executor-plugin-aws-batch.git?rev=ba24f2bc37e5b56e75a61320622623354fda61c8#ba24f2bc37e5b56e75a61320622623354fda61c8
   name: snakemake-executor-plugin-aws-batch
   version: 0.2.1
   requires_dist:
   - boto3>=1.36.5,<2.0.0
   - snakemake-interface-common>=1.17.4,<2.0.0
   - snakemake-interface-executor-plugins>=9.3.2,<10.0.0
-  - snakemake-storage-plugin-s3>=0.3.1,<0.4.0
+  - snakemake-storage-plugin-s3>=0.2,<0.4
   requires_python: '>=3.11,<4.0'
 - pypi: https://files.pythonhosted.org/packages/06/17/8ebe412bce7fe9b4ed3f79d717c589a95439748847bd2d2012eabc15d73e/snakemake_storage_plugin_s3-0.3.1-py3-none-any.whl
   name: snakemake-storage-plugin-s3
