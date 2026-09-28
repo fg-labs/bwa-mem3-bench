@@ -151,3 +151,15 @@ def test_missing_aws_cli_is_a_clean_fail(
     out = capsys.readouterr().out
     assert "could not list S3" in out
     assert "Preflight found failing checks" in out
+
+
+def test_plan_builds_exactly_the_variants_workers_pull() -> None:
+    """The plan names one build per host-locked variant `config/archs.yaml` routes to.
+
+    Derived from the config, not from `ARM_CPU_TUNINGS`: a bless that skips a
+    routed variant dies at image pull on that arch, and one that builds an
+    unrouted tuning wastes a build.
+    """
+    plan = "\n".join(_bless_release._plan("a" * 40, "b" * 40))
+    assert "--baseline-arch neoverse-v2 --push" in plan
+    assert plan.count("--baseline-arch") == len(_bless_release._routed_variants())

@@ -338,6 +338,21 @@ class Sample:
         return translated
 
 
+#: arm64 image variants: `baseline_arch` value -> the fg-labs/bwa-mem3 Makefile's
+#: `ARM_CACHE_LINE` for that core. The key doubles as the Makefile's `ARM_CPU`
+#: (clang `-mcpu`) and as the image-tag suffix. Any other non-empty
+#: `baseline_arch` is an x86 `BASELINE_ARCH` tier.
+#:
+#: `-mcpu=neoverse-v2` targets Armv9 with SVE2, which Graviton3 (Neoverse-V1, c7g)
+#: lacks, so a tuned image is host-locked: it must never become the portable
+#: arm64 tag. The fg-labs Makefile defaults `ARM_CACHE_LINE` to Apple Silicon's
+#: 128; every Neoverse core uses 64.
+ARM_CPU_TUNINGS: dict[str, int] = {"neoverse-v2": 64}
+
+#: The only platform an `ARM_CPU_TUNINGS` variant can be built for or run on.
+ARM_PLATFORM = "linux/arm64"
+
+
 @dataclass(frozen=True)
 class Arch:
     name: str
@@ -345,10 +360,30 @@ class Arch:
     batch_queue: str
     simd: str
     platform: str
-    # fg-labs/bwa-mem3 BASELINE_ARCH build-arg for this arch's image. Empty
-    # string means "no override" (use the upstream default). See
-    # config/archs.yaml for rationale.
+    # Host-locked image variant for this arch. Empty string means the portable
+    # image. On x86 it is the fg-labs/bwa-mem3 BASELINE_ARCH tier; on arm64 it
+    # must be a key of ARM_CPU_TUNINGS. See config/archs.yaml for rationale.
     baseline_arch: str = ""
+
+    def __post_init__(self) -> None:
+        """Reject a `baseline_arch` that the arch's platform cannot build.
+
+        An arm64 tuning on an x86 arch (or an x86 tier on arm64) names an image
+        tag that no build ever publishes, so the run would fail at image pull on
+        the worker, long after submit.
+
+        :raises ValueError: if `baseline_arch` does not match `platform`.
+        """
+        if not self.baseline_arch:
+            return
+        is_arm_tuning = self.baseline_arch in ARM_CPU_TUNINGS
+        is_arm_platform = self.platform == ARM_PLATFORM
+        if is_arm_tuning != is_arm_platform:
+            raise ValueError(
+                f"arch {self.name!r}: baseline_arch {self.baseline_arch!r} does not "
+                f"match platform {self.platform!r}. arm64 archs take one of "
+                f"{sorted(ARM_CPU_TUNINGS)}; x86 archs take a BASELINE_ARCH tier."
+            )
 
     def image_uri(self, *, ecr_repo_uri: str, fg_labs_sha: str) -> str:
         """Fully-qualified ECR image URI for this arch's worker jobs.
@@ -376,6 +411,11 @@ def resolve_worker_image_sha(fg_labs_sha: str, image_tag: str | None) -> str:
     pull a manually-tagged debug image while the run still writes outputs
     under its own `fg_labs_sha` S3 namespace. Falls back to `fg_labs_sha`,
     the common case, when unset.
+
+    `Arch.image_uri` still appends the arch's `baseline_arch` to the override,
+    so an override image must also exist as `<override>-<baseline_arch>` for
+    every host-locked arch in the run (today `<override>-neoverse-v2` for c8g /
+    c8g64), or those workers fail at image pull.
 
     :param fg_labs_sha: the run's own fg-labs SHA (``config["fg_labs_sha"]``).
     :param image_tag: an explicit override, or ``None`` when not set.

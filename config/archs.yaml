@@ -16,6 +16,18 @@
 # `-mprefer-vector-width=256` or pragma'd hot loops): set the relevant
 # archs to `avx512bw` here, build the image variant via
 # `cli build --baseline-arch avx512bw --push`, re-run.
+#
+# On arm64, `baseline_arch` is instead a core tuning from
+# `bwa_mem3_bench.workflow_config.ARM_CPU_TUNINGS`: `neoverse-v2` builds with the
+# fg-labs Makefile's `ARM_CPU=neoverse-v2 ARM_CACHE_LINE=64` and publishes
+# `<sha>-neoverse-v2`, a linux/arm64-only image. It targets Graviton4 and emits
+# SVE2, which Graviton3 (c7g, Neoverse-V1) lacks, so c7g stays on the portable
+# tag. Needs fg-labs/bwa-mem3 v0.10.0+ (the image build refuses older SHAs).
+#
+# m8g is Graviton4 too but deliberately stays portable: it is an arena leg, and
+# the arena's historical release arms are compiled generically in the base
+# image. Tuning only the candidate would fold the tuning into the arena's
+# release-over-release ratio.
 archs:
   c7g:
     instance_type: c7g.4xlarge
@@ -45,7 +57,7 @@ archs:
     batch_queue: bwa-mem3-bench-c8g
     simd: neon
     platform: linux/arm64
-    baseline_arch: ""
+    baseline_arch: neoverse-v2
   c7a:
     instance_type: c7a.4xlarge
     batch_queue: bwa-mem3-bench-c7a
@@ -118,7 +130,7 @@ archs:
     batch_queue: bwa-mem3-bench-c8g64
     simd: neon
     platform: linux/arm64
-    baseline_arch: ""
+    baseline_arch: neoverse-v2
 
 core_arch: c8g
 full_archs: [c8g, c7g, c6a, c7i, c7a, m7i]

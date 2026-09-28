@@ -83,7 +83,9 @@ All commands are `pixi run python -m bwa_mem3_bench.cli <subcommand>`.
    **The per-arch tags stay in ECR on purpose.** The manifest list references
    those images, and lifecycle rule 1 expires *untagged* images after 7 days, so
    untagging them post-join would break every image a week later. That is why
-   retention on the benchmark repo is 90 tagged images, not 30: 3 tags per SHA.
+   retention on the benchmark repo is 120 tagged images, not 30: 4 tags per SHA
+   (the manifest list, `-amd64`, `-arm64`, and the Graviton4 `-neoverse-v2`
+   variant built by the `build-tuned` job).
 
    **Credentials: there are none.** The workflow assumes
    `bwa-mem3-bench-image-build-role` via OIDC — GitHub mints a short-lived token
@@ -137,6 +139,9 @@ All commands are `pixi run python -m bwa_mem3_bench.cli <subcommand>`.
    aws ecr describe-images --repository-name bwa-mem3-bench \
        --image-ids imageTag=<sha> --query 'imageDetails[].imageDigest' --output text
    ```
+
+   Run the same check for `imageTag=<sha>-neoverse-v2` before any submit that
+   includes c8g or c8g64 — those workers pull the core-tuned variant, not `<sha>`.
 
    A "background build completed exit 0" notification is not a push-settled
    signal. The CI workflow's `join` step verifies the manifest list carries both
@@ -226,7 +231,7 @@ from `arch.baseline_arch` in `config/archs.yaml`:
   bound to `FG_LABS_SHA` + `aws_config.load().ecr_repo_uri`.
 - `workflow/rules/{align,compare}.smk` rules set
   `resources.container_image = lambda wc: image_for_arch(wc.arch)`.
-- The plumbing is wired and tested but **every arch is currently parked
+- The plumbing is wired and tested but **every x86 arch is currently parked
   at `baseline_arch=""`** — empirical data on this workload shows the
   fg-labs/bwa-mem3 `BASELINE_ARCH=avx512bw` build is consistently
   slower on Zen 4 (c7a +12-17%) and only mixed/wash on Sapphire Rapids
@@ -238,6 +243,21 @@ from `arch.baseline_arch` in `config/archs.yaml`:
   the relevant arch's `baseline_arch` field, build that variant via
   `cli build --baseline-arch avx512bw --push`, re-submit. No further
   workflow / plugin changes needed.
+- **Graviton4 (c8g, c8g64) is NOT parked**: `baseline_arch: neoverse-v2`, a key
+  of `ARM_CPU_TUNINGS` in `workflow_config.py`. `cli build --baseline-arch
+  neoverse-v2` builds linux/arm64 only with the fg-labs Makefile's
+  `ARM_CPU=neoverse-v2 ARM_CACHE_LINE=64` and pushes `<sha>-neoverse-v2`; the
+  CI `build-tuned` job does this on every `per-sha` build. A submit whose SHA
+  lacks that tag fails at image pull on c8g. Three traps: (1) `-mcpu=neoverse-v2`
+  emits SVE2, which Graviton3 lacks, so c7g stays portable; (2) m8g, though
+  Graviton4, stays portable because the arena's historical arms are generic
+  builds and tuning only the candidate would skew the release-over-release
+  ratio; (3) the Makefile knobs landed in fg-labs v0.10.0, and the Dockerfile
+  refuses a tuned build of an older SHA rather than silently shipping a generic
+  binary under the tuned tag. The Docker ARGs are `TUNE_ARM_CPU` /
+  `TUNE_ARM_CACHE_LINE`, NOT the make names: BuildKit exports ARGs into the RUN
+  environment, make imports the environment, and an empty `ARM_CACHE_LINE`
+  there defeats the Makefile's `?= 128` and fails the portable arm64 build.
 
 ## Data locations
 

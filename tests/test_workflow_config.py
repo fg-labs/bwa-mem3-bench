@@ -104,18 +104,45 @@ def test_load_config_returns_expected_archs() -> None:
 
 
 def test_arch_baseline_arch_field() -> None:
-    """Every arch currently uses the portable image (`baseline_arch=""`).
+    """Every x86 arch uses the portable image; Graviton4 sweep archs are core-tuned.
 
-    The per-rule image plumbing is wired end-to-end and tested, but the
-    AVX-512BW image variant produced by `BASELINE_ARCH=avx512bw` is not
+    The AVX-512BW image variant produced by `BASELINE_ARCH=avx512bw` is not
     a perf win on this workload (per the fg-labs/bwa-mem3 AVX-512
     baseline-build Phase C benchmarking). When upstream lands a fix,
     set c7a / c7i / m7i back to "avx512bw" here.
+
+    c7g (Graviton3) must stay portable: `-mcpu=neoverse-v2` emits SVE2, which
+    it lacks. m8g (Graviton4) stays portable so the arena's candidate is built
+    the same way as its generically-compiled historical arms.
     """
     cfg = load_config(CONFIG_DIR)
-    for arch in ("c6a", "c7a", "c7i", "c7g", "c8g", "m7i"):
+    for arch in ("c6a", "c7a", "c7i", "c7g", "m7i", "m8a", "m8g"):
         assert cfg.archs[arch].baseline_arch == "", (
             f"{arch}.baseline_arch should be parked at ''; got {cfg.archs[arch].baseline_arch!r}"
+        )
+    for arch in ("c8g", "c8g64"):
+        assert cfg.archs[arch].baseline_arch == "neoverse-v2", arch
+
+
+def test_arch_rejects_a_baseline_arch_its_platform_cannot_build() -> None:
+    """A mismatched tuning names a tag no build publishes; fail at config load."""
+    with pytest.raises(ValueError, match="does not match platform"):
+        Arch(
+            name="c6a",
+            instance_type="c6a.4xlarge",
+            batch_queue="q",
+            simd="avx2",
+            platform="linux/amd64",
+            baseline_arch="neoverse-v2",
+        )
+    with pytest.raises(ValueError, match="does not match platform"):
+        Arch(
+            name="c8g",
+            instance_type="c8g.4xlarge",
+            batch_queue="q",
+            simd="neon",
+            platform="linux/arm64",
+            baseline_arch="avx512bw",
         )
 
 
@@ -123,14 +150,17 @@ _TEST_ECR = "550079046206.dkr.ecr.us-east-1.amazonaws.com/bwa-mem3-bench"
 _TEST_SHA = "abcdef0"
 
 
-def test_arch_image_uri_all_archs_use_portable_tag_today() -> None:
-    """Every arch resolves to the bare `<sha>` portable tag right now —
-    matches the parked `baseline_arch=""` config (see test above)."""
+def test_arch_image_uri_matches_the_configured_variants() -> None:
+    """Parked archs resolve to the bare `<sha>` portable tag; Graviton4 sweep
+    archs to the `<sha>-neoverse-v2` core-tuned tag (see test above)."""
     cfg = load_config(CONFIG_DIR)
-    for arch in ("c6a", "c7a", "c7i", "c7g", "c8g", "m7i"):
+    for arch in ("c6a", "c7a", "c7i", "c7g", "m7i"):
         uri = cfg.archs[arch].image_uri(ecr_repo_uri=_TEST_ECR, fg_labs_sha=_TEST_SHA)
         assert uri == f"{_TEST_ECR}:{_TEST_SHA}", f"{arch}: {uri}"
         assert "-" not in uri.split(":")[-1], f"{arch} unexpected suffix in {uri}"
+    for arch in ("c8g", "c8g64"):
+        uri = cfg.archs[arch].image_uri(ecr_repo_uri=_TEST_ECR, fg_labs_sha=_TEST_SHA)
+        assert uri == f"{_TEST_ECR}:{_TEST_SHA}-neoverse-v2", f"{arch}: {uri}"
 
 
 def test_arch_image_uri_with_baseline_arch_set_appends_suffix() -> None:

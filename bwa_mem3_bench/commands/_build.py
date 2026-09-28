@@ -11,6 +11,7 @@ from bwa_mem3_bench import REPO_ROOT
 from bwa_mem3_bench import minibwa_sha as _pinned_minibwa_sha
 from bwa_mem3_bench.base_image import base_image_tag, base_image_uri, base_pins
 from bwa_mem3_bench.commands._run import run_cmd
+from bwa_mem3_bench.workflow_config import ARM_CPU_TUNINGS, ARM_PLATFORM
 
 #: Platforms an image must carry to run on the whole bench fleet: x86 (c6a/c7i/c7a)
 #: and Graviton (c7g/c8g). Only meaningful for images that get pushed to ECR.
@@ -271,10 +272,17 @@ def sha_image_tag(
 ) -> str:
     """Return the tag a per-SHA build publishes.
 
-    Suffix order is `baseline_arch`, then `make_target`, then `arch_tag` -- arch
-    last, so stripping it off the end yields the tag the manifest list will carry.
-    A join step can therefore name its per-architecture sources by appending to
-    the final tag rather than splicing into the middle of it.
+    Suffix order is `make_target`, then `baseline_arch`, then `arch_tag`.
+
+    `make_target` comes first because that is how workers compose the tag they
+    pull: `submit --make-target` makes the coordinator's image tag
+    `<sha>-<make_target>` (docker/coordinator-entrypoint.sh), and
+    `Arch.image_uri` then appends `-<baseline_arch>`. Any other order publishes
+    a host-locked build-variant image under a tag no worker requests.
+
+    `arch_tag` goes last, so stripping it off the end yields the tag the manifest
+    list will carry. A join step can therefore name its per-architecture sources
+    by appending to the final tag rather than splicing into the middle of it.
 
     Shared with the `image-tag` subcommand so that a caller which needs to know
     the tag in advance -- the manifest-list join in
@@ -282,14 +290,15 @@ def sha_image_tag(
     of reimplementing the suffix rules and drifting from them.
 
     :param fg_labs_sha: fg-labs/bwa-mem3 commit SHA.
-    :param baseline_arch: x86 SIMD tier the image is host-locked to, if any.
+    :param baseline_arch: x86 SIMD tier or arm64 core tuning the image is
+        host-locked to, if any.
     :param make_target: fg-labs/bwa-mem3 Makefile target, if not the default.
     :param arch_tag: architecture name, when one architecture is built per push.
     :return: the tag, sans repository and sans a leading colon.
     :raises ValueError: if `fg_labs_sha` is not a full 40-char hex SHA.
     """
     _check_full_sha("fg_labs_sha", fg_labs_sha)
-    suffix_parts = [part for part in (baseline_arch, make_target, arch_tag) if part]
+    suffix_parts = [part for part in (make_target, baseline_arch, arch_tag) if part]
     suffix = "-" + "-".join(suffix_parts) if suffix_parts else ""
     return f"{fg_labs_sha}{suffix}"
 
@@ -312,7 +321,8 @@ def image_tag(
 
     :param fg_labs_sha: fg-labs/bwa-mem3 commit SHA. Required unless ``base``.
     :param base: print the builder base image's content-addressed tag instead.
-    :param baseline_arch: x86 SIMD tier suffix, matching ``build``'s.
+    :param baseline_arch: x86 SIMD tier or arm64 core-tuning suffix, matching
+        ``build``'s.
     :param make_target: Makefile target suffix, matching ``build``'s.
     :raises ValueError: if neither or both of ``fg_labs_sha`` and ``base`` are given.
     """
@@ -360,6 +370,32 @@ def _check_arch_tag(arch_tag: str, resolved_platforms: str) -> None:
             f"which builds {built}. Joining a mislabelled push into a manifest list "
             "yields an image that runs on neither architecture reliably."
         )
+
+
+def _resolve_platforms(platforms: str | None, *, push: bool, baseline_arch: str) -> str:
+    """Return the buildx platform value for a per-SHA build.
+
+    A core-tuned arm64 build has exactly one valid platform, so it defaults to
+    that rather than to the fleet: the amd64 half of a fleet build would ignore
+    the tuning and push an image nothing ever pulls.
+
+    :param platforms: the explicit ``--platforms`` value, if any.
+    :param push: whether the build is pushed (selects the fleet default).
+    :param baseline_arch: the x86 tier or arm64 core tuning being built.
+    :return: the resolved platform value.
+    :raises ValueError: if an arm64 core tuning is asked to build another platform.
+    """
+    if baseline_arch not in ARM_CPU_TUNINGS:
+        # Short-circuited, so `_native_platform()` runs ONLY when no override was
+        # given (see `build`).
+        return platforms or (FLEET_PLATFORMS if push else _native_platform())
+    resolved = platforms or ARM_PLATFORM
+    if resolved != ARM_PLATFORM:
+        raise ValueError(
+            f"--baseline-arch {baseline_arch} is an arm64 core tuning and builds "
+            f"only {ARM_PLATFORM}, but --platforms is {resolved}."
+        )
+    return resolved
 
 
 def build(  # noqa: PLR0913
@@ -413,6 +449,13 @@ def build(  # noqa: PLR0913
         is not a perf win on this workload (see the fg-labs/bwa-mem3 AVX-512
         baseline-build Phase C benchmarking). The flag is preserved for
         re-enablement once upstream lands a fix.
+
+        A key of ``ARM_CPU_TUNINGS`` (e.g. ``neoverse-v2``) instead builds a
+        core-tuned arm64 image: it passes the fg-labs Makefile's ``ARM_CPU``
+        and ``ARM_CACHE_LINE``, builds ``linux/arm64`` only (the default when
+        ``platforms`` is unset; any other platform is refused), and tags
+        ``<sha>-<tuning>`` with ``:latest`` left alone. The tuned binary can
+        SIGILL on older ARM cores, so it is never the portable arm64 image.
     :param make_target: fg-labs/bwa-mem3 Makefile target to invoke when
         building. Empty (default) runs ``make`` (target ``all``) and installs
         ``bwa-mem3``. ``lto-build`` runs ``make lto-build`` and installs the
@@ -459,7 +502,8 @@ def build(  # noqa: PLR0913
     # given. Evaluating it eagerly would make an unmappable host arch raise even
     # when `--platforms` was passed -- which is precisely the escape hatch that
     # error message recommends, so it has to still work on such a host.
-    resolved_platforms = platforms or (FLEET_PLATFORMS if push else _native_platform())
+    arm_cache_line = ARM_CPU_TUNINGS.get(baseline_arch)
+    resolved_platforms = _resolve_platforms(platforms, push=push, baseline_arch=baseline_arch)
 
     # `--load` exports through the docker exporter, which writes into the local
     # daemon's image store -- and that store has no concept of a manifest list. A
@@ -521,10 +565,10 @@ def build(  # noqa: PLR0913
     ):
         _ecr_login(registry, dry_run=dry_run)
 
-    # Suffix order is baseline_arch first, make_target second, so
-    # e.g. `--baseline-arch=avx512bw --make-target=lto-build` produces
-    # `<sha>-avx512bw-lto-build` (matches the order the args appear in
-    # the conceptual build pipeline: arch selection then build flags).
+    # Suffix order is make_target first, baseline_arch second, so e.g.
+    # `--baseline-arch=avx512bw --make-target=lto-build` produces
+    # `<sha>-lto-build-avx512bw` -- the tag a worker composes (see
+    # `sha_image_tag`).
     sha_tag = sha_image_tag(
         fg_labs_sha=fg_labs_sha,
         baseline_arch=baseline_arch,
@@ -550,7 +594,13 @@ def build(  # noqa: PLR0913
         "--build-arg",
         f"FG_LABS_SHA={fg_labs_sha}",
         "--build-arg",
-        f"BASELINE_ARCH={baseline_arch}",
+        # An arm64 tuning travels as TUNE_ARM_CPU, not BASELINE_ARCH, which the
+        # Dockerfile reads as an x86 tier.
+        f"BASELINE_ARCH={'' if arm_cache_line is not None else baseline_arch}",
+        "--build-arg",
+        f"TUNE_ARM_CPU={baseline_arch if arm_cache_line is not None else ''}",
+        "--build-arg",
+        f"TUNE_ARM_CACHE_LINE={arm_cache_line if arm_cache_line is not None else ''}",
         "--build-arg",
         f"FG_LABS_MAKE_TARGET={make_target}",
         "--build-arg",

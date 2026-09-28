@@ -148,8 +148,9 @@ def test_build_unsupported_make_target_rejected() -> None:
 
 def test_build_baseline_arch_and_make_target_compose_suffix_order() -> None:
     """Combined ``--baseline-arch avx512bw --make-target lto-build`` composes
-    the suffix as ``-avx512bw-lto-build`` (arch first, build flag second —
-    matches the order they appear in the conceptual build pipeline). Both
+    the suffix as ``-lto-build-avx512bw`` (build flag first, arch second —
+    the order workers compose it: the coordinator's ``<sha>-<make_target>``
+    image tag, then ``Arch.image_uri``'s ``-<baseline_arch>``). Both
     build-args are passed and ``:latest`` is suppressed."""
     r = _run(
         [
@@ -168,5 +169,5 @@ def test_build_baseline_arch_and_make_target_compose_suffix_order() -> None:
     out = r.stdout
     assert "BASELINE_ARCH=avx512bw" in out
     assert "FG_LABS_MAKE_TARGET=lto-build" in out
-    assert ":abcdef1234567890abcdef1234567890abcdef12-avx512bw-lto-build" in out
+    assert ":abcdef1234567890abcdef1234567890abcdef12-lto-build-avx512bw" in out
     assert ":latest" not in out

@@ -128,19 +128,21 @@ class StorageStack(cdk.Stack):
                 ecr.LifecycleRule(
                     rule_priority=2,
                     description=(
-                        "Keep last 90 tagged images (~30 fg-labs SHAs of "
-                        "history at 3 tags each, plus tier-suffixed variants)"
+                        "Keep last 120 tagged images (~30 fg-labs SHAs of "
+                        "history at 4 tags each)"
                     ),
                     tag_status=ecr.TagStatus.ANY,
-                    # 90, not 30, because the CI build publishes THREE tags per
-                    # SHA: the manifest list plus one per-architecture image
-                    # (`<sha>-amd64`, `<sha>-arm64`). The per-arch tags cannot be
+                    # 120, not 30, because the CI build publishes FOUR tags per
+                    # SHA: the manifest list, one per-architecture image
+                    # (`<sha>-amd64`, `<sha>-arm64`), and the Graviton4 core-tuned
+                    # variant (`<sha>-neoverse-v2`) that the CI `build-tuned` job
+                    # publishes for c8g / c8g64. The per-arch tags cannot be
                     # removed after the join -- the manifest list references
                     # those images, and rule 1 above reaps untagged images after
                     # 7 days, so untagging them would break every image a week
                     # later. `tagStatus: ANY` counts images, so 30 would have cut
-                    # real history from ~30 SHAs to ~10.
-                    max_image_count=90,
+                    # real history from ~30 SHAs to ~7.
+                    max_image_count=120,
                 ),
             ],
         )

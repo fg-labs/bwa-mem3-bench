@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 import shlex
 
-from bwa_mem3_bench import aws_config
+from bwa_mem3_bench import REPO_ROOT, aws_config
 from bwa_mem3_bench.arena_ladder import ladder_problems
 from bwa_mem3_bench.golden import missing_golden_cells
 from bwa_mem3_bench.release_allowances import (
@@ -28,6 +28,7 @@ from bwa_mem3_bench.release_allowances import (
     load_allowances,
     sha_prefix_match,
 )
+from bwa_mem3_bench.workflow_config import load_config
 
 _FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 
@@ -165,6 +166,18 @@ def _golden_complete_check(golden_sha: str) -> tuple[bool, str]:
     return True, label
 
 
+def _routed_variants() -> list[str]:
+    """The host-locked image variants some arch in ``config/archs.yaml`` pulls.
+
+    Read from the config rather than from ``ARM_CPU_TUNINGS``: that table says
+    which tunings CAN be built, while a bless needs exactly the ones workers will
+    request -- including an x86 ``BASELINE_ARCH`` tier, should one be re-enabled.
+    The CI ``build-tuned`` matrix is pinned to the same set by a test.
+    """
+    archs = load_config(REPO_ROOT / "config").archs.values()
+    return sorted({arch.baseline_arch for arch in archs if arch.baseline_arch})
+
+
 def _plan(fg_labs_sha: str, golden_ref_sha: str) -> list[str]:
     """The ordered bless steps, with concrete commands.
 
@@ -189,9 +202,15 @@ def _plan(fg_labs_sha: str, golden_ref_sha: str) -> list[str]:
         "docs/data-setup.md.",
         f"If the arena ladder changed: {cli} build-base --image-name <ecr>-base --push",
         f"Build + push the per-SHA image: {cli} build --fg-labs-sha {sha} "
-        "--image-name <ecr> --push",
+        "--image-name <ecr> --push  (or the build-image CI workflow, which also "
+        "builds the host-locked variants below)",
+        *(
+            f"Build + push the {variant} variant: {cli} build --fg-labs-sha {sha} "
+            f"--image-name <ecr> --baseline-arch {variant} --push"
+            for variant in _routed_variants()
+        ),
         f"Verify the ECR push settled and match the digest buildx printed "
-        f"(aws ecr describe-images ... imageTag={sha}).",
+        f"(aws ecr describe-images ... imageTag={sha}, and each -<variant> tag).",
         f"Submit the release matrix: {cli} submit --fg-labs-sha {sha} "
         f"--target bless_release --golden-ref-sha {golden}  (auto-sets --reps to "
         "reps_release; a driver that bypasses `cli submit` must pass reps and archs itself)",

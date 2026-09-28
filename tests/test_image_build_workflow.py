@@ -22,12 +22,13 @@ import yaml
 from bwa_mem3_bench import REPO_ROOT
 from bwa_mem3_bench.base_image import BASE_REPO_SUFFIX
 from bwa_mem3_bench.commands import _build as build_module
+from bwa_mem3_bench.workflow_config import Arch, load_config
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "build-image.yml"
 
-#: Jobs that check the repository out: `prepare` (resolves the tag) and each
-#: `build` matrix leg. The join job needs no source.
-_EXPECTED_CHECKOUT_JOBS = 2
+#: Jobs that check the repository out: `prepare` (resolves the tag), each
+#: `build` matrix leg, and each `build-tuned` leg. The join job needs no source.
+_EXPECTED_CHECKOUT_JOBS = 3
 
 
 def _workflow() -> dict:
@@ -35,8 +36,8 @@ def _workflow() -> dict:
     return yaml.safe_load(WORKFLOW.read_text())
 
 
-def _pushed_tags(**build_kwargs: object) -> list[str]:
-    """Run `build()` with `run_cmd` stubbed and return every `--tag` value."""
+def _buildx_command(**build_kwargs: object) -> list[str]:
+    """Run `build()` with `run_cmd` stubbed and return the buildx command."""
     captured: list[list[str]] = []
 
     def _capture(cmd: list[str], *, dry_run: bool, cwd: Path | None = None) -> None:  # noqa: ARG001
@@ -54,8 +55,12 @@ def _pushed_tags(**build_kwargs: object) -> list[str]:
         )
     finally:
         monkeypatch.undo()
+    return next(c for c in captured if "buildx" in c)
 
-    buildx = next(c for c in captured if "buildx" in c)
+
+def _pushed_tags(**build_kwargs: object) -> list[str]:
+    """Run `build()` with `run_cmd` stubbed and return every `--tag` value."""
+    buildx = _buildx_command(**build_kwargs)
     return [arg for flag, arg in pairwise(buildx) if flag == "--tag"]
 
 
@@ -121,8 +126,32 @@ def test_arch_tag_goes_last_so_stripping_it_yields_the_manifest_list_tag() -> No
             make_target="lto-build",
             arch_tag="amd64",
         )
-        == f"{'a' * 40}-avx512bw-lto-build-amd64"
+        == f"{'a' * 40}-lto-build-avx512bw-amd64"
     )
+
+
+def test_a_variant_push_is_the_tag_a_worker_pulls() -> None:
+    """The build and the worker compose a variant tag independently; they must agree.
+
+    `submit --make-target lto-build` makes the coordinator's image tag
+    `<sha>-lto-build`, and `Arch.image_uri` then appends the arch's
+    `baseline_arch`. A different suffix order on the build side publishes an image
+    no c8g worker ever finds, and the run dies at image pull.
+    """
+    sha = "a" * 40
+    arch = Arch(
+        name="c8g",
+        instance_type="c8g.4xlarge",
+        batch_queue="q",
+        simd="neon",
+        platform="linux/arm64",
+        baseline_arch="neoverse-v2",
+    )
+    pulled = arch.image_uri(ecr_repo_uri="test", fg_labs_sha=f"{sha}-lto-build")
+    pushed = build_module.sha_image_tag(
+        fg_labs_sha=sha, baseline_arch="neoverse-v2", make_target="lto-build"
+    )
+    assert pulled == f"test:{pushed}"
 
 
 def test_image_tag_command_agrees_with_what_build_pushes(
@@ -172,6 +201,81 @@ def test_every_fleet_platform_is_built_on_a_native_runner() -> None:
         )
 
 
+def test_an_arm_core_tuning_builds_arm64_only_under_its_own_tag() -> None:
+    """The tuned binary can SIGILL on Graviton3, so it must never be portable.
+
+    It defaults to arm64 even on a push (whose ordinary default is the whole
+    fleet), carries the Makefile knobs as TUNE_* build-args rather than as an x86
+    BASELINE_ARCH tier, and leaves `:latest` alone.
+    """
+    cmd = _buildx_command(baseline_arch="neoverse-v2", push=True)
+    assert cmd[cmd.index("--platform") + 1] == "linux/arm64"
+    build_args = {arg for flag, arg in pairwise(cmd) if flag == "--build-arg"}
+    assert {
+        "BASELINE_ARCH=",
+        "TUNE_ARM_CPU=neoverse-v2",
+        "TUNE_ARM_CACHE_LINE=64",
+    } <= build_args
+    tags = [arg for flag, arg in pairwise(cmd) if flag == "--tag"]
+    assert tags == [f"test:{'0' * 40}-neoverse-v2"]
+
+
+def test_a_portable_build_passes_empty_arm_tuning() -> None:
+    """Explicitly empty, so the Dockerfile takes the generic arm64 path."""
+    cmd = _buildx_command(push=True)
+    build_args = {arg for flag, arg in pairwise(cmd) if flag == "--build-arg"}
+    assert {"TUNE_ARM_CPU=", "TUNE_ARM_CACHE_LINE="} <= build_args
+
+
+@pytest.mark.parametrize("platforms", ["linux/amd64", build_module.FLEET_PLATFORMS])
+def test_an_arm_core_tuning_refuses_any_other_platform(platforms: str) -> None:
+    """An amd64 half would ignore the tuning and publish an image nothing pulls."""
+    with pytest.raises(ValueError, match="arm64 core tuning"):
+        _buildx_command(baseline_arch="neoverse-v2", platforms=platforms, push=True)
+
+
+def test_the_dockerfile_consumes_the_tuning_build_args_build_passes() -> None:
+    """The ARG names live in two places; a rename on one side builds generic silently.
+
+    buildx only *warns* about a `--build-arg` no `ARG` consumes, so a mismatch
+    publishes a generic binary under the `-<tuning>` tag. The Dockerfile must also
+    never declare the make variable names themselves: BuildKit exports ARGs into
+    the RUN environment, and an empty `ARM_CACHE_LINE` there defeats the fg-labs
+    Makefile's `?= 128` and fails the portable arm64 build.
+    """
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
+    declared = set(re.findall(r"^ARG\s+([A-Za-z_]+)", dockerfile, re.MULTILINE))
+    passed = {
+        arg.split("=", 1)[0]
+        for flag, arg in pairwise(_buildx_command(baseline_arch="neoverse-v2", push=True))
+        if flag == "--build-arg"
+    }
+    assert {"TUNE_ARM_CPU", "TUNE_ARM_CACHE_LINE"} <= passed
+    assert passed <= declared, f"build-args no ARG consumes: {sorted(passed - declared)}"
+    assert not {"ARM_CPU", "ARM_CACHE_LINE"} & declared
+
+
+def test_every_configured_variant_is_built_by_ci_on_a_native_runner() -> None:
+    """A worker pulls `<sha>-<baseline_arch>`; if CI never builds it, the pull fails.
+
+    That failure lands on a worker long after submit, so the tuned matrix must
+    cover exactly the variants `config/archs.yaml` routes an arch to.
+    """
+    archs = load_config(REPO_ROOT / "config").archs.values()
+    wanted = {(a.baseline_arch, a.platform) for a in archs if a.baseline_arch}
+    matrix = _workflow()["jobs"]["build-tuned"]["strategy"]["matrix"]["include"]
+    built = {(leg["tuning"], leg["platform"]) for leg in matrix}
+    assert built == wanted
+    native_runner_platform = {"ubuntu-24.04": "linux/amd64", "ubuntu-24.04-arm": "linux/arm64"}
+    for leg in matrix:
+        assert native_runner_platform[leg["runner"]] == leg["platform"], leg
+
+
+def test_a_tuned_variant_cannot_block_the_portable_manifest_list() -> None:
+    """A variant failure (e.g. a pre-v0.10.0 SHA) must not stop the join."""
+    assert "build-tuned" not in _workflow()["jobs"]["join"]["needs"]
+
+
 def test_the_workflow_is_never_triggered_by_a_pull_request() -> None:
     """This workflow pushes to ECR, and the repository is public.
 
@@ -186,7 +290,7 @@ def test_only_the_build_and_join_jobs_can_mint_an_oidc_token() -> None:
     """`id-token: write` is what allows assuming the role, so it stays narrow."""
     jobs = _workflow()["jobs"]
     assert jobs["prepare"].get("permissions", {}).get("id-token") is None
-    for name in ("build", "join"):
+    for name in ("build", "build-tuned", "join"):
         assert jobs[name]["permissions"]["id-token"] == "write"
 
 
@@ -315,7 +419,7 @@ def test_every_workflow_pins_a_pixi_that_can_read_the_lockfile() -> None:
         )
 
 
-@pytest.mark.parametrize("job", ["prepare", "build", "join"])
+@pytest.mark.parametrize("job", ["prepare", "build", "build-tuned", "join"])
 def test_no_run_script_interpolates_an_expression(job: str) -> None:
     """No `${{ ... }}` anywhere inside a `run:` body, in any job.
 
@@ -363,7 +467,7 @@ def test_the_make_target_sentinel_is_translated_wherever_it_reaches_a_command() 
     allowlist, so this fails closed rather than mis-building -- but it would fail
     only after the runner had spun up, so it is pinned here instead.
     """
-    for job in ("prepare", "build"):
+    for job in ("prepare", "build", "build-tuned"):
         script = _run_scripts(job)
         if "MAKE_TARGET" not in script:
             continue
