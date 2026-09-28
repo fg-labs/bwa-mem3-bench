@@ -15,58 +15,115 @@ and the `bless-release` preflight use to catch a partial copy.
 
 from __future__ import annotations
 
+import os
+import queue
 import re
 import subprocess
+import threading
+from pathlib import PurePosixPath
+from typing import Any
 
-# A `PRE <name>/` directory row from `aws s3 ls` splits into exactly two tokens.
-_PRE_ROW_PARTS = 2
+import boto3
+import botocore.config
 
-# Cap the golden listing so a network/DNS stall can't hang workflow init.
-_LS_TIMEOUT_SECONDS = 30
+from bwa_mem3_bench import aws_config
+
+# Wall-clock cap on the whole golden listing. It runs while the Snakefile parses
+# (on the coordinator and again on every worker), so a stalled S3 endpoint must
+# fail the parse promptly rather than hold it. Socket timeouts alone cannot give
+# this bound: they apply per read and per attempt, and not to DNS resolution.
+_LS_WALL_CLOCK_SECONDS = 30
+
+# Per-attempt socket limits, kept well inside the wall-clock cap so a transient
+# failure can still be retried within it.
+_LS_CONNECT_TIMEOUT_SECONDS = 5
+_LS_READ_TIMEOUT_SECONDS = 10
+_LS_TOTAL_ATTEMPTS = 2
+
+# A golden is keyed by the full 40-hex SHA it blessed, optionally with a
+# `-<build_variant>` suffix. Anything else can never match a golden prefix.
+_GOLDEN_SHA_RE = re.compile(r"[0-9a-f]{40}(-[A-Za-z0-9._-]+)?")
 
 
-def parse_golden_samples(ls_output: str) -> frozenset[str]:
-    """Parse non-recursive ``aws s3 ls golden/fg-labs-<sha>/`` output to sample names.
+def _s3_client() -> Any:
+    """An S3 client for listings made while the workflow parses.
 
-    A non-recursive listing of a prefix renders each immediate subprefix as a
-    ``PRE <name>/`` line. Each such ``<name>`` is a per-sample subdirectory of the
-    golden; we ignore any non-``PRE`` rows (stray objects, blank lines).
+    The region is resolved like the ``aws`` CLI this replaced (``AWS_REGION``, then
+    ``AWS_DEFAULT_REGION`` and the profile via boto3), falling back to the
+    configured deploy region. Empty values count as unset.
     """
+    config = botocore.config.Config(
+        connect_timeout=_LS_CONNECT_TIMEOUT_SECONDS,
+        read_timeout=_LS_READ_TIMEOUT_SECONDS,
+        retries={"total_max_attempts": _LS_TOTAL_ATTEMPTS, "mode": "standard"},
+    )
+    region = (
+        os.environ.get("AWS_REGION")
+        or boto3.session.Session().region_name
+        or aws_config.load().region
+    )
+    return boto3.client("s3", region_name=region, config=config)
+
+
+def _list_sample_prefixes(bucket: str, prefix: str) -> frozenset[str]:
+    """The immediate sub-prefix names of ``s3://<bucket>/<prefix>``."""
     samples: set[str] = set()
-    for line in ls_output.splitlines():
-        parts = line.split()
-        if len(parts) == _PRE_ROW_PARTS and parts[0] == "PRE":
-            samples.add(parts[1].rstrip("/"))
+    pages = (
+        _s3_client()
+        .get_paginator("list_objects_v2")
+        .paginate(Bucket=bucket, Prefix=prefix, Delimiter="/")
+    )
+    for page in pages:
+        for entry in page.get("CommonPrefixes", []):
+            name = PurePosixPath(entry.get("Prefix", "")).name
+            if name:
+                samples.add(name)
     return frozenset(samples)
 
 
 def golden_backed_samples(bucket: str, golden_ref_sha: str) -> frozenset[str]:
     """Sample names that have a blessed golden under ``golden/fg-labs-<sha>/``.
 
+    Lists one level of the prefix with boto3 rather than the ``aws`` CLI: this runs
+    while the Snakefile parses, and a coordinator need not ship the CLI (a
+    control plane's Snakemake runtime carries boto3 but no ``aws`` binary).
+
     Returns an empty set when the golden prefix has no entries (e.g. an
-    unblessed SHA) — that is a benign "nothing to compare against", not an error.
-    A genuine S3 failure (bad credentials, region mismatch) writes to stderr and
-    is raised, since silently treating it as "no samples" would skip Gate #2
-    without anyone noticing.
+    unblessed SHA) -- that is a benign "nothing to compare against", not an error.
+    Everything else is raised, since silently treating it as "no samples" would
+    skip Gate #2 without anyone noticing: a ``golden_ref_sha`` that is not a full
+    SHA (a short SHA or a tag can never match a golden prefix), any S3 failure
+    (credentials, missing bucket, region), and a listing that does not finish
+    within ``_LS_WALL_CLOCK_SECONDS``.
     """
-    prefix = f"s3://{bucket}/golden/fg-labs-{golden_ref_sha}/"
+    if not _GOLDEN_SHA_RE.fullmatch(golden_ref_sha):
+        raise RuntimeError(
+            f"golden_ref_sha {golden_ref_sha!r} is not a full 40-hex SHA (optionally "
+            f"with a -<build_variant> suffix); a golden is keyed by the full SHA, so "
+            f"this would silently match no golden and skip the vs-golden gate"
+        )
+    prefix = f"golden/fg-labs-{golden_ref_sha}/"
+    uri = f"s3://{bucket}/{prefix}"
+    result: queue.Queue[frozenset[str] | BaseException] = queue.Queue(maxsize=1)
+
+    def _list() -> None:
+        try:
+            result.put(_list_sample_prefixes(bucket, prefix))
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the calling thread
+            result.put(exc)
+
+    # A daemon thread, so a listing still stalled when the parse fails cannot hold
+    # the interpreter open at exit.
+    threading.Thread(target=_list, name="golden-listing", daemon=True).start()
     try:
-        proc = subprocess.run(
-            ["aws", "s3", "ls", prefix],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=_LS_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired as exc:
+        outcome = result.get(timeout=_LS_WALL_CLOCK_SECONDS)
+    except queue.Empty:
         raise RuntimeError(
-            f"aws s3 ls timed out after {_LS_TIMEOUT_SECONDS}s for {prefix}"
-        ) from exc
-    if proc.returncode != 0 and proc.stderr.strip():
-        raise RuntimeError(
-            f"aws s3 ls failed for {prefix} (exit {proc.returncode}): {proc.stderr.strip()}"
-        )
-    return parse_golden_samples(proc.stdout)
+            f"listing {uri} did not finish within {_LS_WALL_CLOCK_SECONDS}s"
+        ) from None
+    if isinstance(outcome, BaseException):
+        raise RuntimeError(f"listing {uri} failed: {outcome}") from outcome
+    return outcome
 
 
 # A full `runs/<sha>/` listing covers every sample x arch x rep of a bless sweep,
@@ -135,7 +192,9 @@ def list_recursive(uri: str) -> str:
     """Return ``aws s3 ls --recursive <uri>`` output, raising on a real S3 failure.
 
     An absent prefix is an empty listing (``aws`` exits 1 with no stderr), not an
-    error -- the same convention as :func:`golden_backed_samples`.
+    error -- the same contract :func:`golden_backed_samples` keeps. This one still
+    shells out to the ``aws`` CLI: it runs only from the bless commands on an
+    operator's machine, never while the workflow parses.
     """
     try:
         proc = subprocess.run(
