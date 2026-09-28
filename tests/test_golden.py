@@ -1,82 +1,171 @@
 """Tests for the golden-sample discovery helpers (Gate #2 vs-golden scoping)."""
 
+import dataclasses
 import subprocess
+import threading
+import time
+from collections.abc import Iterator
+from typing import Any
 from unittest.mock import patch
 
+import botocore.exceptions
 import pytest
 
 from bwa_mem3_bench import golden
 
+_SHA = "d" * 40
 
-def test_parse_golden_samples_extracts_pre_prefixes() -> None:
-    """`PRE <name>/` rows become bare sample names; trailing slash stripped."""
-    ls_output = (
-        "                           PRE meth-twist-emseq-5M/\n"
-        "                           PRE panel-agilent-qxt-5M/\n"
-        "                           PRE wgs-5M/\n"
+# How soon a wall-clock-capped listing must fail once its (test) cap is hit.
+_PROMPT_FAILURE_SECONDS = 2
+
+
+class _FakePaginator:
+    """A `list_objects_v2` paginator yielding canned pages, recording its kwargs.
+
+    Pages are yielded lazily, and an exception is raised mid-iteration, the way a
+    real botocore PageIterator fails: it only calls S3 as it is iterated.
+    """
+
+    def __init__(self, pages: list[dict[str, object] | BaseException]) -> None:
+        self.pages = pages
+        self.kwargs: dict[str, object] = {}
+
+    def paginate(self, **kwargs: object) -> Iterator[dict[str, object]]:
+        self.kwargs = kwargs
+        for page in self.pages:
+            if isinstance(page, BaseException):
+                raise page
+            yield page
+
+
+def _patch_pages(pages: list[dict[str, object] | BaseException]) -> tuple[_FakePaginator, Any]:
+    paginator = _FakePaginator(pages)
+    client = type("C", (), {"get_paginator": lambda self, name: paginator})()
+    return paginator, patch.object(golden, "_s3_client", return_value=client)
+
+
+def test_golden_backed_samples_lists_one_level_of_sample_prefixes() -> None:
+    """Each immediate sub-prefix of the golden is a sample, across pages; objects are not."""
+    root = f"golden/fg-labs-{_SHA}/"
+    paginator, patched = _patch_pages(
+        [
+            {
+                "CommonPrefixes": [
+                    {"Prefix": f"{root}wgs-5M/"},
+                    {"Prefix": f"{root}meth-twist-emseq-5M/"},
+                ],
+                "Contents": [{"Key": f"{root}stray.txt"}],
+            },
+            {"CommonPrefixes": [{"Prefix": f"{root}wes-5M/"}]},
+        ]
     )
-    assert golden.parse_golden_samples(ls_output) == frozenset(
-        {"meth-twist-emseq-5M", "panel-agilent-qxt-5M", "wgs-5M"}
-    )
-
-
-def test_parse_golden_samples_ignores_object_rows_and_blanks() -> None:
-    """Only `PRE` directory rows count; object rows and blank lines are ignored."""
-    ls_output = (
-        "2026-06-08 12:00:00       1234 some-stray-object.txt\n"
-        "\n"
-        "                           PRE wes-5M/\n"
-    )
-    assert golden.parse_golden_samples(ls_output) == frozenset({"wes-5M"})
-
-
-def test_parse_golden_samples_empty() -> None:
-    assert golden.parse_golden_samples("") == frozenset()
-
-
-def test_golden_backed_samples_parses_ls() -> None:
-    """A successful `aws s3 ls` is parsed into the sample set."""
-    completed = type(
-        "P",
-        (),
-        {"returncode": 0, "stdout": "                           PRE wgs-5M/\n", "stderr": ""},
-    )()
-    with patch.object(golden.subprocess, "run", return_value=completed) as run:
-        result = golden.golden_backed_samples("my-bucket", "deadbeef")
-    assert result == frozenset({"wgs-5M"})
-    # Lists the per-sample golden prefix for the pinned SHA.
-    assert run.call_args.args[0] == ["aws", "s3", "ls", "s3://my-bucket/golden/fg-labs-deadbeef/"]
-    # The listing is bounded so a network/DNS stall can't hang workflow init.
-    assert run.call_args.kwargs["timeout"] is not None
-
-
-def test_golden_backed_samples_raises_on_timeout() -> None:
-    """A stalled `aws s3 ls` surfaces as a RuntimeError, not an indefinite hang."""
-    timeout_exc = subprocess.TimeoutExpired(cmd=["aws", "s3", "ls"], timeout=30)
-    with (
-        patch.object(golden.subprocess, "run", side_effect=timeout_exc),
-        pytest.raises(RuntimeError, match="aws s3 ls timed out"),
-    ):
-        golden.golden_backed_samples("b", "sha")
+    with patched:
+        result = golden.golden_backed_samples("my-bucket", _SHA)
+    assert result == frozenset({"wgs-5M", "meth-twist-emseq-5M", "wes-5M"})
+    assert paginator.kwargs == {"Bucket": "my-bucket", "Prefix": root, "Delimiter": "/"}
 
 
 def test_golden_backed_samples_empty_prefix_is_not_an_error() -> None:
-    """Exit 1 with no stderr (prefix simply has no entries) yields an empty set."""
-    completed = type("P", (), {"returncode": 1, "stdout": "", "stderr": ""})()
-    with patch.object(golden.subprocess, "run", return_value=completed):
-        assert golden.golden_backed_samples("b", "nosuchsha") == frozenset()
+    """An unblessed SHA (no keys under the prefix) is "nothing to compare", not a failure."""
+    _, patched = _patch_pages([{"KeyCount": 0}])
+    with patched:
+        assert golden.golden_backed_samples("b", _SHA) == frozenset()
 
 
-def test_golden_backed_samples_raises_on_real_s3_error() -> None:
-    """A non-zero exit with stderr (bad creds, region) is surfaced, not swallowed."""
-    completed = type(
-        "P", (), {"returncode": 255, "stdout": "", "stderr": "Unable to locate credentials"}
-    )()
+@pytest.mark.parametrize(
+    "error",
+    [
+        botocore.exceptions.NoCredentialsError(),
+        botocore.exceptions.ClientError(
+            {"Error": {"Code": "NoSuchBucket", "Message": "no bucket"}}, "ListObjectsV2"
+        ),
+        botocore.exceptions.ReadTimeoutError(endpoint_url="https://s3"),
+        botocore.exceptions.ConnectTimeoutError(endpoint_url="https://s3"),
+    ],
+    ids=["credentials", "missing-bucket", "read-timeout", "connect-timeout"],
+)
+def test_golden_backed_samples_raises_on_s3_failure_mid_iteration(error: Exception) -> None:
+    """A failure on a later page is surfaced, never read as "no samples"."""
+    root = f"golden/fg-labs-{_SHA}/"
+    _, patched = _patch_pages([{"CommonPrefixes": [{"Prefix": f"{root}wgs-5M/"}]}, error])
+    with patched, pytest.raises(RuntimeError, match=f"listing s3://b/{root} failed"):
+        golden.golden_backed_samples("b", _SHA)
+
+
+def test_golden_backed_samples_is_capped_by_wall_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A listing that never returns fails the parse on time, whatever is stalled."""
+    monkeypatch.setattr(golden, "_LS_WALL_CLOCK_SECONDS", 0.2)
+    release = threading.Event()
+
+    def _stall(*_args: object, **_kwargs: object) -> frozenset[str]:
+        release.wait(5)
+        return frozenset()
+
+    monkeypatch.setattr(golden, "_list_sample_prefixes", _stall)
+    start = time.monotonic()
+    try:
+        with pytest.raises(RuntimeError, match="did not finish within 0.2s"):
+            golden.golden_backed_samples("b", _SHA)
+    finally:
+        release.set()
+    # Well under the 5 s the stalled listing would take to return on its own.
+    assert time.monotonic() - start < _PROMPT_FAILURE_SECONDS
+
+
+@pytest.mark.parametrize("sha", ["deadbee", "v0.13.0", "D" * 40, "", "d" * 39])
+def test_golden_backed_samples_rejects_a_sha_that_can_match_no_golden(sha: str) -> None:
+    """A short SHA or tag would list nothing and silently skip Gate #2."""
     with (
-        patch.object(golden.subprocess, "run", return_value=completed),
-        pytest.raises(RuntimeError, match="aws s3 ls failed"),
+        patch.object(golden, "_s3_client", side_effect=AssertionError("must not list")),
+        pytest.raises(RuntimeError, match="not a full 40-hex SHA"),
     ):
-        golden.golden_backed_samples("b", "sha")
+        golden.golden_backed_samples("b", sha)
+
+
+def test_golden_backed_samples_accepts_a_build_variant_suffix() -> None:
+    _, patched = _patch_pages([{"KeyCount": 0}])
+    with patched:
+        assert golden.golden_backed_samples("b", f"{_SHA}-lto-build") == frozenset()
+
+
+def test_golden_listing_needs_no_aws_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The listing runs while the Snakefile parses, where no `aws` binary may exist."""
+    monkeypatch.setenv("PATH", "/nonexistent")
+    root = f"golden/fg-labs-{_SHA}/"
+    _, patched = _patch_pages([{"CommonPrefixes": [{"Prefix": f"{root}wgs-5M/"}]}])
+    with patched:
+        assert golden.golden_backed_samples("b", _SHA) == frozenset({"wgs-5M"})
+
+
+def test_s3_client_pins_per_attempt_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The per-attempt limits the wall-clock cap is sized around, not botocore's defaults."""
+    monkeypatch.setenv("AWS_REGION", "us-west-2")
+    config = golden._s3_client().meta.config
+    assert config.connect_timeout == golden._LS_CONNECT_TIMEOUT_SECONDS
+    assert config.read_timeout == golden._LS_READ_TIMEOUT_SECONDS
+    assert config.retries["total_max_attempts"] == golden._LS_TOTAL_ATTEMPTS
+    worst_case = golden._LS_TOTAL_ATTEMPTS * (
+        golden._LS_CONNECT_TIMEOUT_SECONDS + golden._LS_READ_TIMEOUT_SECONDS
+    )
+    assert worst_case <= golden._LS_WALL_CLOCK_SECONDS
+
+
+def test_s3_client_follows_the_ambient_region(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Like the `aws` CLI it replaced: the environment's region wins."""
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
+    assert golden._s3_client().meta.region_name == "eu-west-1"
+
+
+def test_s3_client_falls_back_to_the_deploy_region(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty region in the environment falls back instead of failing obscurely."""
+    for var in ("AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE"):
+        monkeypatch.setenv(var, "") if var != "AWS_PROFILE" else monkeypatch.delenv(var, False)
+    monkeypatch.setenv("AWS_CONFIG_FILE", "/nonexistent")
+    real = golden.aws_config.load()
+    monkeypatch.setattr(
+        golden.aws_config, "load", lambda: dataclasses.replace(real, region="ap-south-1")
+    )
+    assert golden._s3_client().meta.region_name == "ap-south-1"
 
 
 def test_parse_run_reps_counts_only_aligned_bams() -> None:
