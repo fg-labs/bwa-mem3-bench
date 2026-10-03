@@ -1,14 +1,13 @@
 """Tests for the release-allowances registry + bless-golden sign-off guard."""
 
 import importlib
-import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 # Import the module object (not the re-exported function) for patching its
-# `subprocess` / `run_cmd` symbols — `commands/__init__` re-exports the
+# `list_recursive` / `run_cmd` symbols — `commands/__init__` re-exports the
 # `bless_golden` *function*, which shadows the submodule on attribute access.
 from bwa_mem3_bench.commands import _bless_golden as bless_golden_module
 from bwa_mem3_bench.commands._bless_golden import _parse_s3_bams, bless_golden
@@ -116,14 +115,12 @@ def test_bless_force_bypasses_allowance_check(
 
 def test_parse_s3_bams_selects_rep1_and_rewrites_to_golden() -> None:
     sha = "44cbaec"
-    ls = "\n".join(
-        [
-            f"2026 100 runs/{sha}/wes-5M/c6a/rep-1/aligned.bam",
-            f"2026 100 runs/{sha}/wes-5M/c6a/rep-2/aligned.bam",  # skipped (rep-2)
-            f"2026 50 runs/{sha}/wes-5M/c6a/rep-1/compare/vs-baseline.json",  # skipped
-            f"2026 100 runs/{sha}/wgs-5M/c8g/rep-1/aligned.bam",
-        ]
-    )
+    ls = [
+        f"runs/{sha}/wes-5M/c6a/rep-1/aligned.bam",
+        f"runs/{sha}/wes-5M/c6a/rep-2/aligned.bam",  # skipped (rep-2)
+        f"runs/{sha}/wes-5M/c6a/rep-1/compare/vs-baseline.json",  # skipped
+        f"runs/{sha}/wgs-5M/c8g/rep-1/aligned.bam",
+    ]
     pairs = _parse_s3_bams(ls, bucket="B", fg_labs_sha=sha)
     assert pairs == [
         (
@@ -145,13 +142,11 @@ def test_bless_from_s3_still_enforces_allowance(tmp_path: Path) -> None:
 
 def test_parse_s3_bams_notes_extra_reps_for_blessed_cells(capsys: pytest.CaptureFixture) -> None:
     sha = "44cbaec"
-    ls = "\n".join(
-        [
-            f"2026 100 runs/{sha}/wes-5M/c6a/rep-1/aligned.bam",
-            f"2026 100 runs/{sha}/wes-5M/c6a/rep-2/aligned.bam",
-            f"2026 100 runs/{sha}/wes-5M/c6a/rep-3/aligned.bam",
-        ]
-    )
+    ls = [
+        f"runs/{sha}/wes-5M/c6a/rep-1/aligned.bam",
+        f"runs/{sha}/wes-5M/c6a/rep-2/aligned.bam",
+        f"runs/{sha}/wes-5M/c6a/rep-3/aligned.bam",
+    ]
     pairs = _parse_s3_bams(ls, bucket="B", fg_labs_sha=sha)
     assert len(pairs) == 1  # only rep-1 blessed
     note = capsys.readouterr().err
@@ -163,12 +158,10 @@ def test_parse_s3_bams_dry_run_suppresses_extra_rep_note(
     capsys: pytest.CaptureFixture,
 ) -> None:
     sha = "44cbaec"
-    ls = "\n".join(
-        [
-            f"2026 100 runs/{sha}/wes-5M/c6a/rep-1/aligned.bam",
-            f"2026 100 runs/{sha}/wes-5M/c6a/rep-2/aligned.bam",
-        ]
-    )
+    ls = [
+        f"runs/{sha}/wes-5M/c6a/rep-1/aligned.bam",
+        f"runs/{sha}/wes-5M/c6a/rep-2/aligned.bam",
+    ]
     _parse_s3_bams(ls, bucket="B", fg_labs_sha=sha, dry_run=True)
     assert capsys.readouterr().err == ""
 
@@ -186,15 +179,12 @@ allowances:
     expected_drift_pct: 0.1
 """.strip(),
     )
-    ls_stdout = "\n".join(
-        [
-            f"2026 100 runs/{sha}/wes-5M/c6a/rep-1/aligned.bam",
-            f"2026 100 runs/{sha}/wgs-5M/c8g/rep-1/aligned.bam",
-        ]
-    )
-    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=ls_stdout, stderr="")
+    keys = [
+        f"runs/{sha}/wes-5M/c6a/rep-1/aligned.bam",
+        f"runs/{sha}/wgs-5M/c8g/rep-1/aligned.bam",
+    ]
     with (
-        patch.object(bless_golden_module.subprocess, "run", return_value=completed) as mock_ls,
+        patch.object(bless_golden_module, "list_recursive", return_value=keys) as mock_ls,
         patch.object(bless_golden_module, "run_cmd") as mock_cp,
     ):
         bless_golden(
@@ -205,7 +195,7 @@ allowances:
             min_reps=1,
             dry_run=True,
         )
-    mock_ls.assert_called_once()
+    mock_ls.assert_called_once_with(f"s3://B/runs/{sha}/")
     copied = [call.args[0] for call in mock_cp.call_args_list]
     assert copied == [
         [
@@ -238,11 +228,9 @@ allowances:
     expected_drift_pct: 0.1
 """.strip(),
     )
-    failed = subprocess.CompletedProcess(
-        args=[], returncode=255, stdout="", stderr="fatal error: An error occurred (AccessDenied)"
-    )
+    failed = RuntimeError(f"listing s3://B/runs/{sha}/ failed: AccessDenied")
     with (
-        patch.object(bless_golden_module.subprocess, "run", return_value=failed),
+        patch.object(bless_golden_module, "list_recursive", side_effect=failed),
         pytest.raises(RuntimeError, match="AccessDenied"),
     ):
         bless_golden(
@@ -377,21 +365,20 @@ allowances:
     )
 
 
-def _run_listing(sha: str, cells: list[tuple[str, str]], reps: int) -> str:
-    return "\n".join(
-        f"2026 100 runs/{sha}/{sample}/{arch}/rep-{rep}/aligned.bam"
+def _run_listing(sha: str, cells: list[tuple[str, str]], reps: int) -> list[str]:
+    return [
+        f"runs/{sha}/{sample}/{arch}/rep-{rep}/aligned.bam"
         for sample, arch in cells
         for rep in range(1, reps + 1)
-    )
+    ]
 
 
 def test_bless_refuses_an_under_replicated_run(tmp_path: Path) -> None:
     """A sweep that ran at one rep (the v0.13.0 failure) is not blessable by default."""
     sha = "deadbeef"
     ls = _run_listing(sha, [("wgs-5M", "c6a"), ("wes-5M", "c6a")], reps=1)
-    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=ls, stderr="")
     with (
-        patch.object(bless_golden_module.subprocess, "run", return_value=completed),
+        patch.object(bless_golden_module, "list_recursive", return_value=ls),
         patch.object(bless_golden_module, "run_cmd") as mock_cp,
         pytest.raises(ValueError, match="at most 1 rep"),
     ):
@@ -409,9 +396,9 @@ def test_bless_refuses_an_under_replicated_run(tmp_path: Path) -> None:
 def test_bless_refuses_a_run_with_no_replicate_bams(tmp_path: Path) -> None:
     """An empty run is under-replicated too; it must not report a successful no-op bless."""
     sha = "deadbeef"
-    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+    listing: list[str] = []
     with (
-        patch.object(bless_golden_module.subprocess, "run", return_value=completed),
+        patch.object(bless_golden_module, "list_recursive", return_value=listing),
         patch.object(bless_golden_module, "run_cmd") as mock_cp,
         pytest.raises(ValueError, match="at most 0 rep"),
     ):
@@ -429,15 +416,11 @@ def test_bless_refuses_a_run_with_no_replicate_bams(tmp_path: Path) -> None:
 def test_bless_accepts_single_rep_cells_when_the_sweep_is_replicated(tmp_path: Path) -> None:
     """Single-rep-by-design cells (the ALT arms) do not trip the guard."""
     sha = "deadbeef"
-    ls = "\n".join(
-        [
-            _run_listing(sha, [("wgs-5M", "c6a")], reps=5),
-            _run_listing(sha, [("wgs-5M-alt", "c6a")], reps=1),
-        ]
+    ls = _run_listing(sha, [("wgs-5M", "c6a")], reps=5) + _run_listing(
+        sha, [("wgs-5M-alt", "c6a")], reps=1
     )
-    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=ls, stderr="")
     with (
-        patch.object(bless_golden_module.subprocess, "run", return_value=completed),
+        patch.object(bless_golden_module, "list_recursive", return_value=ls),
         patch.object(bless_golden_module, "run_cmd") as mock_cp,
     ):
         bless_golden(
@@ -454,15 +437,12 @@ def test_bless_accepts_single_rep_cells_when_the_sweep_is_replicated(tmp_path: P
 def test_bless_refuses_a_cell_without_a_rep1_bam_from_s3(tmp_path: Path) -> None:
     """A cell with only higher reps would otherwise be silently left out of the golden."""
     sha = "deadbeef"
-    ls = "\n".join(
-        [
-            _run_listing(sha, [("wgs-5M", "c6a")], reps=5),
-            f"2026 100 runs/{sha}/wes-5M/c6a/rep-2/aligned.bam",
-        ]
-    )
-    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=ls, stderr="")
+    ls = [
+        *_run_listing(sha, [("wgs-5M", "c6a")], reps=5),
+        f"runs/{sha}/wes-5M/c6a/rep-2/aligned.bam",
+    ]
     with (
-        patch.object(bless_golden_module.subprocess, "run", return_value=completed),
+        patch.object(bless_golden_module, "list_recursive", return_value=ls),
         patch.object(bless_golden_module, "run_cmd") as mock_cp,
         pytest.raises(ValueError, match=r"1 run cell\(s\) have no rep-1 aligned.bam: wes-5M/c6a"),
     ):
@@ -532,16 +512,13 @@ def test_bless_fails_when_the_golden_is_incomplete_after_copy(tmp_path: Path) ->
     cells = [("hic-1M", "c6a"), ("wes-5M", "c6a"), ("wgs-5M", "c6a")]
     run_ls = _run_listing(sha, cells, reps=5)
     # Only the first cell made it into the golden.
-    golden_ls = f"2026 100 golden/fg-labs-{sha}/hic-1M/c6a/aligned.bam"
+    golden_ls = [f"golden/fg-labs-{sha}/hic-1M/c6a/aligned.bam"]
 
-    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        out = golden_ls if "/golden/" in argv[-1] else run_ls
-        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=out, stderr="")
+    def fake_list(uri: str) -> list[str]:
+        return golden_ls if "/golden/" in uri else run_ls
 
-    golden_mod = importlib.import_module("bwa_mem3_bench.golden")
     with (
-        patch.object(bless_golden_module.subprocess, "run", side_effect=fake_run),
-        patch.object(golden_mod.subprocess, "run", side_effect=fake_run),
+        patch.object(bless_golden_module, "list_recursive", side_effect=fake_list),
         patch.object(bless_golden_module, "run_cmd"),
         pytest.raises(RuntimeError, match=r"2 cell\(s\) missing: wes-5M/c6a, wgs-5M/c6a"),
     ):
@@ -558,16 +535,13 @@ def test_bless_passes_when_the_golden_is_complete_after_copy(tmp_path: Path) -> 
     sha = "deadbeef"
     cells = [("wes-5M", "c6a"), ("wgs-5M", "c6a")]
     run_ls = _run_listing(sha, cells, reps=5)
-    golden_ls = "\n".join(f"2026 100 golden/fg-labs-{sha}/{s}/{a}/aligned.bam" for s, a in cells)
+    golden_ls = [f"golden/fg-labs-{sha}/{s}/{a}/aligned.bam" for s, a in cells]
 
-    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        out = golden_ls if "/golden/" in argv[-1] else run_ls
-        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=out, stderr="")
+    def fake_list(uri: str) -> list[str]:
+        return golden_ls if "/golden/" in uri else run_ls
 
-    golden_mod = importlib.import_module("bwa_mem3_bench.golden")
     with (
-        patch.object(bless_golden_module.subprocess, "run", side_effect=fake_run),
-        patch.object(golden_mod.subprocess, "run", side_effect=fake_run),
+        patch.object(bless_golden_module, "list_recursive", side_effect=fake_list),
         patch.object(bless_golden_module, "run_cmd"),
     ):
         bless_golden(

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import subprocess
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 
 from bwa_mem3_bench import REPO_ROOT, aws_config
@@ -31,9 +31,9 @@ _MAX_MISSING_SHOWN = 10
 
 
 def _parse_s3_bams(
-    ls_output: str, *, bucket: str, fg_labs_sha: str, dry_run: bool = False
+    keys: Iterable[str], *, bucket: str, fg_labs_sha: str, dry_run: bool = False
 ) -> list[tuple[str, str]]:
-    """Map `aws s3 ls --recursive runs/<sha>/` output to (src, golden-dest) pairs.
+    """Map the object keys under `runs/<sha>/` to (src, golden-dest) pairs.
 
     Selects only `<sample>/<arch>/rep-1/aligned.bam` keys and rewrites each to the
     de-repped `golden/fg-labs-<sha>/<sample>/<arch>/aligned.bam` destination.
@@ -46,11 +46,7 @@ def _parse_s3_bams(
     pairs: list[tuple[str, str]] = []
     blessed_cells: set[tuple[str, str]] = set()
     extra_reps: dict[tuple[str, str], int] = {}
-    for line in ls_output.splitlines():
-        parts = line.split()
-        if not parts:
-            continue
-        key = parts[-1]
+    for key in keys:
         if not key.startswith(prefix) or not key.endswith("/aligned.bam"):
             continue
         rel = key[len(prefix) :].split("/")
@@ -240,24 +236,11 @@ def bless_golden(  # noqa: PLR0913
             )
 
     if from_s3:
-        listing = f"s3://{bucket}/runs/{fg_labs_sha}/"
-        proc = subprocess.run(
-            ["aws", "s3", "ls", "--recursive", listing],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if proc.returncode != 0:
-            # We must capture stdout to parse it, so a check=True failure would
-            # hide the real S3 error (bad creds, missing prefix, region mismatch)
-            # behind an opaque CalledProcessError. Surface stderr explicitly.
-            raise RuntimeError(
-                f"aws s3 ls failed for {listing} (exit {proc.returncode}): {proc.stderr.strip()}"
-            )
-        copies = _parse_s3_bams(
-            proc.stdout, bucket=bucket, fg_labs_sha=fg_labs_sha, dry_run=dry_run
-        )
-        reps = parse_run_reps(proc.stdout, fg_labs_sha)
+        # Raises on any S3 failure (bad creds, missing bucket, region mismatch); an
+        # absent run prefix lists empty and is refused below as under-replicated.
+        keys = list_recursive(f"s3://{bucket}/runs/{fg_labs_sha}/")
+        copies = _parse_s3_bams(keys, bucket=bucket, fg_labs_sha=fg_labs_sha, dry_run=dry_run)
+        reps = parse_run_reps(keys, fg_labs_sha)
     else:
         copies, reps = _local_copies(bucket=bucket, fg_labs_sha=fg_labs_sha, dry_run=dry_run)
 
