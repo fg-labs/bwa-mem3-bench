@@ -34,7 +34,7 @@ stale comparison:
   BAM under `golden/fg-labs-<golden>/`. Gate #2 compares only the samples the
   golden holds, so a partially copied golden quietly drops samples from the
   comparison instead of failing. This is the one check that reads S3 (two
-  `aws s3 ls --recursive` listings); the fix it prints is to re-run
+  recursive listings, made with boto3); the fix it prints is to re-run
   `bless-golden --from-s3` for the golden SHA, which is idempotent.
 
 `tests/test_arena_ladder.py` enforces the same ladder invariant in

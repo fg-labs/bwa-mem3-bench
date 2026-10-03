@@ -18,8 +18,8 @@ from __future__ import annotations
 import os
 import queue
 import re
-import subprocess
 import threading
+from collections.abc import Callable, Iterable
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -45,8 +45,13 @@ _LS_TOTAL_ATTEMPTS = 2
 _GOLDEN_SHA_RE = re.compile(r"[0-9a-f]{40}(-[A-Za-z0-9._-]+)?")
 
 
-def _s3_client() -> Any:
-    """An S3 client for listings made while the workflow parses.
+def _s3_client(total_max_attempts: int = _LS_TOTAL_ATTEMPTS) -> Any:
+    """An S3 client for the golden and run-tree listings.
+
+    Each attempt is bounded by the connect and read timeouts below;
+    ``total_max_attempts`` sets how many attempts a request gets. The default is
+    sized for the parse-time golden listing's wall-clock cap; the recursive
+    run-tree listing passes a larger budget (see :func:`list_recursive`).
 
     The region is resolved like the ``aws`` CLI this replaced (``AWS_REGION``, then
     ``AWS_DEFAULT_REGION`` and the profile via boto3), falling back to the
@@ -55,7 +60,7 @@ def _s3_client() -> Any:
     config = botocore.config.Config(
         connect_timeout=_LS_CONNECT_TIMEOUT_SECONDS,
         read_timeout=_LS_READ_TIMEOUT_SECONDS,
-        retries={"total_max_attempts": _LS_TOTAL_ATTEMPTS, "mode": "standard"},
+        retries={"total_max_attempts": total_max_attempts, "mode": "standard"},
     )
     region = (
         os.environ.get("AWS_REGION")
@@ -81,6 +86,33 @@ def _list_sample_prefixes(bucket: str, prefix: str) -> frozenset[str]:
     return frozenset(samples)
 
 
+def _with_wall_clock[T](listing: Callable[[], T], *, uri: str, seconds: float) -> T:
+    """Run an S3 ``listing`` of ``uri``, failing if it does not finish within ``seconds``.
+
+    Socket timeouts bound each read and attempt but not DNS resolution or a whole
+    paginated call, so the listing runs on a daemon thread (one still stalled when
+    the caller gives up cannot hold the interpreter open at exit) and is abandoned
+    at the deadline. Any failure, including a timeout, is raised as a ``RuntimeError``
+    naming ``uri``.
+    """
+    result: queue.Queue[T | BaseException] = queue.Queue(maxsize=1)
+
+    def _run() -> None:
+        try:
+            result.put(listing())
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the calling thread
+            result.put(exc)
+
+    threading.Thread(target=_run, name="s3-listing", daemon=True).start()
+    try:
+        outcome = result.get(timeout=seconds)
+    except queue.Empty:
+        raise RuntimeError(f"listing {uri} did not finish within {seconds}s") from None
+    if isinstance(outcome, BaseException):
+        raise RuntimeError(f"listing {uri} failed: {outcome}") from outcome
+    return outcome
+
+
 def golden_backed_samples(bucket: str, golden_ref_sha: str) -> frozenset[str]:
     """Sample names that have a blessed golden under ``golden/fg-labs-<sha>/``.
 
@@ -103,32 +135,24 @@ def golden_backed_samples(bucket: str, golden_ref_sha: str) -> frozenset[str]:
             f"this would silently match no golden and skip the vs-golden gate"
         )
     prefix = f"golden/fg-labs-{golden_ref_sha}/"
-    uri = f"s3://{bucket}/{prefix}"
-    result: queue.Queue[frozenset[str] | BaseException] = queue.Queue(maxsize=1)
-
-    def _list() -> None:
-        try:
-            result.put(_list_sample_prefixes(bucket, prefix))
-        except BaseException as exc:  # noqa: BLE001 - re-raised on the calling thread
-            result.put(exc)
-
-    # A daemon thread, so a listing still stalled when the parse fails cannot hold
-    # the interpreter open at exit.
-    threading.Thread(target=_list, name="golden-listing", daemon=True).start()
-    try:
-        outcome = result.get(timeout=_LS_WALL_CLOCK_SECONDS)
-    except queue.Empty:
-        raise RuntimeError(
-            f"listing {uri} did not finish within {_LS_WALL_CLOCK_SECONDS}s"
-        ) from None
-    if isinstance(outcome, BaseException):
-        raise RuntimeError(f"listing {uri} failed: {outcome}") from outcome
-    return outcome
+    return _with_wall_clock(
+        lambda: _list_sample_prefixes(bucket, prefix),
+        uri=f"s3://{bucket}/{prefix}",
+        seconds=_LS_WALL_CLOCK_SECONDS,
+    )
 
 
 # A full `runs/<sha>/` listing covers every sample x arch x rep of a bless sweep,
-# thousands of keys; give it more headroom than the one-level golden listing.
+# thousands of keys over many pages; give it more headroom than the one-level
+# golden listing.
 _LS_RECURSIVE_TIMEOUT_SECONDS = 300
+
+# Attempts per request for that listing: one throttled page must not fail a long
+# multi-page listing, so it gets the `aws` CLI's retry budget rather than the
+# parse-time listing's two.
+_LS_RECURSIVE_TOTAL_ATTEMPTS = 5
+
+_S3_URI_RE = re.compile(r"s3://([^/]+)/(.*)")
 
 # An aligned-BAM key relative to runs/<sha>/ is <sample>/<arch>/rep-<N>/aligned.bam.
 _RUN_BAM_PARTS = 4
@@ -150,13 +174,8 @@ def is_rep_dir(name: str) -> bool:
     return _REP_DIR_RE.fullmatch(name) is not None
 
 
-def _keys(ls_output: str) -> list[str]:
-    """The object keys of a recursive ``aws s3 ls`` listing (last column of each row)."""
-    return [parts[-1] for line in ls_output.splitlines() if (parts := line.split())]
-
-
-def parse_run_reps(ls_output: str, fg_labs_sha: str) -> dict[tuple[str, str], int]:
-    """Map a recursive ``runs/<sha>/`` listing to ``{(sample, arch): rep count}``.
+def parse_run_reps(keys: Iterable[str], fg_labs_sha: str) -> dict[tuple[str, str], int]:
+    """Map the object keys under ``runs/<sha>/`` to ``{(sample, arch): rep count}``.
 
     Counts only ``<sample>/<arch>/rep-<N>/aligned.bam`` keys (see :func:`is_rep_dir`),
     so compare JSONs, timing files, and stray non-replicate directories do not
@@ -164,7 +183,7 @@ def parse_run_reps(ls_output: str, fg_labs_sha: str) -> dict[tuple[str, str], in
     """
     prefix = f"runs/{fg_labs_sha}/"
     reps: dict[tuple[str, str], int] = {}
-    for key in _keys(ls_output):
+    for key in keys:
         if not key.startswith(prefix) or not key.endswith("/aligned.bam"):
             continue
         rel = key[len(prefix) :].split("/")
@@ -175,11 +194,11 @@ def parse_run_reps(ls_output: str, fg_labs_sha: str) -> dict[tuple[str, str], in
     return reps
 
 
-def parse_golden_cells(ls_output: str, golden_ref_sha: str) -> frozenset[tuple[str, str]]:
-    """Map a recursive ``golden/fg-labs-<sha>/`` listing to its ``(sample, arch)`` cells."""
+def parse_golden_cells(keys: Iterable[str], golden_ref_sha: str) -> frozenset[tuple[str, str]]:
+    """Map the object keys under ``golden/fg-labs-<sha>/`` to its ``(sample, arch)`` cells."""
     prefix = f"golden/fg-labs-{golden_ref_sha}/"
     cells: set[tuple[str, str]] = set()
-    for key in _keys(ls_output):
+    for key in keys:
         if not key.startswith(prefix) or not key.endswith("/aligned.bam"):
             continue
         rel = key[len(prefix) :].split("/")
@@ -188,31 +207,35 @@ def parse_golden_cells(ls_output: str, golden_ref_sha: str) -> frozenset[tuple[s
     return frozenset(cells)
 
 
-def list_recursive(uri: str) -> str:
-    """Return ``aws s3 ls --recursive <uri>`` output, raising on a real S3 failure.
+def _list_keys(bucket: str, prefix: str) -> list[str]:
+    """Every object key under ``s3://<bucket>/<prefix>``, across all pages."""
+    pages = (
+        _s3_client(total_max_attempts=_LS_RECURSIVE_TOTAL_ATTEMPTS)
+        .get_paginator("list_objects_v2")
+        .paginate(Bucket=bucket, Prefix=prefix)
+    )
+    return [entry["Key"] for page in pages for entry in page.get("Contents", [])]
 
-    An absent prefix is an empty listing (``aws`` exits 1 with no stderr), not an
-    error -- the same contract :func:`golden_backed_samples` keeps. This one still
-    shells out to the ``aws`` CLI: it runs only from the bless commands on an
-    operator's machine, never while the workflow parses.
+
+def list_recursive(uri: str) -> list[str]:
+    """Every object key under ``uri`` (``s3://<bucket>/<prefix>``), raising on S3 failure.
+
+    Lists with boto3 rather than the ``aws`` CLI, so the bless commands need no
+    ``aws`` binary for it. An absent prefix is an empty list, not an error -- the
+    same contract :func:`golden_backed_samples` keeps. Any S3 failure (credentials,
+    missing bucket, region), or a listing that does not finish within
+    ``_LS_RECURSIVE_TIMEOUT_SECONDS``, is raised rather than returned as a partial
+    or empty listing.
+
+    :raises ValueError: if ``uri`` is not of the form ``s3://<bucket>/<prefix>``.
     """
-    try:
-        proc = subprocess.run(
-            ["aws", "s3", "ls", "--recursive", uri],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=_LS_RECURSIVE_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            f"aws s3 ls timed out after {_LS_RECURSIVE_TIMEOUT_SECONDS}s for {uri}"
-        ) from exc
-    if proc.returncode != 0 and proc.stderr.strip():
-        raise RuntimeError(
-            f"aws s3 ls failed for {uri} (exit {proc.returncode}): {proc.stderr.strip()}"
-        )
-    return proc.stdout
+    match = _S3_URI_RE.fullmatch(uri)
+    if match is None:
+        raise ValueError(f"{uri!r} is not an s3://<bucket>/<prefix> URI")
+    bucket, prefix = match.groups()
+    return _with_wall_clock(
+        lambda: _list_keys(bucket, prefix), uri=uri, seconds=_LS_RECURSIVE_TIMEOUT_SECONDS
+    )
 
 
 def missing_golden_cells(bucket: str, golden_ref_sha: str) -> list[tuple[str, str]]:

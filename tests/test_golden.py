@@ -1,7 +1,6 @@
 """Tests for the golden-sample discovery helpers (Gate #2 vs-golden scoping)."""
 
 import dataclasses
-import subprocess
 import threading
 import time
 from collections.abc import Iterator
@@ -170,31 +169,27 @@ def test_s3_client_falls_back_to_the_deploy_region(monkeypatch: pytest.MonkeyPat
 
 def test_parse_run_reps_counts_only_aligned_bams() -> None:
     sha = "abc"
-    ls = "\n".join(
-        [
-            f"2026 1 runs/{sha}/wgs-5M/c6a/rep-1/aligned.bam",
-            f"2026 1 runs/{sha}/wgs-5M/c6a/rep-2/aligned.bam",
-            f"2026 1 runs/{sha}/wgs-5M/c6a/rep-1/compare/vs-golden.json",
-            f"2026 1 runs/{sha}/wes-5M/c8g/rep-1/aligned.bam",
-            "2026 1 runs/other/wes-5M/c8g/rep-1/aligned.bam",
-        ]
-    )
-    assert golden.parse_run_reps(ls, sha) == {("wgs-5M", "c6a"): 2, ("wes-5M", "c8g"): 1}
+    keys = [
+        f"runs/{sha}/wgs-5M/c6a/rep-1/aligned.bam",
+        f"runs/{sha}/wgs-5M/c6a/rep-2/aligned.bam",
+        f"runs/{sha}/wgs-5M/c6a/rep-1/compare/vs-golden.json",
+        f"runs/{sha}/wes-5M/c8g/rep-1/aligned.bam",
+        "runs/other/wes-5M/c8g/rep-1/aligned.bam",
+    ]
+    assert golden.parse_run_reps(keys, sha) == {("wgs-5M", "c6a"): 2, ("wes-5M", "c8g"): 1}
 
 
 def test_parse_run_reps_counts_only_numeric_rep_dirs() -> None:
     """A stray ``rep-backup`` (or ``rep-0``) must not inflate a cell's rep count."""
     sha = "abc"
-    ls = "\n".join(
-        [
-            f"2026 1 runs/{sha}/wgs-5M/c6a/rep-1/aligned.bam",
-            f"2026 1 runs/{sha}/wgs-5M/c6a/rep-12/aligned.bam",
-            f"2026 1 runs/{sha}/wgs-5M/c6a/rep-backup/aligned.bam",
-            f"2026 1 runs/{sha}/wgs-5M/c6a/rep-0/aligned.bam",
-            f"2026 1 runs/{sha}/wgs-5M/c6a/rep-/aligned.bam",
-        ]
-    )
-    assert golden.parse_run_reps(ls, sha) == {("wgs-5M", "c6a"): 2}
+    keys = [
+        f"runs/{sha}/wgs-5M/c6a/rep-1/aligned.bam",
+        f"runs/{sha}/wgs-5M/c6a/rep-12/aligned.bam",
+        f"runs/{sha}/wgs-5M/c6a/rep-backup/aligned.bam",
+        f"runs/{sha}/wgs-5M/c6a/rep-0/aligned.bam",
+        f"runs/{sha}/wgs-5M/c6a/rep-/aligned.bam",
+    ]
+    assert golden.parse_run_reps(keys, sha) == {("wgs-5M", "c6a"): 2}
 
 
 @pytest.mark.parametrize(
@@ -216,45 +211,133 @@ def test_is_rep_dir(name: str, expected: bool) -> None:
 
 def test_parse_golden_cells() -> None:
     sha = "abc"
-    ls = "\n".join(
+    keys = [
+        f"golden/fg-labs-{sha}/wgs-5M/c6a/aligned.bam",
+        f"golden/fg-labs-{sha}/wgs-5M/c6a/aligned.bam.bai",
+        f"golden/fg-labs-{sha}/hic-1M/c8g/aligned.bam",
+    ]
+    assert golden.parse_golden_cells(keys, sha) == frozenset({("wgs-5M", "c6a"), ("hic-1M", "c8g")})
+
+
+class _PrefixPaginator:
+    """A `list_objects_v2` paginator that answers each prefix from a canned key map."""
+
+    def __init__(self, keys_by_prefix: dict[str, list[str]]) -> None:
+        self.keys_by_prefix = keys_by_prefix
+        self.calls: list[dict[str, object]] = []
+
+    def paginate(self, **kwargs: object) -> Iterator[dict[str, object]]:
+        self.calls.append(kwargs)
+        keys = self.keys_by_prefix.get(str(kwargs["Prefix"]), [])
+        yield {"KeyCount": len(keys), "Contents": [{"Key": k} for k in keys]}
+
+
+def _patch_prefixes(keys_by_prefix: dict[str, list[str]]) -> tuple[_PrefixPaginator, Any]:
+    paginator = _PrefixPaginator(keys_by_prefix)
+    client = type("C", (), {"get_paginator": lambda self, name: paginator})()
+    return paginator, patch.object(golden, "_s3_client", return_value=client)
+
+
+def test_list_recursive_returns_every_key_across_pages() -> None:
+    """Every object key under the prefix, from every page, with no delimiter."""
+    paginator, patched = _patch_pages(
         [
-            f"2026 1 golden/fg-labs-{sha}/wgs-5M/c6a/aligned.bam",
-            f"2026 1 golden/fg-labs-{sha}/wgs-5M/c6a/aligned.bam.bai",
-            f"2026 1 golden/fg-labs-{sha}/hic-1M/c8g/aligned.bam",
+            {"Contents": [{"Key": "runs/abc/wgs-5M/c6a/rep-1/aligned.bam"}]},
+            {"Contents": [{"Key": "runs/abc/wes-5M/c6a/rep-1/aligned.bam"}]},
         ]
     )
-    assert golden.parse_golden_cells(ls, sha) == frozenset({("wgs-5M", "c6a"), ("hic-1M", "c8g")})
+    with patched:
+        keys = golden.list_recursive("s3://B/runs/abc/")
+    assert keys == [
+        "runs/abc/wgs-5M/c6a/rep-1/aligned.bam",
+        "runs/abc/wes-5M/c6a/rep-1/aligned.bam",
+    ]
+    assert paginator.kwargs == {"Bucket": "B", "Prefix": "runs/abc/"}
+
+
+def test_list_recursive_uses_the_larger_retry_budget() -> None:
+    """One throttled page must not fail a long multi-page run-tree listing."""
+    _, patched = _patch_pages([{"KeyCount": 0}])
+    with patched as client:
+        golden.list_recursive("s3://B/runs/abc/")
+    client.assert_called_once_with(total_max_attempts=golden._LS_RECURSIVE_TOTAL_ATTEMPTS)
+    assert golden._LS_RECURSIVE_TOTAL_ATTEMPTS > golden._LS_TOTAL_ATTEMPTS
+
+
+def test_list_recursive_absent_prefix_is_empty_not_an_error() -> None:
+    _, patched = _patch_pages([{"KeyCount": 0}])
+    with patched:
+        assert golden.list_recursive("s3://B/runs/abc/") == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        botocore.exceptions.NoCredentialsError(),
+        botocore.exceptions.ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "AccessDenied"}}, "ListObjectsV2"
+        ),
+        botocore.exceptions.ReadTimeoutError(endpoint_url="https://s3"),
+    ],
+    ids=["credentials", "access-denied", "read-timeout"],
+)
+def test_list_recursive_raises_on_s3_failure_mid_iteration(error: Exception) -> None:
+    """A failure on a later page is raised, never returned as a partial listing."""
+    _, patched = _patch_pages([{"Contents": [{"Key": "runs/abc/x"}]}, error])
+    with patched, pytest.raises(RuntimeError, match="listing s3://B/runs/abc/ failed"):
+        golden.list_recursive("s3://B/runs/abc/")
+
+
+def test_list_recursive_is_capped_by_wall_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(golden, "_LS_RECURSIVE_TIMEOUT_SECONDS", 0.2)
+    release = threading.Event()
+
+    def _stall(*_args: object, **_kwargs: object) -> list[str]:
+        release.wait(5)
+        return []
+
+    monkeypatch.setattr(golden, "_list_keys", _stall)
+    start = time.monotonic()
+    try:
+        with pytest.raises(RuntimeError, match="did not finish within 0.2s"):
+            golden.list_recursive("s3://B/runs/abc/")
+    finally:
+        release.set()
+    assert time.monotonic() - start < _PROMPT_FAILURE_SECONDS
+
+
+@pytest.mark.parametrize("uri", ["runs/abc/", "s3://", "s3:///runs/abc/", "https://B/runs/"])
+def test_list_recursive_rejects_a_non_s3_uri(uri: str) -> None:
+    with (
+        patch.object(golden, "_s3_client", side_effect=AssertionError("must not list")),
+        pytest.raises(ValueError, match="not an s3://<bucket>/<prefix> URI"),
+    ):
+        golden.list_recursive(uri)
+
+
+def test_list_recursive_needs_no_aws_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PATH", "/nonexistent")
+    _, patched = _patch_pages([{"Contents": [{"Key": "runs/abc/k"}]}])
+    with patched:
+        assert golden.list_recursive("s3://B/runs/abc/") == ["runs/abc/k"]
 
 
 def test_missing_golden_cells_reports_run_cells_absent_from_golden() -> None:
     sha = "abc"
-    run_ls = "\n".join(
-        f"2026 1 runs/{sha}/{s}/c6a/rep-1/aligned.bam" for s in ("hic-1M", "wes-5M", "wgs-5M")
+    _, patched = _patch_prefixes(
+        {
+            f"runs/{sha}/": [
+                f"runs/{sha}/{s}/c6a/rep-1/aligned.bam" for s in ("hic-1M", "wes-5M", "wgs-5M")
+            ],
+            f"golden/fg-labs-{sha}/": [f"golden/fg-labs-{sha}/hic-1M/c6a/aligned.bam"],
+        }
     )
-    golden_ls = f"2026 1 golden/fg-labs-{sha}/hic-1M/c6a/aligned.bam"
-
-    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        out = golden_ls if "/golden/" in argv[-1] else run_ls
-        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=out, stderr="")
-
-    with patch.object(golden.subprocess, "run", side_effect=fake_run):
+    with patched:
         assert golden.missing_golden_cells("B", sha) == [("wes-5M", "c6a"), ("wgs-5M", "c6a")]
-
-
-def test_list_recursive_raises_on_s3_error() -> None:
-    failed = subprocess.CompletedProcess(args=[], returncode=255, stdout="", stderr="AccessDenied")
-    with (
-        patch.object(golden.subprocess, "run", return_value=failed),
-        pytest.raises(RuntimeError, match="AccessDenied"),
-    ):
-        golden.list_recursive("s3://B/runs/abc/")
 
 
 def test_missing_golden_cells_rejects_an_empty_run_tree() -> None:
     """With no run BAMs there is nothing to check completeness against: fail, don't pass."""
-    empty = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
-    with (
-        patch.object(golden.subprocess, "run", return_value=empty),
-        pytest.raises(RuntimeError, match="no aligned.bam"),
-    ):
+    _, patched = _patch_prefixes({})
+    with patched, pytest.raises(RuntimeError, match="no aligned.bam"):
         golden.missing_golden_cells("B", "abc")
