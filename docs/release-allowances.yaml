@@ -711,3 +711,75 @@ allowances:
     # resolves here, same pattern as v0.5.0+.
     aliases:
       - e3904dd7e27792f4c97d98e7a2146a55096c3429   # v0.13.0 release tag (merge of #507; tree-identical to 64420af4)
+  - to_sha: 1a6a9d56c5d2acf186071d90a2084e59743152c7
+    pr: fg-labs/bwa-mem3#519
+    date: 2026-10-03
+    summary: >-
+      v0.14.0: INTENTIONAL meth-only output change vs the v0.13.0 golden
+      (64420af4); every non-meth record is unchanged. Gate #2 is 100.0000% on all
+      36 non-meth golden-backed cells (180 compares, 5 reps across the six sweep
+      archs). The two meth cells read 0.3332% (meth-twist-emseq-5M, 10,369,692
+      reads) and 0.3327% (smoke-meth, 20,740 reads), identical across all 5 reps,
+      and every difference traces to one of two deliberate fixes:
+
+      (1) fg-labs/bwa-mem3#550 (BREAKING): under --meth, MD is literal again and
+      lists bisulfite conversions (the BISCUIT convention; NM still excludes
+      them). MD differs on 10,201,869 of 10,340,784 meth-twist records (98.7%)
+      and on 20,408 smoke-meth records. This alone drives the cell below the bar.
+
+      (2) fg-labs/bwa-mem3#553: a mate placed by rescue in a reverse-half window
+      now gets its own strand's XG/XM and a CIGAR/NM/MD that no longer count its
+      conversions as mismatches; its anchor changes only in MC, and a rescued
+      alternative hit can change its XA. On meth-twist: XG 166,700, XM 166,625,
+      NM 165,635, XA 42,591, CIGAR/MC 7,220, POS 113 records. AS, XS, MQ and HN
+      are unchanged on every record and MAPQ shows no diff class, matching the
+      PR's claim that pairing, AS, XS and MAPQ do not move. The locus holds for
+      all but those 113 records, where the regenerated CIGAR re-places an indel
+      and shifts POS by at most 6 bp on the same contig (111 by <= 5 bp), the
+      one exception #553 itself names. The fix is NOT confined to
+      low-confidence pairs: of the 166,700 XG-changed rescued
+      mates on meth-twist, 68% carry MAPQ >= 30 themselves and 68% of their
+      anchors (MQ) do too (67.8% of anchors are MAPQ 60), against 24% at MAPQ 0
+      (6.6% corpus-wide); the typical shape is a MAPQ-60 anchor with a MAPQ
+      30-59 rescued mate, all but 2 proper pairs. So 113,470 pairs with MAPQ >=
+      30 on both sides (2.2% of the 5,184,846 read pairs) carried a wrong-strand
+      XG/XM (spurious calls, mostly CHH) and a conversion-inflated NM that a MAPQ
+      filter would not have removed.
+      smoke-meth agrees (345 changed mates, 64% MAPQ >= 30). --compat cannot
+      combine with --meth (rejected at option parsing), so neither fix has a
+      compat surface.
+
+      Gate #1 passes (72/72): all 70 DNA vs-upstream cells 100.0000%; meth
+      confident relocation vs bwameth 0.1257% (meth-twist-emseq-5M) and 0.1717%
+      (smoke-meth) against a 0.25% budget. vs_x86 is 100.0000% on all 14 ARM
+      cells. All 432 --compat identity checks (bwa-mem2 and bwa arms, including
+      the three ALT modes) are IDENTICAL, as is compat thread-invariance on c8g64
+      and the arena's fgumi full-content check against v0.13.0 on m8a and m8g.
+      Gate #3 passes; the v0.13.0 ladder reads super-linear, so the gate fell
+      back to per-rung PROCESS() time, which is 14-19% lower at every rung.
+
+      PERFORMANCE, arena (one on-demand host per arch, wgs-5M, 3 interleaved
+      reps, medians): default preset 1.24x (m8a, 29.83 -> 24.15 s) / 1.30x (m8g,
+      55.02 -> 42.23 s) faster wall than v0.13.0; --fast 1.04x (13.65 -> 13.07 s)
+      / 1.04x (18.73 -> 18.08 s). Against minibwa on the default preset,
+      bwa-mem3 is 1.26x faster on m8a (24.15 vs 30.36 s) and 4% slower on m8g
+      (42.23 vs 40.59 s). Rep 1 of every bwa-mem3 arm ran cold (e.g. m8a
+      v0.14.0 30.66 s vs 24.14 / 24.15 s), so means overstate the times; the
+      medians match the published results pages. The cross-run perf table flags
+      one cell, c7a wgs-5M-fast (+9.8%, 27.99 -> 30.73 s): the same cell the
+      fc43ee95 gate run flagged at +16.6%, which bare-metal reproduction on
+      c7a.4xlarge refuted
+      (fc43ee95 was 2.5% faster than v0.13.0 there). This run is faster than
+      fc43ee95's on that cell; treated as spot-substrate noise. Intentional,
+      accepted.
+    expected_drift_pct: 99.67
+    # Golden lives under 1a6a9d56 -- the release-please #519 head (the #556
+    # merge a196487a plus the release commit, which touches only
+    # .release-please-manifest.json, CHANGELOG.md and version.txt), benched via
+    # biffix run-60b6dba8 with target bless_release, reps=5 across the six sweep
+    # archs, plus the arena (m8a/m8g) and the thread-scaling ladder. #519
+    # squash-merged to the shipped v0.14.0 tag (5c1d5e3) on 2026-10-03; the two
+    # commits share tree df0e77e0, so the shipped tag is the same binary as this
+    # golden. Aliased so a vs-golden run pinned to the tag resolves here.
+    aliases:
+      - 5c1d5e39e0b05fe3cf960ed0dc6086af59b3e870   # v0.14.0 release tag (merge of #519; tree-identical to 1a6a9d56)
