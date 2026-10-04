@@ -117,6 +117,22 @@ All commands are `pixi run python -m bwa_mem3_bench.cli <subcommand>`.
    older `ref:refs/heads/main` pin, STS refused any branch outright and the
    credentialed half could only be exercised after merging.
 
+   **Approving from the CLI.** No UI trip needed — a required reviewer can
+   approve the gate with `gh api`:
+
+   ```bash
+   RUN=<run-id>
+   ENV_ID=$(gh api repos/fg-labs/bwa-mem3-bench/actions/runs/$RUN/pending_deployments \
+       -q '.[] | select(.environment.name == "image-build") | .environment.id')
+   gh api -X POST repos/fg-labs/bwa-mem3-bench/actions/runs/$RUN/pending_deployments \
+       -F "environment_ids[]=$ENV_ID" -f state=approved -f comment="<why>"
+   ```
+
+   One approval releases every job waiting on the gate at that moment
+   (`build` × 2 + `build-tuned`). `join` declares the same environment but
+   only queues after the builds finish, so expect to approve a second time —
+   check `pending_deployments` again once the builds go green.
+
    **If one architecture fails, prefer "Re-run failed jobs".** The two targets
    fail differently: base tags are IMMUTABLE so re-running a leg that already
    pushed errors out (loud, safe), whereas the benchmark repo is MUTABLE — it
