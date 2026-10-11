@@ -1,6 +1,6 @@
 # bwa-mem3 v0.14.0 benchmark results
 
-Benchmarked at fg-labs/bwa-mem3 `1a6a9d56c5d2acf186071d90a2084e59743152c7`, blessed 2026-10-03 ([fg-labs/bwa-mem3#519](https://github.com/fg-labs/bwa-mem3/pull/519)).
+Benchmarked at fg-labs/bwa-mem3 `1a6a9d56c5d2acf186071d90a2084e59743152c7` (release tag commit `5c1d5e39e0b05fe3cf960ed0dc6086af59b3e870`), blessed 2026-10-03 ([fg-labs/bwa-mem3#519](https://github.com/fg-labs/bwa-mem3/pull/519)).
 Release notes: <https://github.com/fg-labs/bwa-mem3/releases/tag/v0.14.0>.
 
 Comparators: bwa 0.7.19, bwa-mem2 v2.2.1, bwameth 0.2.7, minibwa `d6d9f87d`.

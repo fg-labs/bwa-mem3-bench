@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from bwa_mem3_bench import REPO_ROOT
-from bwa_mem3_bench.release_allowances import ReleaseAllowance
+from bwa_mem3_bench.release_allowances import ReleaseAllowance, load_allowances
 from bwa_mem3_bench.report import results
 from bwa_mem3_bench.report.results_data import (
     DATASETS,
@@ -384,6 +384,14 @@ def test_every_published_dataset_is_a_configured_sample(config: WorkflowConfig) 
         assert dataset.sample in config.samples
 
 
+def test_alt_rep_note_counts_instance_types_not_architectures() -> None:
+    # The speed table has one row per instance type, and several share an
+    # architecture (c6a / c7a / c7i are all x86), so "per architecture" names the wrong unit.
+    alt = next(d for d in DATASETS if d.sample == "wgs-5M-alt")
+    assert "one rep per instance type" in alt.notes
+    assert "per architecture" not in alt.notes
+
+
 def test_committed_results_are_current() -> None:
     """The committed pages must match what their committed snapshots render to.
 
@@ -397,6 +405,24 @@ def test_committed_results_are_current() -> None:
         if not path.exists() or path.read_text() != text
     ]
     assert not stale, f"regenerate with `cli bench results-render`: {stale}"
+
+
+def test_committed_snapshots_record_the_ledger_aliases() -> None:
+    """Each published snapshot carries its release's tag aliases from the ledger.
+
+    The shipped tag is aliased in the ledger after its release PR merges, which can be
+    after the snapshot was taken; the page names the tag commit only from the snapshot.
+    """
+    ledger = {
+        e.to_sha: list(e.aliases)
+        for e in load_allowances(REPO_ROOT / "docs" / "release-allowances.yaml")
+    }
+    drift = {
+        path.parent.name: (snap["aliases"], ledger.get(snap["fg_labs_sha"]))
+        for path in sorted((REPO_ROOT / "results" / "releases").glob("*/data.json"))
+        if (snap := json.loads(path.read_text()))["aliases"] != ledger.get(snap["fg_labs_sha"])
+    }
+    assert not drift, f"snapshot aliases differ from the ledger (snapshot, ledger): {drift}"
 
 
 def test_thread_counts_and_arena_sample_come_from_the_snapshot(snap: dict[str, Any]) -> None:
