@@ -124,7 +124,7 @@ DATASETS: tuple[Dataset, ...] = (
         sample="wgs-5M-alt",
         title="Whole genome, ALT-aware (HG00096)",
         source="The wgs-5M reads aligned with the reference's `.alt` file present.",
-        notes="Measured at one rep per architecture by design; timings are indicative only.",
+        notes="Measured at one rep per instance type by design; timings are indicative only.",
     ),
 )
 

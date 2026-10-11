@@ -82,7 +82,8 @@ ladder) because it names literal binaries the builder base image bakes in:
                             no ARM build (`_has_upstream_baseline`), so m8g's
                             arm list is one shorter than m8a's.
   - `minibwa`            -- lh3/minibwa (timing only, matches `align_minibwa`).
-  - `v021` .. `v110`     -- every prior BLESSED bwa-mem3 release
+  - `v021` .. latest     -- every prior BLESSED bwa-mem3 release, one per
+                            `ARENA_RELEASES` entry
                             (docs/release-allowances.yaml `to_sha`s), built
                             fresh in `docker/Dockerfile.base` and installed as
                             `bwa-mem3.<label>` -- see that file for why the
@@ -272,6 +273,7 @@ ARENA_RELEASES = [
     ("v120", "2e6627615ae5c50c5d12829ce9a3900f05dd58ff"),
     ("v130", "64420af4d1672350b734b9de49cae3933fb0cb8c"),
     ("v140", "1a6a9d56c5d2acf186071d90a2084e59743152c7"),
+    ("v141", "e974f2666bae714afd942faf58e1cb27078b3fef"),
 ]
 
 # The release immediately preceding today's candidate -- the one arm the
