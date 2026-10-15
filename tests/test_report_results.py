@@ -348,6 +348,13 @@ def test_index_leads_with_the_latest_and_keeps_older_releases(
     assert (root / "releases" / "v0.9.0" / "README.md").exists()
 
 
+def test_index_labels_the_rep_count_as_a_maximum(snap: dict[str, Any]) -> None:
+    # `max_reps` is the largest rep count of any cell; single-rep datasets like
+    # wgs-5M-alt run fewer, so the column must not read as every cell's count.
+    index = results.render_index([snap])
+    assert "| release | benchmarked at | blessed | max reps per cell |" in index
+
+
 def test_rejects_a_sha_that_is_not_a_blessed_release(
     tmp_path: Path, config: WorkflowConfig
 ) -> None:

@@ -829,3 +829,50 @@ allowances:
     # pinned to the tag resolves here.
     aliases:
       - d6745b5924b0b71d861bcadefca67a3ae3e6fad5   # v0.14.1 release tag (merge of #558; tree-identical to e974f266)
+  - to_sha: cbe2db325cf057eff03a7ffb3ebd629453d0fd49
+    pr: fg-labs/bwa-mem3#585
+    date: 2026-10-14
+    summary: >-
+      v0.15.0: NO output change vs the v0.14.1 golden (e974f266). Gate #2 is
+      100.0000% on all 38 golden-backed cells, meth included (190 compares, 5 reps
+      across the six sweep archs), with 0 discordant reads anywhere. The release is
+      one feature (#587 warn when THP-eligible memory falls back to 4 KB pages),
+      one bug fix (#589 page-align the MADV_HUGEPAGE range for the index arrays)
+      and four performance changes (#584 branchless chaining / ungapped extension
+      / seeding; #586 direct lockstep flush slot and branchless pdqsort; #590 keep
+      the kt_for pool busy through each chunk's serial tail; #588 lockstep widths
+      of 32 on AMD Zen 5), none of which moves a record on this corpus.
+
+      Gate #1 passes (72/72): all 70 DNA vs-upstream cells 100.0000%; meth
+      confident relocation vs bwameth 0.1257% (meth-twist-emseq-5M) and 0.1717%
+      (smoke-meth) against a 0.25% budget, identical to v0.14.1. vs_x86 is 100.0000%
+      on all 14 ARM cells. All 432 --compat identity checks are IDENTICAL, as is
+      the arena's fgumi full-content check against v0.14.1 on m8a and m8g. Gate #3
+      passes.
+
+      PERFORMANCE, arena (one on-demand host per arch, wgs-5M, 3 interleaved
+      reps, medians): default preset 1.06x (m8a, 24.11 -> 22.83 s) / 0.98x (m8g,
+      36.04 -> 36.85 s) vs v0.14.1; --fast 1.08x (13.08 -> 12.07 s) / 1.03x
+      (17.60 -> 17.08 s). The m8g default reading is noise: a bare-metal
+      m8g.4xlarge A/B with the image's two binaries (arena command, 1 discarded
+      warmup, 7 interleaved reps per arm, prewarmed page cache) measured v0.15.0
+      at 36.17 s vs 36.72 s, 1.015x faster, and faster in all 7 pairs, with
+      identical record counts. Against minibwa on the default preset, bwa-mem3 is
+      1.33x faster on m8a (22.83 vs 30.44 s) and 1.13x on m8g (36.85 vs 41.68 s).
+      The cross-run perf table flags one cell, c6a wes-5M-fast (+6.5%, 26.29 ->
+      28.00 s): c6a wes-5M (default) is 3.1% faster, wes-5M-fast is flat or
+      faster on four of the other five archs (c7g reads +6.4% with overlapping
+      rep ranges, i.e. noisy), and none of the release's changes is specific to
+      Zen 3 or to --fast. Treated as spot-substrate noise (cf. the v0.14.0 c7a wgs-5M-fast
+      cell, refuted on bare metal). Of 171 cells: 9 improvement, 91 flat, 70
+      noisy, 1 regression, mean -0.8%. Intentional, accepted.
+    expected_drift_pct: 0.0
+    # Golden lives under cbe2db32 -- the release-please #585 head, benched via
+    # biffix run-841e2bb9 with target bless_release, reps=5 across the six sweep
+    # archs, plus the arena (m8a/m8g) and the thread-scaling ladder (smokes:
+    # run-366568da / run-6fa7c0da). #585 squash-merged to the shipped v0.15.0
+    # tag (7754ecc) on 2026-10-14; the two commits share tree e9823c9b, so the
+    # shipped tag is the same binary as this golden. Aliased so a vs-golden run
+    # pinned to the tag resolves here.
+    aliases:
+      - 7754eccedc97fe4a1833b9b59413f841a4b6ac35   # v0.15.0 release tag (merge of #585; tree-identical to cbe2db32)

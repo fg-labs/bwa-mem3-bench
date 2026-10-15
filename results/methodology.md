@@ -94,8 +94,9 @@ existed show it as not measured.
 Reads are simulated from GRCh38 with known origins
 ([holodeck](https://github.com/fg-labs/holodeck)), aligned by each
 aligner, and graded against the truth. The `-place` sets measure placement and
-MAPQ calibration; the `-vars` sets carry variants, and the MD/NM columns give
-the share of variant-bearing reads whose MD/NM tag matches the truth. Methylation
+MAPQ calibration; the `-vars` sets measure variant representation. Reads in both
+carry simulated variants, and in each set the MD/NM columns give the share of
+that set's variant-bearing reads whose MD/NM tag matches the truth. Methylation
 sets are bisulfite-converted and compared against bwameth.
 
 ## Thread scaling

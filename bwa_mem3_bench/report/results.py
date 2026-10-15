@@ -634,7 +634,7 @@ def render_index(snapshots: list[dict[str, Any]]) -> str:
         "## All releases",
         "",
         md_table(
-            ["release", "benchmarked at", "blessed", "reps per cell"],
+            ["release", "benchmarked at", "blessed", "max reps per cell"],
             [
                 [
                     f"[{s['version']}]({_RELEASES_DIR}/{s['version']}/README.md)",
