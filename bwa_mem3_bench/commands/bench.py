@@ -66,17 +66,30 @@ def compare(*, fg_labs_sha: str, out: Path | None = None) -> None:
     print(f"wrote {out_md}")
 
 
-def regression(*, fg_labs_sha: str, prev: str, out: Path | None = None) -> None:
+def regression(
+    *,
+    fg_labs_sha: str,
+    prev: str,
+    golden_ref_sha: str = "",
+    out: Path | None = None,
+) -> None:
     """Check `fg_labs_sha` for regressions vs a previous `prev` SHA.
 
     Exits non-zero on regression (intended for CI gating).
 
     :param fg_labs_sha: fg-labs SHA to evaluate.
     :param prev: previous fg-labs SHA to compare against.
+    :param golden_ref_sha: the golden the run was submitted with (`submit
+        --golden-ref-sha`). When given, Gate #2 fails closed: a run with no
+        vs-golden comparison, or a cell the golden holds missing one on any rep,
+        fails instead of passing silently. The golden's cells come from its
+        ingested trials, so it must be collected too. Pass it for every bless.
     :param out: output .md path. Defaults to `runs/<sha>/regression.md`.
     """
     out_md = out or (LOCAL_MIRROR_ROOT / "runs" / fg_labs_sha / "regression.md")
-    ok, report = check_regression(db_path=DB_PATH, new_sha=fg_labs_sha, prev_sha=prev)
+    ok, report = check_regression(
+        db_path=DB_PATH, new_sha=fg_labs_sha, prev_sha=prev, golden_ref_sha=golden_ref_sha
+    )
     out_md.parent.mkdir(parents=True, exist_ok=True)
     out_md.write_text(report)
     print(report)

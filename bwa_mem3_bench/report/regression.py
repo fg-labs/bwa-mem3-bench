@@ -51,7 +51,7 @@ from bwa_mem3_bench.registry import (
 from bwa_mem3_bench.report.tables import md_table
 from bwa_mem3_bench.storage import VS_BASELINE, VS_GOLDEN
 from bwa_mem3_bench.storage.queries import query_df
-from bwa_mem3_bench.workflow_config import load_config
+from bwa_mem3_bench.workflow_config import Sample, load_config
 
 # Gate #2 (vs the blessed golden / last release): two fg-labs builds should be
 # ~identical, so this stays tight. Loosening it must be deliberate (re-bless +
@@ -602,20 +602,129 @@ def _scaling_section(scaling: pd.DataFrame) -> list[str]:
     ]
 
 
+def _is_golden_swept(sample: Sample | None, name: str) -> bool:
+    """Whether the workflow requests vs-golden for ``name`` (its `SWEEP_SAMPLES` filter).
+
+    Truth, ``--fast``, ``--compat`` and ALT-aware samples never get a vs-golden
+    comparison, so a golden holding them must not make the gate expect one. A sample
+    missing from the config is kept: there is no filter to say it is exempt. Keep
+    this in step with `SWEEP_SAMPLES` in `workflow/Snakefile`.
+    """
+    if name.endswith("-fast"):
+        return False
+    return sample is None or not (sample.truth or sample.is_compat or sample.alt_aware)
+
+
+def _missing_golden_cells(
+    db_path: Path, new_df: pd.DataFrame, golden_ref_sha: str
+) -> tuple[pd.DataFrame, bool]:
+    """Golden-backed cells of the run that lack a vs-golden comparison on some rep.
+
+    The workflow requests vs-golden for every rep of each sweep (sample, arch) cell
+    the golden holds, so every such trial must have one; a trial without it is a
+    comparison that silently failed to run or ingest. The expected scope is the
+    run's sweep cells intersected with the (sample, arch) cells of the golden run
+    ``golden_ref_sha``, read from its ingested trials -- not from the comparisons
+    that exist, which would let a golden-backed sample with no comparison at all
+    drop out of scope. The golden is blessed from that run, and `bless-release`'s
+    preflight refuses a golden missing any of its cells, so the two hold the same
+    cells.
+
+    Returns ``(missing, ingested)``: one row per (sample, arch) with the number of
+    reps missing the comparison, sorted by (sample, arch); and whether the golden
+    run has any trials. When it has none the scope is unknown, ``missing`` is
+    empty, and `check_regression` fails on ``ingested`` instead.
+    """
+    golden_cells = query_df(
+        db_path,
+        "SELECT DISTINCT sample, arch FROM trials WHERE fg_labs_sha = ?",
+        params=(golden_ref_sha,),
+    )
+    samples = load_config(Path(REPO_ROOT) / "config").samples
+    swept = new_df["sample"].map(lambda name: _is_golden_swept(samples.get(name), name))
+    expected = new_df[swept].merge(golden_cells, on=["sample", "arch"])
+    missing = expected[expected["golden_concordance"].isna()]
+    per_cell = (
+        missing.groupby(["sample", "arch"])
+        .size()
+        .reset_index(name="missing_reps")
+        .sort_values(["sample", "arch"])
+        .reset_index(drop=True)
+    )
+    return per_cell, not golden_cells.empty
+
+
+def _gate2_section(  # noqa: PLR0913
+    *,
+    new_sha: str,
+    golden_ref_sha: str,
+    conc: pd.DataFrame,
+    n_compares: int,
+    golden_ingested: bool,
+    missing: pd.DataFrame,
+) -> list[str]:
+    """Render Gate #2's summary and its missing-comparison failures.
+
+    The summary always appears, so a passing gate shows how much it checked
+    rather than reading the same as a gate that had nothing to check.
+    """
+    out: list[str] = []
+    out.append("## Gate #2 — vs golden")
+    out.append("")
+    if n_compares:
+        out.append(
+            f"{len(conc)} cells, {n_compares} compares, min concordance "
+            f"{conc['golden_concordance'].min():.4f}%."
+        )
+    elif golden_ref_sha:
+        out.append(
+            f"**FAIL:** no vs-golden comparisons for `{new_sha}`, although golden "
+            f"`{golden_ref_sha}` was expected. The run did not compare against it, or "
+            f"the comparisons were not collected."
+        )
+    else:
+        out.append("No vs-golden comparisons (no golden pinned); Gate #2 not evaluated.")
+    out.append("")
+    if not golden_ingested:
+        out.append(
+            f"**FAIL:** no trials for golden `{golden_ref_sha}` in the database, so the "
+            f"cells it holds are unknown and missing comparisons cannot be checked. "
+            f"Run `collect --fg-labs-sha {golden_ref_sha}` first."
+        )
+        out.append("")
+
+    if not missing.empty:
+        out.append("## Gate #2 failures — missing vs-golden comparisons")
+        out.append("")
+        out.append(
+            md_table(
+                ["sample", "arch", "missing_reps"],
+                missing[["sample", "arch", "missing_reps"]].to_records(index=False).tolist(),
+            )
+        )
+        out.append("")
+    return out
+
+
 def check_regression(
     *,
     db_path: Path,
     new_sha: str,
     prev_sha: str,
+    golden_ref_sha: str = "",
 ) -> tuple[bool, str]:
     """Return ``(passes, markdown_report)``.
 
     Gate #1 (vs upstream): per-(sample) observed drift (100 - vs-baseline
     concordance) fails when it exceeds the sample's registry budget. Gate #2
     (vs golden): per-rep vs-golden concordance below the threshold fails its
-    cell. Perf gating uses per-(sample, arch) median walls — a cell fails only
-    when the median is over the regression threshold AND the new wall_s range
-    lies entirely above the prev range (no overlap).
+    cell. When ``golden_ref_sha`` is given (a golden was pinned for the run),
+    Gate #2 also fails closed: on a run with no vs-golden comparison at all, when
+    the golden run's trials are not ingested, and on any rep of a sweep cell the
+    golden holds that lacks the comparison. Perf gating uses per-(sample, arch)
+    median walls — a cell fails only when the median is over the regression
+    threshold AND the new wall_s range lies entirely above the prev range (no
+    overlap).
     """
     new_df = query_df(
         db_path,
@@ -654,6 +763,12 @@ def check_regression(
         .reset_index()
     )
     concordance_fails = conc[conc["golden_concordance"] < CONCORDANCE_THRESHOLD]
+    n_golden_compares = int(new_df["golden_concordance"].notna().sum())
+    missing_golden, golden_ingested = (
+        _missing_golden_cells(db_path, new_df, golden_ref_sha)
+        if golden_ref_sha
+        else (pd.DataFrame(), True)
+    )
     perf_fails = cells[cells["verdict"] == "REGRESSION"]
 
     # Gate #1: vs-upstream drift vs the per-sample registry budget.
@@ -701,6 +816,9 @@ def check_regression(
 
     failing = (
         not concordance_fails.empty
+        or (bool(golden_ref_sha) and n_golden_compares == 0)
+        or not golden_ingested
+        or not missing_golden.empty
         or not perf_fails.empty
         or not budget_fails.empty
         or not missing_baseline.empty
@@ -716,7 +834,12 @@ def check_regression(
         f"metric the budget declares: `concordance` (100 - concordance) or "
         f"`confident_relocation` (% of confidently-mapped primaries placed at a "
         f"different locus).",
-        f"- Gate #2 (vs golden / last release): concordance ≥ {CONCORDANCE_THRESHOLD}%.",
+        f"- Gate #2 (vs golden / last release): concordance ≥ {CONCORDANCE_THRESHOLD}%"
+        + (
+            f" against golden `{golden_ref_sha}`; fails closed on missing comparisons."
+            if golden_ref_sha
+            else ". No golden given, so missing comparisons are not gated."
+        ),
         f"- Gate #3 (thread scaling): efficiency may drop at most "
         f"{scaling_cfg.max_efficiency_drop_pp} pp vs the last release; when the "
         f"baseline's efficiency is unusable (super-linear), per-rung PROCESS() time "
@@ -834,6 +957,17 @@ def check_regression(
             )
         )
         lines.append("")
+
+    lines.extend(
+        _gate2_section(
+            new_sha=new_sha,
+            golden_ref_sha=golden_ref_sha,
+            conc=conc,
+            n_compares=n_golden_compares,
+            golden_ingested=golden_ingested,
+            missing=missing_golden,
+        )
+    )
 
     if not concordance_fails.empty:
         lines.append("## Concordance failures")
