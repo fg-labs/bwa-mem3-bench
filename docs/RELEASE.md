@@ -97,6 +97,8 @@ arena bump.
    given. **Anything that drives the workflow without `cli submit` must pass
    `reps` and `archs` itself** — otherwise the workflow's `reps_default` (1)
    applies, which is how v0.13.0 ended up measured at one rep per cell.
+   Submitting through biffix instead is exactly such a driver: see
+   [Running the bless on biffix](#running-the-bless-on-biffix).
 5. **Watch to completion:** `cli watch`. **Surface spot-capacity stalls** (e.g.
    c7i / Sapphire Rapids droughts) rather than letting the coordinator hang
    silently — indefinitely-`RUNNABLE` jobs never self-fail.
@@ -132,6 +134,77 @@ arena bump.
     then rebuild the base image. `tests/test_arena_ladder.py` fails until both
     are done — that is the guard that keeps step 12 from being forgotten (it was,
     for v0.10.0).
+
+## Running the bless on biffix
+
+The release matrix can also run as a biffix workflow instead of through
+`cli submit`. Steps 1–3 and 6–12 are unchanged; this replaces steps 4–5. Since
+biffix bypasses `cli submit`, the params below set everything `submit` would
+have set, `reps` and `archs` included.
+
+**Register the workflow** from a clean checkout of `main` whenever `main` has
+moved since the last registration. A redeployed biffix starts with no registered
+versions, so check `biffix workflows list` before reusing a version id.
+
+```bash
+QC=(); for q in arch-c6a arch-c7a arch-c7i arch-c7g arch-c8g arch-m7i \
+                arch-m8a-arena arch-m8g-arena arch-c8g64; do QC+=(--queue-class "$q"); done
+biffix workflows register . --name bwa-mem3-bench --project bwa-mem3-bench \
+    --engine-version 9.27.0 --entrypoint workflow/Snakefile "${QC[@]}"
+```
+
+biffix registers only git-tracked files and refuses a `biffix.yaml` that is
+present but untracked, so keep none in the working tree; every default it
+would carry is a flag above. The queue classes must be the deployment's
+arch-pinned classes, and the arena ones must be on-demand.
+
+**Params.** One JSON file per run kind. The smoke params are:
+
+```json
+{
+  "archs": "c6a,c7a,c7i,c7g,c8g,m7i",
+  "batch_queue_prefix": "<deployment queue prefix, e.g. biffix-benchmarks-arch->",
+  "ecr_repo_uri": "<ecr-uri>",
+  "fg_labs_sha": "<sha>",
+  "s3_bucket": "<bucket>",
+  "shared_root": "s3://<bucket>/"
+}
+```
+
+The bless params add `"reps": 5` (`reps_release`) and `"golden_ref_sha": "<prev>"`,
+with `<prev>` resolved to its canonical golden SHA (not a tag alias).
+
+**Submit, one run at a time.** biffix allows one active run per
+`--output-prefix`, so the smokes and the bless run in sequence, never side by
+side:
+
+```bash
+biffix runs submit <version-id> --params <params.json> --target <target> \
+    --output-prefix s3://<bucket>/ \
+    --image <ecr-uri>:<sha> --image <ecr-uri>:<sha>-neoverse-v2 \
+    --name "vX.Y.Z-rc <target> (<sha8>)"
+biffix runs follow <run-id>   # exit 0 succeeded, 8 failed, 9 cancelled
+```
+
+Run it three times, in order: `smoke` and `smoke_meth` with the smoke params,
+then `bless_release` with the bless params.
+
+Pass one `--image` per tag the run pulls: `<sha>` and each host-locked variant
+from step 2. Check the smoke's outputs before submitting the next run:
+`compare/*.json` at 100% on every arch, and `benchmarks/meta.json` showing the
+expected `image_variant` (`neoverse-v2` on c8g).
+
+**Watching.** `biffix runs show <run-id> --output json` gives per-task state,
+host and `log_stream`. Worker logs live in the biffix deployment's AWS account,
+not the bench's, so `cli aws logs` reads them only under a profile for that
+account: `AWS_PROFILE=<biffix-account-profile> pixi run python -m
+bwa_mem3_bench.cli aws logs <batch-job-id>`. Without one, read them in the
+biffix UI, and judge progress from the run's S3 outputs. The arena's m8g task
+finishes well after the rest of the matrix (about 40 minutes after m8a), so a
+lone running arena task near the end is expected.
+
+**Collect and promote.** `cli collect` skips BAMs, so promote the golden with
+`cli bless-golden --fg-labs-sha <sha> --from-s3` (an S3-to-S3 copy).
 
 ## Why not a single auto-run button?
 
