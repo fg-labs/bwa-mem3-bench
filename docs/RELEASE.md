@@ -108,8 +108,15 @@ arena bump.
    `summary`). This is a *judgment* step; the full report and `bless-golden`
    both consume it. Writing it here (not before submit) keeps the preflight and
    ladder invariants intact through the run.
-8. **Check the gates:** `cli bench regression` / `cli bench full-report`. **STOP
-   on any gate failure** — do not promote.
+8. **Check the gates:**
+   `cli bench regression --fg-labs-sha <sha> --prev <prev> --golden-ref-sha <prev>`
+   / `cli bench full-report`. **STOP on any gate failure** — do not promote.
+   Always pass `--golden-ref-sha`: without it Gate #2 checks only the
+   comparisons that exist, so a run that produced or collected none of them
+   passes. With it, Gate #2 fails closed — every rep of every sweep cell the
+   golden's run holds must have a comparison, so the golden must be collected
+   too — and prints a summary (`N cells, M compares, min concordance X%`) to
+   confirm it actually ran.
 9. **Human approval.** Review the report. Blessing is a decision; there is no
    auto-promote.
 10. **Promote:** `cli bless-golden --fg-labs-sha <sha>` (and

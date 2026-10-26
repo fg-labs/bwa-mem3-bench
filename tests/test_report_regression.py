@@ -101,8 +101,13 @@ def _seed_multi(  # noqa: PLR0913 — a fixture builder; each axis is exercised
     golden_pct: float = 99.9999,
     new_variant: str | None = None,
     prev_variant: str | None = None,
+    golden_reps: set[int] | None = None,
 ) -> None:
-    """Seed multi-rep wall_seconds for one (sample, arch) cell on each SHA."""
+    """Seed multi-rep wall_seconds for one (sample, arch) cell on each SHA.
+
+    ``golden_reps`` names the new-SHA reps that get a vs-golden comparison
+    (default: every rep).
+    """
     conn = connect(db)
     upsert_run(conn, fg_labs_sha="new", status="complete")
     upsert_run(conn, fg_labs_sha="old", status="complete")
@@ -146,6 +151,8 @@ def _seed_multi(  # noqa: PLR0913 — a fixture builder; each axis is exercised
             image_variant=new_variant,
             status="ok",
         )
+        if golden_reps is not None and rep not in golden_reps:
+            continue
         upsert_comparison(
             conn,
             trial_id=trial_id,
@@ -156,6 +163,109 @@ def _seed_multi(  # noqa: PLR0913 — a fixture builder; each axis is exercised
             by_class_json=json.dumps({}),
         )
     conn.close()
+
+
+_FLAT = {"new_walls": [100.0, 100.5, 101.0], "prev_walls": [100.0, 100.5, 101.0]}
+
+
+def test_gate2_summary_is_printed_when_it_passes(tmp_path: Path) -> None:
+    """A passing Gate #2 still reports how much it checked."""
+    db = tmp_path / "b.db"
+    _seed_multi(db, **_FLAT)
+    ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old", golden_ref_sha="old")
+    assert ok is True
+    assert "## Gate #2 — vs golden" in report
+    assert "1 cells, 3 compares, min concordance 99.9999%." in report
+
+
+def test_gate2_fails_closed_when_an_expected_golden_has_no_comparisons(tmp_path: Path) -> None:
+    """A pinned golden with no vs-golden comparison at all fails the gate."""
+    db = tmp_path / "b.db"
+    _seed_multi(db, **_FLAT, golden_reps=set())
+    ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old", golden_ref_sha="old")
+    assert ok is False
+    assert "# Regression gate: FAIL" in report
+    assert "no vs-golden comparisons for `new`" in report
+
+
+def test_gate2_without_a_golden_ref_does_not_fail_on_missing_comparisons(tmp_path: Path) -> None:
+    """Without a pinned golden, missing comparisons are reported but not gated."""
+    db = tmp_path / "b.db"
+    _seed_multi(db, **_FLAT, golden_reps=set())
+    ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old")
+    assert ok is True
+    assert "Gate #2 not evaluated" in report
+
+
+def test_gate2_fails_closed_on_a_rep_missing_its_comparison(tmp_path: Path) -> None:
+    """One rep missing its comparison fails the cell, with the missing count."""
+    db = tmp_path / "b.db"
+    _seed_multi(db, **_FLAT, golden_reps={1, 3})
+    ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old", golden_ref_sha="old")
+    assert ok is False
+    assert "## Gate #2 failures — missing vs-golden comparisons" in report
+    assert "| wgs-5M | c6a | 1 |" in report
+
+
+def _add_cell(db: Path, *, sha: str, sample: str, arch: str = "c6a", reps: int = 3) -> None:
+    """Seed flat-wall trials for one (sample, arch) cell on ``sha``, with no comparisons."""
+    conn = connect(db)
+    for rep in range(1, reps + 1):
+        upsert_trial(
+            conn,
+            fg_labs_sha=sha,
+            sample=sample,
+            arch=arch,
+            rep=rep,
+            wall_seconds=100.0,
+            max_rss_mb=1.0,
+            cpu_time=1.0,
+            io_read_mb=1.0,
+            io_write_mb=1.0,
+            mean_load=1.0,
+            reads_processed=1,
+            instance_type=None,
+            availability_zone=None,
+            spot_price=None,
+            status="ok",
+        )
+    conn.close()
+
+
+def test_gate2_fails_closed_on_a_golden_backed_sample_with_no_comparisons(tmp_path: Path) -> None:
+    """A sample the golden holds must be compared even when no rep of it was."""
+    db = tmp_path / "b.db"
+    _seed_multi(db, **_FLAT)
+    _add_cell(db, sha="old", sample="wes-5M")
+    _add_cell(db, sha="new", sample="wes-5M")
+    ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old", golden_ref_sha="old")
+    assert ok is False
+    assert "| wes-5M | c6a | 3 |" in report
+
+
+def test_gate2_expects_only_sweep_cells_the_golden_holds(tmp_path: Path) -> None:
+    """Cells absent from the golden, and truth / fast / compat / alt samples, are not gated."""
+    db = tmp_path / "b.db"
+    _seed_multi(db, **_FLAT)
+    _add_cell(db, sha="new", sample="wes-5M")  # the golden predates this sample
+    _add_cell(db, sha="old", sample="wgs-5M", arch="c7g", reps=1)  # this arch was not run
+    for sample in ("sim-wgs-vars", "wgs-5M-fast", "wgs-5M-compat", "wgs-5M-alt"):
+        _add_cell(db, sha="old", sample=sample, reps=1)
+        _add_cell(db, sha="new", sample=sample, reps=1)
+    ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old", golden_ref_sha="old")
+    assert "## Gate #2 failures" not in report
+    assert ok is True
+
+
+def test_gate2_fails_closed_when_the_golden_run_was_not_ingested(tmp_path: Path) -> None:
+    """Without the golden run's trials there is no scope to check the comparisons against."""
+    db = tmp_path / "b.db"
+    _seed_multi(db, **_FLAT)
+    ok, report = check_regression(
+        db_path=db, new_sha="new", prev_sha="old", golden_ref_sha="unknown"
+    )
+    assert ok is False
+    assert "no trials for golden `unknown`" in report
 
 
 def test_regression_fails_on_clean_multi_rep_regression(tmp_path: Path) -> None:

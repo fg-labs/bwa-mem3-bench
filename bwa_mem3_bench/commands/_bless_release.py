@@ -217,8 +217,9 @@ def _plan(fg_labs_sha: str, golden_ref_sha: str) -> list[str]:
         f"Collect + ingest: {cli} collect --fg-labs-sha {sha}",
         "Write the candidate's docs/release-allowances.yaml entry (to_sha, pr, "
         "expected_drift_pct, summary) -- the drift declaration the report + bless-golden need.",
-        f"Check the gates: {cli} bench regression / full-report  "
-        "(Gate #1 vs-upstream, #2 vs-golden, #3 thread-scaling; STOP on any failure).",
+        f"Check the gates: {cli} bench regression --fg-labs-sha {sha} --prev {golden} "
+        f"--golden-ref-sha {golden} / full-report  (Gate #1 vs-upstream, #2 vs-golden, "
+        "#3 thread-scaling; STOP on any failure).",
         "HUMAN APPROVAL: review the report; blessing is a decision, never automatic.",
         f"Promote: {cli} bless-golden --fg-labs-sha {sha}  "
         "(+ bless-baseline if the upstream tag moved).",
