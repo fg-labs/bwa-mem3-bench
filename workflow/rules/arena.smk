@@ -215,7 +215,7 @@ into `/dev/null` before every run (see "Warmup" above).
 Output: every arm produces uncompressed BAM, by the cheapest route the tool
 has, streamed through a pipe into `cat > file`. Every bwa-mem3 build writes it
 natively (`--bam=0 -o -`), as the sweep (`align.smk`) and the thread-scaling
-ladder (`scaling.smk`) also time it (there to a file directly);
+ladder (`scaling.smk`) also time it, through the same `cat`;
 `--bam` predates the oldest tracked release (fg-labs/bwa-mem3#12, before
 v0.2.1). bwa, upstream bwa-mem2 and minibwa only emit SAM, so their route is
 SAM piped through `samtools view -u`, and that cost is part of what using them

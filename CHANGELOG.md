@@ -61,6 +61,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The sweep and thread-scaling ladder no longer time htslib's close-time
+  fsync.** `align_fg_labs` and `align_thread_scaling` write `--bam=0 -o -`
+  piped into `cat`, as the arena does, instead of `-o file`: htslib
+  fdatasync()s a regular-file output at close, and bwa-mem3's default
+  single-threaded BGZF writer leaves the whole sync to then (~6 s for ~3.5 GB
+  on a 500 MB/s gp3 volume). The upstream arms (`align_baseline`,
+  `align_minibwa`, `align_bwa`) pipe their `samtools view -u` through `cat` the
+  same way, so `wall_speedup` / `minibwa_speedup` stay like-for-like. Wall times
+  step down at this boundary with no code change; `PROCESS()`-based metrics,
+  including thread-scaling efficiency, are unaffected where `PROCESS()` parses
+  (a rung whose `PROCESS()` did not parse falls back to wall time and shifts).
+  The upstream arms are cached by tool version (`baseline/`, `minibwa/`,
+  `bwa/`), so cached reps keep the old writer until re-run; a speedup ratio
+  pairing a new bwa-mem3 run with a cached upstream rep mixes the two methods.
 - **The arena runs paired rounds, and its headline ratio is paired.** Arms are
   grouped into index-family blocks; each block runs a discarded warmup round,
   then `arena.reps` (candidate's block, now 5) or `context_reps` measured rounds

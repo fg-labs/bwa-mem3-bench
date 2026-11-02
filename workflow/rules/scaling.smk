@@ -182,10 +182,14 @@ rule align_thread_scaling:
             for rep in $(seq 1 "$R"); do
                 TS="$OUTDIR/runs/timing.t${{T}}.rep${{rep}}.tsv"
                 ERR="$OUTDIR/runs/bwa.t${{T}}.rep${{rep}}.log"
+                # BAM to stdout through `cat`, not `-o file`: htslib fdatasync()s a
+                # regular-file output at close, which would time a disk flush that
+                # does not scale with T (see "Why the final writer is `cat`" in
+                # arena.smk).
                 tricorder --out "$TS" -- \
                     bash -c "set -o pipefail; bwa-mem2.fg-labs mem -t ${{T}} {params.mem_flags} {params.extra} \
-                        --bam=0 -o '$OUTDIR/runs/o.bam' \
-                        {input.ref[0]} {input.fastqs} 2>'$ERR'"
+                        --bam=0 -o - \
+                        {input.ref[0]} {input.fastqs} 2>'$ERR' | cat > '$OUTDIR/runs/o.bam'"
                 # Reject a silently-truncated run before it becomes a data point:
                 # an OOM-killed aligner still leaves a timing row.
                 if [ "$(samtools view -c "$OUTDIR/runs/o.bam")" -eq 0 ]; then

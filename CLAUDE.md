@@ -572,8 +572,19 @@ from `arch.baseline_arch` in `config/archs.yaml`:
   default single-threaded BGZF writer defers the whole ~3.5 GB sync to close
   (~6 s idle on a 500 MB/s gp3 volume, which made native BAM look 25% SLOWER
   than SAM via `samtools -@4`, whose threaded writer syncs during the run).
-  The sweep and thread-scaling ladder still write `--bam=0 -o file`, so their
-  WALL times carry that tail; their PROCESS()-based metrics do not.
+  The sweep (`align_fg_labs`) and thread-scaling ladder (`align_thread_scaling`)
+  now write `--bam=0 -o - | cat > file` too. Before that change they wrote
+  `-o file`, so their WALL times from earlier runs carry the fsync tail (a step
+  down in wall at the boundary with no code change); their PROCESS()-based
+  metrics never did. Compare wall across that boundary only on PROCESS().
+  The SAM-emitting upstream arms (`align_baseline` both branches,
+  `align_minibwa`, `align_bwa`) pipe `samtools view -u -o -` through `cat` the
+  same way, but they are cached by tool version (`baseline/bwa-mem2-<tag>/`,
+  `minibwa/<sha>/`, `bwa/<ver>/`): cached reps keep the old writer, so
+  `wall_speedup` / `minibwa_speedup` mix the two methods until those reps are
+  re-aligned (`submit --forcerun align_baseline ...`). The release perf gate
+  reads wall only, so the first bless after this change gates sync-free
+  candidate walls against a previous release's walls that include it.
 
 - **Snakemake silently clamps `threads`, and `--dry-run` will not show
   it.** Our executor fork derives a Batch job's VCPU from `threads`
