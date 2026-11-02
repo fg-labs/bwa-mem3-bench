@@ -490,3 +490,102 @@ def test_the_snapshot_freezes_which_build_measured_each_arch(
     variants = _snapshot(db, config)["image_variants"]
     assert variants["c8g"] == "neoverse-v2"
     assert variants["c6a"] == ""
+
+
+def test_a_legacy_arena_snapshot_keeps_the_ratio_of_medians(snap: dict[str, Any]) -> None:
+    """Rows without a schedule `block` carry no paired estimate, so a re-rendered
+    legacy release page is unchanged."""
+    assert all("vs_prior" not in row for row in snap["arena"]["m8a"])
+
+
+def _pair_the_fixture_arena(db: Path, candidate_walls: dict[int, float]) -> None:
+    """Turn the fixture's arena into a paired-round one: every row gets a block,
+    the candidate and v110 run adjacently (v110 leading in odd rounds), and the
+    candidate's per-round walls are overridden."""
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE arena SET block = 'bwa-mem2-stock', position = 9")
+    conn.execute("UPDATE arena SET position = 3 WHERE label IN ('bwa', 'minibwa')")
+    for rep in (1, 2, 3):
+        prior_pos, cand_pos = (1, 2) if rep % 2 else (2, 1)
+        for prior, cand in (("v110", "fg-labs-default"), ("v110-fast", "fg-labs-fast")):
+            conn.execute(
+                "UPDATE arena SET position = ? WHERE label = ? AND rep = ?", (prior_pos, prior, rep)
+            )
+            conn.execute(
+                "UPDATE arena SET position = ? WHERE label = ? AND rep = ?", (cand_pos, cand, rep)
+            )
+    for rep, wall in candidate_walls.items():
+        conn.execute(
+            "UPDATE arena SET wall_seconds = ? WHERE label = 'fg-labs-default' AND rep = ?",
+            (wall, rep),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_a_paired_arena_publishes_the_paired_estimate(
+    tmp_path: Path, config: WorkflowConfig
+) -> None:
+    db = tmp_path / "bench.db"
+    _seed(db)
+    _pair_the_fixture_arena(db, {1: 40.0, 2: 40.0, 3: 40.0})
+    snapshot = _snapshot(db, config)
+    candidate = next(row for row in snapshot["arena"]["m8a"] if row["label"] == "fg-labs-default")
+    assert candidate["vs_prior"] == 1.25  # noqa: PLR2004 -- 50 s / 40 s, every round
+    assert candidate["vs_prior_note"] == "paired"
+    readme = results.render_release_readme(snapshot)
+    assert "| 1.25x |" in readme
+    assert "3 paired rounds (comparators 3), median" in readme
+
+
+def test_an_inconclusive_paired_estimate_is_marked_on_the_page(
+    tmp_path: Path, config: WorkflowConfig
+) -> None:
+    db = tmp_path / "bench.db"
+    _seed(db)
+    _pair_the_fixture_arena(db, {1: 40.0, 2: 45.0, 3: 35.0})
+    readme = results.render_release_readme(_snapshot(db, config))
+    assert "(inconclusive)" in readme
+
+
+def test_a_link_with_no_clean_round_shows_only_its_note(
+    tmp_path: Path, config: WorkflowConfig
+) -> None:
+    """Every candidate round cold: the page must not fall back to a bare ratio of
+    medians over the very runs the estimator rejected."""
+    db = tmp_path / "bench.db"
+    _seed(db)
+    _pair_the_fixture_arena(db, {1: 40.0, 2: 40.0, 3: 40.0})
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE arena SET io_in_mb = 5000 WHERE label = 'fg-labs-default'")
+    conn.commit()
+    conn.close()
+    readme = results.render_release_readme(_snapshot(db, config))
+    assert "— (inconclusive)" in readme
+    assert "| 1.25x |" not in readme
+
+
+def test_the_snapshot_excludes_warmup_rounds_and_writer_controls(
+    tmp_path: Path, config: WorkflowConfig
+) -> None:
+    db = tmp_path / "bench.db"
+    _seed(db)
+    conn = connect(db)
+    for label, rep in (("fg-labs-default", 0), ("fg-labs-default-sam", 1)):
+        upsert_arena(
+            conn,
+            fg_labs_sha=SHA,
+            arch="m8a",
+            label=label,
+            mode="default",
+            rep=rep,
+            wall_seconds=1.0,
+            cpu_time=16.0,
+            max_rss_mb=1024.0,
+            process_seconds=0.5,
+        )
+    conn.close()
+    rows = _snapshot(db, config)["arena"]["m8a"]
+    candidate = next(row for row in rows if row["label"] == "fg-labs-default")
+    assert candidate["n"] == 3  # noqa: PLR2004 -- the round-0 warmup is not counted
+    assert not any(row["label"].endswith("-sam") for row in rows)

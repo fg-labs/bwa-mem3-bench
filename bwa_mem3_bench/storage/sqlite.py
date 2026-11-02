@@ -49,6 +49,8 @@ EXPECTED_SCHEMA_VERSION = SCHEMA_VERSION
 #              placement axis).
 #   v12 → v13: added trials.image_variant — c8g/c8g64 moved to a core-tuned
 #              image, and nothing recorded which binary measured a cell.
+#   v13 → v14: added the arena's per-run schedule position and host-state
+#              columns (`ARENA_V14_COLUMNS`) for the paired-round schedule.
 # Only versions whose step needs an ALTER get a constant; v4 does not (its step
 # added a whole table).
 _SCHEMA_V1 = 1
@@ -61,6 +63,22 @@ _SCHEMA_V9 = 9
 _SCHEMA_V10 = 10
 _SCHEMA_V11 = 11
 _SCHEMA_V12 = 12
+_SCHEMA_V13 = 13
+
+# Columns v14 added to `arena`, with their SQL types, in table order.
+ARENA_V14_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("block", "TEXT"),
+    ("position", "INTEGER"),
+    ("writer", "TEXT"),
+    ("index_read_seconds", "REAL"),
+    ("io_in_mb", "REAL"),
+    ("page_cache_start_mb", "REAL"),
+    ("thp_fault_fallback", "INTEGER"),
+    ("compact_stall", "INTEGER"),
+    ("pgmajfault", "INTEGER"),
+    ("memfree_mb", "REAL"),
+    ("anon_huge_mb", "REAL"),
+)
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -206,6 +224,19 @@ def _forward_migrate(conn: sqlite3.Connection, existing_version: int) -> None:
     # older version need not actually lack every column that version implies.
     if existing_version <= _SCHEMA_V12 and not _column_exists(conn, "trials", "image_variant"):
         conn.execute("ALTER TABLE trials ADD COLUMN image_variant TEXT")
+    # v13 -> v14. A DB older than v11 had no `arena`, so executescript just
+    # CREATEd it with these columns; the per-column guard covers that and any
+    # fixture stamped with a version it does not fully carry.
+    if existing_version <= _SCHEMA_V13 and _table_exists(conn, "arena"):
+        _add_arena_v14_columns(conn)
+
+
+def _add_arena_v14_columns(conn: sqlite3.Connection) -> None:
+    """Add each `ARENA_V14_COLUMNS` column the `arena` table lacks."""
+    for column, sql_type in ARENA_V14_COLUMNS:
+        if not _column_exists(conn, "arena", column):
+            # Both names come from the constant above, never from input.
+            conn.execute(f"ALTER TABLE arena ADD COLUMN {column} {sql_type}")
 
 
 def upsert_run(  # noqa: PLR0913
@@ -510,41 +541,76 @@ def upsert_arena(  # noqa: PLR0913
     max_rss_mb: float | None,
     process_seconds: float | None,
     instance_id: str | None = None,
+    block: str | None = None,
+    position: int | None = None,
+    writer: str | None = None,
+    index_read_seconds: float | None = None,
+    io_in_mb: float | None = None,
+    page_cache_start_mb: float | None = None,
+    thp_fault_fallback: int | None = None,
+    compact_stall: int | None = None,
+    pgmajfault: int | None = None,
+    memfree_mb: float | None = None,
+    anon_huge_mb: float | None = None,
     commit: bool = True,
 ) -> None:
-    """Insert or update one arm+rep of an arena run.
+    """Insert or update one run of an arena job.
 
     Keyed on (sha, arch, label, mode, rep) so re-ingesting a run is
     idempotent, matching `upsert_scaling`'s contract for the thread-scaling
     ladder. Every numeric column is nullable: a SKIPPED arm (arena.smk's
     "Never hard-fail on an old binary") writes NULLs, not zeros, so it reads
     as "could not measure" rather than as a suspiciously fast result.
+
+    ``block`` through ``anon_huge_mb`` (`ARENA_V14_COLUMNS`) are the per-run
+    schedule position and host state of a paired-round arena; they stay NULL
+    for arenas recorded before that schedule, which is how the report tells the
+    two apart.
     """
+    columns = (
+        "fg_labs_sha",
+        "arch",
+        "label",
+        "mode",
+        "rep",
+        "wall_seconds",
+        "cpu_time",
+        "max_rss_mb",
+        "process_seconds",
+        "instance_id",
+        *(column for column, _ in ARENA_V14_COLUMNS),
+    )
+    values = (
+        fg_labs_sha,
+        arch,
+        label,
+        mode,
+        rep,
+        wall_seconds,
+        cpu_time,
+        max_rss_mb,
+        process_seconds,
+        instance_id,
+        block,
+        position,
+        writer,
+        index_read_seconds,
+        io_in_mb,
+        page_cache_start_mb,
+        thp_fault_fallback,
+        compact_stall,
+        pgmajfault,
+        memfree_mb,
+        anon_huge_mb,
+    )
+    updates = ", ".join(f"{column} = excluded.{column}" for column in columns[5:])
     conn.execute(
-        """
-        INSERT INTO arena
-            (fg_labs_sha, arch, label, mode, rep,
-             wall_seconds, cpu_time, max_rss_mb, process_seconds, instance_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(fg_labs_sha, arch, label, mode, rep) DO UPDATE SET
-            wall_seconds = excluded.wall_seconds,
-            cpu_time = excluded.cpu_time,
-            max_rss_mb = excluded.max_rss_mb,
-            process_seconds = excluded.process_seconds,
-            instance_id = excluded.instance_id
-        """,
-        (
-            fg_labs_sha,
-            arch,
-            label,
-            mode,
-            rep,
-            wall_seconds,
-            cpu_time,
-            max_rss_mb,
-            process_seconds,
-            instance_id,
-        ),
+        f"""
+        INSERT INTO arena ({", ".join(columns)})
+        VALUES ({", ".join("?" for _ in columns)})
+        ON CONFLICT(fg_labs_sha, arch, label, mode, rep) DO UPDATE SET {updates}
+        """,  # noqa: S608 -- column names come from constants, values are bound
+        values,
     )
     if commit:
         conn.commit()

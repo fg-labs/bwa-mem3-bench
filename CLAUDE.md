@@ -544,6 +544,37 @@ from `arch.baseline_arch` in `config/archs.yaml`:
   B faster on ordering alone. Prewarm, discard the first N runs, then
   ALTERNATE A/B within each rep so residual drift hits both equally.
 
+- **The arena's headline ratio must come from PAIRED runs, and its rows before
+  2026-11 are a different method.** Until then the arena ran every rep of one
+  label back-to-back and only shuffled label order, so all of a label's reps
+  shared one moment of host state. The 0a65bec mock bless exposed it: on m8a the
+  candidate's three reps all ran with 1.4-1.9 GiB of heap on 4 KB pages (BSW
+  ~17% slower), while the same binary's pin probe on the same host measured
+  PROCESS() 16.80 s against 18.27-18.76 s, so the reported 1.02x vs v0.15.1 was
+  a position effect. The arena now runs index-family blocks of paired ROUNDS
+  (`arena_arms.build_schedule`): candidate and prior release back-to-back every
+  round with alternating lead, `vs_prior_release` the lead-balanced median of
+  per-round ratios (with an odd round count a plain median sides with whichever
+  arm led more often), cold rounds dropped, `inconclusive` below 3 clean rounds
+  or above 5% spread. It also switched every
+  bwa-mem3 arm to native `--bam=0` (it had been paying SAM formatting, 5.5 of
+  18.7 s PROCESS() on m8a), so absolute arena walls and the vs-bwa / vs-minibwa
+  ratios jump at that boundary without any code change. Rows from before carry
+  NULL `block` and render as `unpaired`. `--config arena_labels=a,b,...`
+  narrows a run (e.g. to two releases), stages only the index families the
+  remaining arms read (the stock plain `.fasta` is always staged, as
+  `{input.ref[0]}`), skips the pin probe when no candidate arm is left, and
+  leaves `runs/NARROWED-arena_labels.txt` in the job's profile tarball. Never narrow an arena on a SHA whose full arena you will publish:
+  its `arena.tsv` lands at the same path. Stock-ladder links run
+  `context_reps` (2) rounds, below the report's 3-clean-round floor, so they are
+  noted `context` by design. Every arm's output goes through `| cat > file`,
+  never htslib straight to a file: htslib's `bgzf_close` fdatasync()s a regular file, and bwa-mem3's
+  default single-threaded BGZF writer defers the whole ~3.5 GB sync to close
+  (~6 s idle on a 500 MB/s gp3 volume, which made native BAM look 25% SLOWER
+  than SAM via `samtools -@4`, whose threaded writer syncs during the run).
+  The sweep and thread-scaling ladder still write `--bam=0 -o file`, so their
+  WALL times carry that tail; their PROCESS()-based metrics do not.
+
 - **Snakemake silently clamps `threads`, and `--dry-run` will not show
   it.** Our executor fork derives a Batch job's VCPU from `threads`
   (`vcpu = max(1, job.threads ...)`), so anything that shrinks `threads`

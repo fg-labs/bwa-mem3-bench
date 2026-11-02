@@ -465,14 +465,18 @@ class ThreadScalingStep:
 # skipping, long enough that a transient neighbour does not dominate the sample.
 _DEFAULT_HOST_PROBE_SECONDS = 10.0
 
-# Seconds per PER-LABEL host-contention probe the arena takes after every
-# label's reps finish, when `arena.label_probe_seconds` is absent. Shares
+# Seconds per PER-ROUND host-contention probe the arena takes at the start of
+# every schedule round, when `arena.label_probe_seconds` is absent. Shares
 # `sweep_host_probe_seconds`'s "cheap and frequent" rationale, not
-# `host_probe_seconds`'s "two readings total" one: ~13-14 labels x 2 modes
-# means one probe per label instead of one per whole job, so it must stay
-# small enough that a 2 s tax x ~26 labels (~1 minute) stays negligible
-# against an hour-plus arena job.
+# `host_probe_seconds`'s "two readings total" one: ~15 rounds means one probe
+# per round instead of one per whole job, so it must stay small enough that the
+# 2 s tax (well under a minute in all) stays negligible against the job.
 _DEFAULT_LABEL_PROBE_SECONDS = 2.0
+
+# Arena scheduling defaults; see `Arena` and `arena_arms.build_schedule`.
+_DEFAULT_ARENA_CONTEXT_REPS = 2
+_DEFAULT_ARENA_PREWARM_PASSES = 2
+_DEFAULT_ARENA_BALLOON_MB = 40000
 
 # The stock (default) on-disk SA sample-rate shift bwa-mem3 `index`/`re-sa`
 # produce: rate 1/(1<<3) = stride-8. `arena.dense_sa_shift` defaults here, which
@@ -541,11 +545,12 @@ class Arena:
     reps: int
     threads: int
     host_probe_seconds: float = _DEFAULT_HOST_PROBE_SECONDS
-    # Wall-clock budget for the PER-LABEL tachyon probe `align_arena` takes
-    # once each label's reps are done -- see
-    # `bwa_mem3_bench.arena_arms.front_load_fast_arms`'s module docstring for
-    # the drift this diagnoses. Distinct from `host_probe_seconds`, which
-    # brackets the WHOLE job (one "pre" and one "post" reading only).
+    # Wall-clock budget for the PER-ROUND tachyon probe `align_arena` takes at
+    # the start of every schedule round (phase `round-<block>-<n>`) -- see
+    # `bwa_mem3_bench.arena_arms`'s module docstring for the drift this
+    # diagnoses. Distinct from `host_probe_seconds`, which brackets the WHOLE
+    # job (one "pre" and one "post" reading only). The name predates the
+    # per-round schedule; it is kept so existing configs keep loading.
     label_probe_seconds: float = _DEFAULT_LABEL_PROBE_SECONDS
     # SA-sample-rate shift the arena's `> v0.12.0` arms align against, staged as
     # a separate `re-sa -u INT` on-disk index (fg-labs/bwa-mem3#510; sample rate
@@ -556,6 +561,23 @@ class Arena:
     # arena.smk. Valid range [1, 3]; the on-disk floor is 0 (stride-1) but the
     # arena never densifies below stride-2.
     dense_sa_shift: int = STOCK_SA_SHIFT
+    # Measured rounds for every schedule block that does NOT hold the
+    # candidate (the stock-index release ladder, bwa, minibwa). `reps` is the
+    # candidate's block. See `bwa_mem3_bench.arena_arms.build_schedule`.
+    context_reps: int = _DEFAULT_ARENA_CONTEXT_REPS
+    # How many times the untimed `cat` prewarm reads an arm's index before each
+    # run. A second pass marks single-touch pages "active" on the kernel's LRU,
+    # so the run's own ~27 GB heap allocation evicts them less readily.
+    prewarm_passes: int = _DEFAULT_ARENA_PREWARM_PASSES
+    # Anonymous memory (MB) allocated, touched and freed at every schedule
+    # block boundary, to evict the previous index family's page cache and hand
+    # the next block contiguous free memory. Must stay below the job's cgroup
+    # limit (`ARENA_MEM_MB` in arena.smk). 0 disables it.
+    balloon_mb: int = _DEFAULT_ARENA_BALLOON_MB
+    # Add `<candidate>-sam` / `<prior>-sam` control arms that run the two
+    # bwa-mem3 builds through the SAM-text writer, measuring what native BAM
+    # output saves. Off by default; turn on for one run to publish the number.
+    sam_writer_control: bool = False
 
 
 @dataclass(frozen=True)
@@ -1273,8 +1295,10 @@ def _arena_from(
     :param archs: parsed archs, to check every referenced arch exists.
     :return: the validated `Arena`.
     :raises ValueError: on a missing key, unknown sample/arch, an empty
-        `archs` list, a `reps`/`threads` value that is not an integer >= 1, or
-        a `host_probe_seconds`/`label_probe_seconds` that is not a finite
+        `archs` list, a `reps`/`threads`/`context_reps`/`prewarm_passes` value
+        that is not an integer >= 1, a `balloon_mb` that is not an integer >= 0,
+        a non-boolean `sam_writer_control`, or a
+        `host_probe_seconds`/`label_probe_seconds` that is not a finite
         number > 0.
     """
     if not isinstance(raw, dict):
@@ -1310,7 +1334,7 @@ def _arena_from(
         )
 
     # Same rigour, same reason: pasted into `align_arena`'s shell body
-    # (`emit-host-probe "label-${label}" {params.label_probe_seconds}`).
+    # (`emit-host-probe "round-${block}-${round}" {params.label_probe_seconds}`).
     raw_label_probe = raw.get("label_probe_seconds", _DEFAULT_LABEL_PROBE_SECONDS)
     if (
         isinstance(raw_label_probe, bool)
@@ -1337,6 +1361,18 @@ def _arena_from(
         reference_names={samples[sample].reference},
     )
 
+    # Pasted into `align_arena`'s shell body (`dd ... bs=<balloon_mb>M`), so a
+    # malformed value must fail here, not an hour into a paid on-demand job.
+    balloon_mb = raw.get("balloon_mb", _DEFAULT_ARENA_BALLOON_MB)
+    if not isinstance(balloon_mb, int) or isinstance(balloon_mb, bool) or balloon_mb < 0:
+        raise ValueError(f"`arena` `balloon_mb` must be an integer >= 0; got {balloon_mb!r}")
+
+    sam_writer_control = raw.get("sam_writer_control", False)
+    if not isinstance(sam_writer_control, bool):
+        raise ValueError(
+            f"`arena` `sam_writer_control` must be a boolean; got {sam_writer_control!r}"
+        )
+
     return Arena(
         sample=sample,
         archs=list(raw_archs),
@@ -1345,6 +1381,14 @@ def _arena_from(
         host_probe_seconds=float(raw_probe),
         label_probe_seconds=float(raw_label_probe),
         dense_sa_shift=dense_sa_shift,
+        context_reps=_as_positive_int(
+            "`arena`", "context_reps", raw.get("context_reps", _DEFAULT_ARENA_CONTEXT_REPS)
+        ),
+        prewarm_passes=_as_positive_int(
+            "`arena`", "prewarm_passes", raw.get("prewarm_passes", _DEFAULT_ARENA_PREWARM_PASSES)
+        ),
+        balloon_mb=balloon_mb,
+        sam_writer_control=sam_writer_control,
     )
 
 

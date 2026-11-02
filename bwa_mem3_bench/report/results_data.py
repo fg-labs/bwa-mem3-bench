@@ -22,9 +22,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 from bwa_mem3_bench import minibwa_sha
 from bwa_mem3_bench.arena_ladder import arena_releases
 from bwa_mem3_bench.release_allowances import ReleaseAllowance, sha_prefix_match
+from bwa_mem3_bench.report.arena import arena_rows, arena_table_from_rows
 from bwa_mem3_bench.storage.ingest import baseline_sha_for
 from bwa_mem3_bench.storage.queries import query_df
 from bwa_mem3_bench.workflow_config import WorkflowConfig
@@ -328,14 +331,24 @@ def _dataset_snapshot(
 
 def _arena_snapshot(db_path: Path, sha: str, version: str) -> dict[str, list[dict[str, Any]]]:
     """Per-arch arena rows: every arm's medians, with ratios oriented bwa-mem3-faster > 1."""
-    df = query_df(
-        db_path,
-        """
-        SELECT arch, label, mode, wall_seconds, process_seconds, max_rss_mb, cpu_time
-        FROM arena WHERE fg_labs_sha = ? ORDER BY arch, label, mode, rep
-        """,
-        params=(sha,),
-    )
+    # `arena_rows` is the one definition of a measured row (no warmup round 0,
+    # no `-sam` writer controls), shared with `bench arena`.
+    df = arena_rows(db_path, sha)
+    # The release-over-release estimate `bench arena` reports, so the published
+    # page and the CLI never quote different numbers. Carried for every link of
+    # a paired-round arena (rows with a schedule `block`) together with its note,
+    # even when no clean round left a value, so a cold or cross-block link is
+    # never shown as a bare ratio. A legacy arena gets none of this and keeps
+    # the ratio-of-medians its page always showed, so it re-renders unchanged.
+    paired_arches = set(df.loc[df["block"].notna(), "arch"].astype(str))
+    vs_prior = {
+        (str(r.arch), str(r.label), str(r.mode)): (
+            None if pd.isna(r.vs_prior_release) else float(r.vs_prior_release),
+            str(r.prior_note),
+        )
+        for r in arena_table_from_rows(df).itertuples(index=False)
+        if str(r.arch) in paired_arches and isinstance(r.prior_note, str)
+    }
     arena: dict[str, list[dict[str, Any]]] = {}
     for arch, group in df.groupby("arch", sort=True):
         rows = []
@@ -368,6 +381,10 @@ def _arena_snapshot(db_path: Path, sha: str, version: str) -> dict[str, list[dic
                     "rss_gb": _round(_median(rss), 1),
                 }
             )
+            prior = vs_prior.get((str(arch), str(label), str(mode)))
+            if prior is not None:
+                rows[-1]["vs_prior"] = None if prior[0] is None else _round(prior[0], 3)
+                rows[-1]["vs_prior_note"] = prior[1]
         arena[str(arch)] = rows
     return arena
 

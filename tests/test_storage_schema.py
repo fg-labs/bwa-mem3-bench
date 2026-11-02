@@ -7,6 +7,7 @@ import pytest
 
 from bwa_mem3_bench.storage import sqlite as sqlite_module
 from bwa_mem3_bench.storage.sqlite import (
+    ARENA_V14_COLUMNS,
     EXPECTED_SCHEMA_VERSION,
     connect,
     upsert_accuracy,
@@ -767,4 +768,29 @@ def test_v12_db_migrates_to_v13_adding_image_variant(db_path: Path) -> None:
     (ver,) = conn.execute("PRAGMA user_version").fetchone()
     assert ver == EXPECTED_SCHEMA_VERSION
     assert conn.execute("SELECT image_variant FROM trials").fetchall() == [(None,)]
+    conn.close()
+
+
+def test_v13_db_migrates_to_v14_adding_the_arena_host_state_columns(db_path: Path) -> None:
+    """A v13 DB gains the arena's per-run schedule/host-state columns; existing
+    arena rows survive with NULL, which the report reads as a legacy arena."""
+    conn = connect(db_path)
+    conn.execute("INSERT INTO runs(fg_labs_sha, status) VALUES ('old', 'complete')")
+    conn.execute(
+        "INSERT INTO arena(fg_labs_sha, arch, label, mode, rep, wall_seconds) "
+        "VALUES ('old', 'm8a', 'v151', 'default', 1, 20.0)"
+    )
+    for column, _ in ARENA_V14_COLUMNS:
+        conn.execute(f"ALTER TABLE arena DROP COLUMN {column}")
+    conn.execute("PRAGMA user_version = 13")
+    conn.commit()
+    conn.close()
+
+    conn = connect(db_path)
+    assert {column for column, _ in ARENA_V14_COLUMNS} <= set(_columns(conn, "arena"))
+    (ver,) = conn.execute("PRAGMA user_version").fetchone()
+    assert ver == EXPECTED_SCHEMA_VERSION
+    assert conn.execute("SELECT wall_seconds, block, writer FROM arena").fetchall() == [
+        (20.0, None, None)
+    ]
     conn.close()

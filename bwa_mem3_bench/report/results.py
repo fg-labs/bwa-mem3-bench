@@ -24,6 +24,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from bwa_mem3_bench.report.arena import NOTE_PAIRED
 from bwa_mem3_bench.report.results_data import ARCH_CPUS
 from bwa_mem3_bench.report.tables import md_table
 
@@ -111,6 +112,25 @@ def _arena_comparator_table(rows: list[dict[str, Any]], version: str) -> str:
     )
 
 
+def _vs_previous(row: dict[str, Any], previous_wall: float | None) -> str:
+    """The "vs previous row" cell.
+
+    A paired-round snapshot carries `bench arena`'s estimate and its note
+    (`vs_prior` / `vs_prior_note`, see `results_data._arena_snapshot`); the note
+    is shown unless the link was cleanly `paired`, and a link with no clean round
+    shows only the note. A legacy snapshot has neither and keeps the ratio of the
+    two medians its page always showed.
+    """
+    note = row.get("vs_prior_note")
+    if note is None:
+        return _ratio(previous_wall, row["wall_s"])
+    value = row.get("vs_prior")
+    if value is None:
+        return f"{EM_DASH} ({note})"
+    cell = f"{value:.2f}x"
+    return cell if note == NOTE_PAIRED else f"{cell} ({note})"
+
+
 def _arena_history_table(rows: list[dict[str, Any]]) -> str:
     """Every bwa-mem3 release on the ladder, oldest first, stock and --fast."""
     stock = [r for r in rows if r["kind"] != "comparator" and r["mode"] == "default"]
@@ -128,7 +148,7 @@ def _arena_history_table(rows: list[dict[str, Any]]) -> str:
                 row["display"],
                 _fmt(row["wall_s"]),
                 _fmt(fast_wall),
-                _ratio(previous_wall, row["wall_s"]),
+                _vs_previous(row, previous_wall),
                 _fmt(row["rss_gb"], 1),
             ]
         )
@@ -138,6 +158,20 @@ def _arena_history_table(rows: list[dict[str, Any]]) -> str:
         ["release", "median wall (s)", "`--fast` wall (s)", "vs previous row", "peak RSS (GB)"],
         table_rows,
     )
+
+
+def _arena_heading_counts(rows: list[dict[str, Any]]) -> str:
+    """How many measurements sit behind one arch's arena tables.
+
+    A legacy arena ran every arm the same number of reps. A paired-round arena
+    gives the candidate's block more rounds than the comparators' blocks
+    (`arena.reps` vs `arena.context_reps`), so both counts are stated.
+    """
+    if not any("vs_prior_note" in row for row in rows):
+        return f"{max((row['n'] for row in rows), default=0)} reps"
+    candidate = max((row["n"] for row in rows if row["kind"] == "candidate"), default=0)
+    comparators = max((row["n"] for row in rows if row["kind"] == "comparator"), default=0)
+    return f"{candidate} paired rounds (comparators {comparators})"
 
 
 def _arena_order(rows: list[dict[str, Any]], ladder: list[str]) -> list[dict[str, Any]]:
@@ -184,10 +218,10 @@ def render_release_readme(snap: dict[str, Any]) -> str:
     ]
     for arch, rows in snap["arena"].items():
         ordered = _arena_order(rows, snap["arena_ladder"])
-        n_reps = max((r["n"] for r in rows), default=0)
+        heading_counts = _arena_heading_counts(rows)
         lines += [
             "",
-            f"### {arch} ({ARCH_CPUS.get(arch, arch)}), {n_reps} reps, median",
+            f"### {arch} ({ARCH_CPUS.get(arch, arch)}), {heading_counts}, median",
             "",
             _arena_comparator_table(ordered, v),
             "",
