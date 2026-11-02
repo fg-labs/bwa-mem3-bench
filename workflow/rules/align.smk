@@ -20,8 +20,9 @@ SIGTERM/SIGINT/SIGHUP to the child's process group so spot interruptions
 tear the alignment down cleanly instead of leaking children.
 
 The timed region emits UNCOMPRESSED BAM (no sort): fg-labs bwa-mem2 writes it
-directly (`--bam=0 -o`), while upstream bwa-mem2 / bwameth (SAM-only) pipe
-through `samtools view -u`. This measures the realistic aligner cost — a real
+natively (`--bam=0 -o -`, piped into `cat` so htslib's close-time fdatasync
+is not timed), while upstream bwa-mem2 / bwameth (SAM-only) pipe
+through `samtools view -u -o -` and the same `cat`. This measures the realistic aligner cost — a real
 pipeline feeds the aligner's BAM straight into sort/zipper, so compressing it
 in the aligner step is wasted work. A second, UNTIMED `samtools view -b` step
 compresses the `.raw` output to the final BAM for the compare + S3 upload, then
@@ -419,10 +420,10 @@ rule align_fg_labs:
         #   given the plain `<ref>` prefix; a `.bwameth.c2t` path would now error
         #   (fg-labs/bwa-mem3#174). `shm --meth`: fg-labs/bwa-mem3 shm.md.
         #
-        # The aligner writes BAM directly (`--bam=0 -o`), so there is no pipe to
-        # fail; an aligner that dies (e.g. OOM-killed -> SIGKILL, exit 137)
-        # leaves a truncated/empty `.raw` that the record-count check rejects.
-        # `set -o pipefail` is retained defensively (harmless without a pipe).
+        # The aligner writes BAM to stdout (`--bam=0 -o -`) piped into `cat`, and
+        # `set -o pipefail` makes an aligner failure fail the pipe; an aligner
+        # that dies (e.g. OOM-killed -> SIGKILL, exit 137) also leaves a
+        # truncated/empty `.raw` that the record-count check rejects.
         r"""
         set -euo pipefail
         mkdir -p $(dirname {output.bam}) $(dirname {output.timing})
@@ -453,18 +454,23 @@ rule align_fg_labs:
         # pre reading, not a stacked second one.
         emit-host-probe pre {params.probe_seconds} > {output.host_probe}
         # Timed region emits UNCOMPRESSED BAM straight from bwa-mem2 (`--bam=0
-        # -o`): no SAM-text serialization and no separate samtools process, and
+        # -o -`): no SAM-text serialization and no separate samtools process, and
         # no wasted zlib work — realistic, since a real pipeline feeds the
         # aligner's BAM straight into sort/zipper, which re-read it anyway.
         # `--meth` (from {params.extra}) already implies BAM output and honors
-        # `-o`, so the one invocation covers both meth and non-meth. bash -c
-        # scopes the `2>` redirect to the aligner so tricorder's own stderr is
-        # untouched; a crashed aligner leaves a truncated/empty `.raw` that the
-        # record-count check below rejects.
+        # `-o -`, so the one invocation covers both meth and non-meth. The BAM
+        # goes to stdout and through `cat` rather than to a file: htslib's
+        # `bgzf_close` fdatasync()s a regular-file output, and bwa-mem3's default
+        # single-threaded BGZF writer leaves the whole sync to close, so `-o file`
+        # timed several seconds of disk flush after PROCESS() (see "Why the final
+        # writer is `cat`" in arena.smk). bash -c scopes the `2>` redirect to the
+        # aligner so tricorder's own stderr is untouched; pipefail surfaces an
+        # aligner failure through the pipe, and a crashed aligner leaves a
+        # truncated/empty `.raw` that the record-count check below rejects.
         tricorder --out {output.timing} -- \
             bash -c 'set -o pipefail; bwa-mem2.fg-labs mem -t {threads} {params.batch_flag} {params.mem_flags} {params.extra} \
-                --bam=0 -o "{output.bam}.raw" \
-                {input.ref[0]} {input.fastqs} 2>"{output.bwa_stderr}"'
+                --bam=0 -o - \
+                {input.ref[0]} {input.fastqs} 2>"{output.bwa_stderr}" | cat > "{output.bam}.raw"'
         # Defense in depth: reject a header-only BAM even if the aligner exited 0.
         if [ "$(samtools view -c {output.bam}.raw)" -eq 0 ]; then
             echo "ERROR: {output.bam}.raw has 0 alignment records (aligner crashed/OOM?)" >&2
@@ -558,20 +564,22 @@ rule align_baseline:
             tricorder --out {output.timing} -- \
                 bash -c 'set -o pipefail; bwameth.py --threads {threads} --reference {input.ref[0]} \
                     {input.fastqs} 2>"{output.bwa_stderr}" \
-                  | samtools view -@4 -u -o {output.bam}.raw -'
+                  | samtools view -@4 -u -o - - | cat > "{output.bam}.raw"'
         else
             # `mem_flags` (e.g. -K for Hi-C) applied here too so the baseline
             # matches the fg-labs invocation and concordance stays symmetric.
             tricorder --out {output.timing} -- \
                 bash -c 'set -o pipefail; {params.binary} mem -t {threads} {params.batch_flag} {params.mem_flags} \
                     {input.ref[0]} {input.fastqs} 2>"{output.bwa_stderr}" \
-                  | samtools view -@4 -u -o {output.bam}.raw -'
+                  | samtools view -@4 -u -o - - | cat > "{output.bam}.raw"'
         fi
         # Upstream bwa-mem2 / bwameth emit SAM text, so `samtools view -u`
         # materializes UNCOMPRESSED BAM in the timed region — symmetric with the
         # fg-labs rule's uncompressed output so the comparison isn't skewed by a
         # compression step. (bwa-mem2 can't self-emit BAM; that extra samtools
-        # parse is a genuine part of its cost.)
+        # parse is a genuine part of its cost.) samtools writes stdout through
+        # `cat`, like align_fg_labs, so neither arm times htslib's close-time
+        # fdatasync of a regular file and `wall_speedup` stays like-for-like.
         # Defense in depth: reject a header-only BAM even if the aligner exited 0.
         if [ "$(samtools view -c {output.bam}.raw)" -eq 0 ]; then
             echo "ERROR: {output.bam}.raw has 0 alignment records (aligner crashed/OOM?)" >&2

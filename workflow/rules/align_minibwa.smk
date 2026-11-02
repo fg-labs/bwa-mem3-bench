@@ -127,11 +127,13 @@ rule align_minibwa:
         # UNCOMPRESSED BAM in the timed region — symmetric with the fg-labs /
         # baseline rules so the wall-time comparison isn't skewed by a
         # compression step the aligner's real downstream (sort/zipper) discards.
+        # Written through `cat`, not `-o file`, so the timed region excludes
+        # htslib's close-time fdatasync (see align_fg_labs).
         tricorder --out {output.timing} -- \
             bash -c 'set -o pipefail; minibwa map -t {threads} {params.flags} {params.meth_flag} \
                 {input.ref[0]} {input.fastqs} \
                 2> >(tee "{output.minibwa_stderr}" >&2) \
-              | samtools view -@4 -u -o {output.bam}.raw -'
+              | samtools view -@4 -u -o - - | cat > "{output.bam}.raw"'
         # Defense in depth: reject a header-only BAM even if minibwa exited 0.
         if [ "$(samtools view -c {output.bam}.raw)" -eq 0 ]; then
             echo "ERROR: {output.bam}.raw has 0 alignment records (minibwa crashed/OOM?)" >&2

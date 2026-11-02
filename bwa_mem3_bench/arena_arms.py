@@ -45,7 +45,7 @@ FAMILY_BWA_MEM2_STOCK = "bwa-mem2-stock"
 FAMILY_BWA_MEM2_DENSE = "bwa-mem2-dense"
 
 # Output writers recorded per run. `bam` is a bwa-mem3 binary's native
-# uncompressed BAM (`--bam=0 -o`); `sam` is SAM text piped through
+# uncompressed BAM (`--bam=0 -o -`); `sam` is SAM text piped through
 # `samtools view -u` -- the only route to BAM for bwa, upstream bwa-mem2 and
 # minibwa, and the opt-in control arm (`SAM_CONTROL_SUFFIX`) for bwa-mem3.
 WRITER_BAM = "bam"

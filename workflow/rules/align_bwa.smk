@@ -123,10 +123,12 @@ rule align_bwa:
             > /dev/null 2>/dev/null || true
         # `set -o pipefail`: a SIGKILL'd aligner must fail the pipeline, not let
         # samtools exit 0 on a partial header stream (see align_fg_labs).
+        # samtools writes through `cat`, not `-o file`, so the timed region
+        # excludes htslib's close-time fdatasync (see align_fg_labs).
         tricorder --out {output.timing} -- \
             bash -c 'set -o pipefail; bwa mem -t {threads} {params.batch_flag} {params.mem_flags} \
                 {input.ref[0]} {input.fastqs} 2>"{output.bwa_stderr}" \
-              | samtools view -@4 -u -o {output.bam}.raw -'
+              | samtools view -@4 -u -o - - | cat > "{output.bam}.raw"'
         # Defense in depth: reject a header-only BAM even if the aligner exited 0.
         if [ "$(samtools view -c {output.bam}.raw)" -eq 0 ]; then
             echo "ERROR: {output.bam}.raw has 0 alignment records (aligner crashed/OOM?)" >&2

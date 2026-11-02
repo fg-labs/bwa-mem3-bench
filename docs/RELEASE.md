@@ -117,6 +117,12 @@ arena bump.
    golden's run holds must have a comparison, so the golden must be collected
    too — and prints a summary (`N cells, M compares, min concordance X%`) to
    confirm it actually ran.
+   **The first bless after v0.16.0 straddles a writer change:** the sweep stopped
+   timing htslib's close-time fdatasync, so the candidate's walls drop by up to
+   ~6 s per cell with no code change while the v0.16.0 walls it is gated against
+   still include it. The perf gate reads wall only, so for that one bless a
+   regression smaller than the step is masked and "improvement" counts are
+   inflated. Cross-check any suspect cell on `process_seconds` (unaffected).
 9. **Human approval.** Review the report. Blessing is a decision; there is no
    auto-promote.
 10. **Promote:** `cli bless-golden --fg-labs-sha <sha>` (and
