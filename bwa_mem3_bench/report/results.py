@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from bwa_mem3_bench.report.arena import NOTE_PAIRED
-from bwa_mem3_bench.report.results_data import ARCH_CPUS
+from bwa_mem3_bench.report.results_data import ARCH_CPUS, release_label_to_version
 from bwa_mem3_bench.report.tables import md_table
 
 EM_DASH = "—"
@@ -71,6 +71,27 @@ def _version_key(version: str) -> tuple[int, ...]:
 # ---------------------------------------------------------------------------
 
 
+# The non-bwa-mem3 arena arms, as (arena label, published name), in table order.
+_ARENA_COMPARATORS = (("bwa", "bwa"), ("bwa-mem2-upstream", "bwa-mem2"), ("minibwa", "minibwa"))
+
+# The last ladder release on the stock index: when the arena's dense index is on,
+# every later release arm is dense too (`ARENA_DENSE_SA_MIN_LABEL` in arena.smk,
+# pinned equal by a test).
+_ARENA_DENSE_AFTER = "v120"
+
+
+def _arena_comparator_names(snap: dict[str, Any]) -> list[str]:
+    """Published names of the non-bwa-mem3 aligners the snapshot's arena actually measured.
+
+    A SKIPPED arm keeps a null ``wall_s`` and is left out of the arena table, so it is
+    left out here too.
+    """
+    labels = {
+        row["label"] for rows in snap["arena"].values() for row in rows if row["wall_s"] is not None
+    }
+    return [name for label, name in _ARENA_COMPARATORS if label in labels]
+
+
 def _arena_comparator_table(rows: list[dict[str, Any]], version: str) -> str:
     by_label = {(r["label"], r["mode"]): r for r in rows}
     ours = by_label.get(("fg-labs-default", "default"))
@@ -93,7 +114,7 @@ def _arena_comparator_table(rows: list[dict[str, Any]], version: str) -> str:
             _fmt(ours_fast["rss_gb"], 1) if ours_fast else EM_DASH,
         ],
     ]
-    for label, name in (("bwa", "bwa"), ("bwa-mem2-upstream", "bwa-mem2"), ("minibwa", "minibwa")):
+    for label, name in _ARENA_COMPARATORS:
         row = by_label.get((label, "default"))
         if row is None or row["wall_s"] is None:
             continue
@@ -215,6 +236,11 @@ def render_release_readme(snap: dict[str, Any]) -> str:
         "threads, "
         "so these ratios are like-for-like. Speedup is the other aligner's wall time "
         f"divided by bwa-mem3's: above 1 means bwa-mem3 is faster. {_arena_index_note(snap)}",
+        "",
+        "Every row, earlier releases included, was re-measured in this release's arena run, "
+        "so the rows compare with each other but not with the walls on another release's "
+        "page: the arena's method has changed between releases (see "
+        "[the methodology page](../../methodology.md)).",
     ]
     for arch, rows in snap["arena"].items():
         ordered = _arena_order(rows, snap["arena_ladder"])
@@ -257,10 +283,26 @@ def _arena_index_note(snap: dict[str, Any]) -> str:
     stride = snap["arena_sa_stride"]
     if stride == 8:  # noqa: PLR2004
         return "Every aligner used its stock index."
+    ladder = snap["arena_ladder"]
+    later = ladder[ladder.index(_ARENA_DENSE_AFTER) + 1 :] if _ARENA_DENSE_AFTER in ladder else []
+    dense: list[str] = []
+    for label in later:  # releases before this one; the ladder may run past it
+        version = release_label_to_version(label)
+        if version == snap["version"]:
+            break
+        dense.append(version)
+    if not dense:
+        return (
+            f"bwa-mem3 {snap['version']} used a denser stride-{stride} suffix-array index "
+            "(byte-identical output, more memory, reflected in its RSS); every other arm "
+            "used its stock index."
+        )
+    span = dense[0] if len(dense) == 1 else f"{dense[0]} to {dense[-1]}"
     return (
-        f"bwa-mem3 {snap['version']} used a denser stride-{stride} suffix-array index "
-        "(byte-identical output, more memory, reflected in its RSS); every other arm used "
-        "its stock index."
+        f"bwa-mem3 {snap['version']} and releases {span} used a denser stride-{stride} "
+        "suffix-array index (byte-identical output, more memory, reflected in their RSS); "
+        f"{release_label_to_version(_ARENA_DENSE_AFTER)} and older releases, and the other "
+        "aligners, used their stock index."
     )
 
 
@@ -314,6 +356,21 @@ def _speed_section(d: dict[str, Any], snap: dict[str, Any]) -> list[str]:
             ]
         )
     single = d["sample"] in _SINGLE_REP_DATASETS or snap["max_reps"] < 2  # noqa: PLR2004
+    arena_link = "[arena](README.md#headline-same-host-speed-arena)"
+    arena_names = _arena_comparator_names(snap)
+    against = ", ".join(arena_names)
+    if d["sample"] != snap["arena_sample"]:
+        arena_note = (
+            f"The same-host {arena_link} measures only `{snap['arena_sample']}` (against "
+            f"{against}), so this dataset has no same-host number."
+        )
+    elif comparator in arena_names:
+        arena_note = f"The same-host {arena_link} is the number to quote."
+    else:
+        arena_note = (
+            f"The same-host {arena_link} runs this dataset against {against} but not "
+            f"{comparator}, so it is the number to quote for those aligners only."
+        )
     lines = [
         "## Speed by instance type",
         "",
@@ -321,8 +378,7 @@ def _speed_section(d: dict[str, Any], snap: dict[str, Any]) -> list[str]:
         f"{_sweep_index_note(snap)} "
         "**Indicative only**: the reps of one cell can land on different hosts, "
         f"and the {comparator} column was measured in a separate run on other hosts, so "
-        "the ratio mixes code speed with host variation. The same-host "
-        "[arena](README.md#headline-same-host-speed-arena) is the number to quote. "
+        f"the ratio mixes code speed with host variation. {arena_note} "
         f"`vs {comparator}` above 1 means bwa-mem3 is faster.",
     ]
     if single:

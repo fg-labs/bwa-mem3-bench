@@ -8,6 +8,7 @@ a thread-scaling ladder -- enough to exercise every page.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -589,3 +590,66 @@ def test_the_snapshot_excludes_warmup_rounds_and_writer_controls(
     candidate = next(row for row in rows if row["label"] == "fg-labs-default")
     assert candidate["n"] == 3  # noqa: PLR2004 -- the round-0 warmup is not counted
     assert not any(row["label"].endswith("-sam") for row in rows)
+
+
+def test_only_the_arena_dataset_page_points_at_the_arena(snap: dict[str, Any]) -> None:
+    """The arena measures one sample against bwa / bwa-mem2 / minibwa, so only the page for
+    that sample and an arena comparator may call the arena "the number to quote"."""
+    pages = {d["sample"]: results.render_dataset_page(d, snap) for d in snap["datasets"]}
+    assert "is the number to quote" in pages["wgs-5M"]
+    meth = pages["meth-twist-emseq-5M"]  # bwameth, and not the arena sample
+    assert "is the number to quote" not in meth
+    assert "measures only `wgs-5M`" in meth
+    # A non-arena sample is not covered even when its comparator is in the arena...
+    moved = {**snap, "arena_sample": "meth-twist-emseq-5M"}
+    pages = {d["sample"]: results.render_dataset_page(d, moved) for d in moved["datasets"]}
+    assert "is the number to quote" not in pages["wgs-5M"]
+    # ...and the arena sample's page with a comparator the arena lacks says so.
+    assert "but not bwameth" in pages["meth-twist-emseq-5M"]
+
+
+def test_arena_note_names_only_comparators_the_arena_ran(snap: dict[str, Any]) -> None:
+    meth = next(d for d in snap["datasets"] if d["sample"] == "meth-twist-emseq-5M")
+    names = results._arena_comparator_names(snap)
+    assert names  # the fixture's arena has comparators
+    page = results.render_dataset_page(meth, snap)
+    assert f"(against {', '.join(names)})" in page
+
+
+def test_arena_note_omits_a_comparator_the_arena_skipped(snap: dict[str, Any]) -> None:
+    """A SKIPPED comparator row has no wall time and is left out of the arena table, so
+    the dataset pages must not name it as an arena comparator either."""
+    assert "minibwa" in results._arena_comparator_names(snap)
+    skipped = {
+        **snap,
+        "arena": {
+            arch: [{**row, "wall_s": None} if row["label"] == "minibwa" else row for row in rows]
+            for arch, rows in snap["arena"].items()
+        },
+    }
+    assert "minibwa" not in results._arena_comparator_names(skipped)
+
+
+def test_arena_dense_threshold_matches_the_workflow() -> None:
+    """The results pages and arena.smk must agree on which releases ran dense."""
+    text = (Path(__file__).resolve().parents[1] / "workflow/rules/arena.smk").read_text()
+    match = re.search(r'^ARENA_DENSE_SA_MIN_LABEL = "([^"]+)"', text, re.MULTILINE)
+    assert match is not None
+    assert match.group(1) == results._ARENA_DENSE_AFTER
+
+
+def test_arena_index_note_names_the_dense_earlier_releases(snap: dict[str, Any]) -> None:
+    """Releases after v0.12.0 run dense in the arena too, and their RSS shows it."""
+    later = {**snap, "version": "v0.16.0"}
+    note = results._arena_index_note(later)
+    assert "releases v0.13.0 to v0.15.1 used a denser stride-2" in note
+    assert "v0.12.0 and older releases" in note
+    assert "every other arm" not in note
+
+
+def test_arena_readme_says_every_row_comes_from_this_release_run(snap: dict[str, Any]) -> None:
+    """Arena rows are re-measured each release, under that release's method, so the page
+    must not invite comparing its absolute walls with another release's page."""
+    readme = results.render_release_readme(snap)
+    assert "re-measured in this release's arena run" in readme
+    assert "not with the walls on another release's page" in readme

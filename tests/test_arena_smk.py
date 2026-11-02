@@ -1031,10 +1031,77 @@ def test_meminfo_snapshot_reads_the_expected_proc_fields(tmp_path: Path) -> None
     }
 
 
+# A candidate SHA that is not on the arena ladder. A ladder SHA (e.g. the latest
+# release's) is refused by the candidate guard once the inputs exist.
+_NEW_CANDIDATE_SHA = "1234567890abcdef1234567890abcdef12345678"
+_LADDER_SHA = "0a65bec1f47f8b773cf40b85d16833de010c8107"  # v160
+_LADDER_ALIAS_SHA = "fa688f0bc019968844073ae7d3fe124cf66d0011"  # v0.16.0's tag commit
+
+
+def _arena_dry_run(tmp_path: Path, sha: str, *config: str) -> subprocess.CompletedProcess[str]:
+    """`snakemake -n` for the m8a arena target of ``sha`` in ``tmp_path``."""
+    return subprocess.run(  # noqa: S603, S607 -- fixed args, no shell
+        [
+            "snakemake",
+            "-s",
+            str(SNAKEFILE),
+            "--directory",
+            str(tmp_path),
+            "-n",
+            "--config",
+            f"fg_labs_sha={sha}",
+            *config,
+            "--",
+            f"arena/{sha}/m8a/arena.tsv",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=180,
+    )
+
+
+def _touch_arena_inputs(tmp_path: Path, sha: str, *config: str) -> None:
+    """Create every input the dry run reports missing, so params are evaluated."""
+    result = _arena_dry_run(tmp_path, sha, *config)
+    output = result.stdout + result.stderr
+    affected = output.split("affected files:", 1)[1]
+    for line in affected.splitlines()[1:]:
+        path = line.strip()
+        if not path or " " in path or ":" in path:
+            break
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).touch()
+
+
+@pytest.mark.parametrize("sha", [_LADDER_SHA, _LADDER_ALIAS_SHA])
+def test_arena_refuses_a_candidate_already_on_the_ladder(tmp_path: Path, sha: str) -> None:
+    """Behavioural: with inputs present, a ladder SHA (or its tag alias) fails the DAG."""
+    _touch_arena_inputs(tmp_path, sha)
+    result = _arena_dry_run(tmp_path, sha)
+    assert result.returncode != 0
+    assert "already on the arena ladder as 'v160'" in result.stdout + result.stderr
+
+
+def test_arena_allows_a_ladder_sha_when_no_candidate_arm_runs(tmp_path: Path) -> None:
+    """A narrowed run of releases only (no `fg-labs-*` arm) has nothing to self-pair."""
+    labels = "arena_labels=v151,v160"
+    _touch_arena_inputs(tmp_path, _LADDER_SHA, labels)
+    result = _arena_dry_run(tmp_path, _LADDER_SHA, labels)
+    assert result.returncode == 0, (result.stdout + result.stderr)[-2000:]
+
+
+def test_arena_accepts_a_new_candidate(tmp_path: Path) -> None:
+    _touch_arena_inputs(tmp_path, _NEW_CANDIDATE_SHA)
+    result = _arena_dry_run(tmp_path, _NEW_CANDIDATE_SHA)
+    assert result.returncode == 0, (result.stdout + result.stderr)[-2000:]
+
+
 def _arena_missing_inputs(tmp_path: Path, *config: str) -> str:
     """`snakemake -n` for one arena target in an empty directory: every input is
     missing, so the error lists exactly what `align_arena` would stage."""
-    sha = "0a65bec1f47f8b773cf40b85d16833de010c8107"
+    sha = _NEW_CANDIDATE_SHA
     result = subprocess.run(  # noqa: S603, S607 -- fixed args, no shell
         [
             "snakemake",
@@ -1076,7 +1143,7 @@ def test_arena_labels_stages_only_the_index_families_its_arms_read(tmp_path: Pat
 
 def test_arena_labels_rejects_a_label_no_arm_runs(tmp_path: Path) -> None:
     """A typo would otherwise silently drop arms from a paid on-demand job."""
-    sha = "0a65bec1f47f8b773cf40b85d16833de010c8107"
+    sha = _NEW_CANDIDATE_SHA
     result = subprocess.run(  # noqa: S603, S607 -- fixed args, no shell
         [
             "snakemake",
@@ -1180,3 +1247,9 @@ def test_narrowed_staging_skips_unread_bwa_mem3_index_sets(tmp_path: Path) -> No
     stock_only = _arena_missing_inputs(tmp_path, "arena_labels=v021")
     assert "references/hg38/Homo_sapiens_assembly38.fasta.bwt.2bit.64" in stock_only
     assert "references/hg38-u1/" not in stock_only
+
+
+def test_arena_schedule_refuses_a_candidate_already_on_the_ladder() -> None:
+    """The guard sits where the candidate SHA meets the ladder, so every arena job runs it."""
+    body = ARENA_SMK.read_text().split("def _arena_schedule(", 1)[1].split("\ndef ", 1)[0]
+    assert "check_candidate_not_on_ladder(seed, ARENA_RELEASES, _ARENA_LEDGER)" in body

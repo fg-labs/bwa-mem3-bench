@@ -11,6 +11,8 @@ How these numbers were produced, and what each comparison means, is in [the meth
 
 Every aligner below ran interleaved on one dedicated on-demand host per architecture, aligning `wgs-5M` with 16 threads, so these ratios are like-for-like. Speedup is the other aligner's wall time divided by bwa-mem3's: above 1 means bwa-mem3 is faster. Every aligner used its stock index.
 
+Every row, earlier releases included, was re-measured in this release's arena run, so the rows compare with each other but not with the walls on another release's page: the arena's method has changed between releases (see [the methodology page](../../methodology.md)).
+
 ### c8a (AMD EPYC Turin (Zen 5), AVX-512), 3 reps, median
 
 | aligner | median wall (s) | bwa-mem3 speedup | `--fast` speedup | peak RSS (GB) |

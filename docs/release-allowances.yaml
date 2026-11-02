@@ -917,3 +917,52 @@ allowances:
     # pinned to the tag resolves here.
     aliases:
       - 51ee7ebde618dfbcee8a4f17f7a69bc5e7c4e955   # v0.15.1 release tag (merge of #594; tree-identical to a6b2ba1e)
+  - to_sha: 0a65bec1f47f8b773cf40b85d16833de010c8107
+    pr: fg-labs/bwa-mem3#637
+    date: 2026-11-02
+    summary: >-
+      v0.16.0: NO output change vs the v0.15.1 golden (a6b2ba1e). Gate #2 is
+      100.0000% on all 38 golden-backed cells, meth included (190 compares, 5 reps
+      across the six sweep archs). The release is 28 performance changes (#641-#681:
+      FMI seeding walks, packed chaining keys, tiered and length-packed 8-bit
+      extension, AVX-512BW kswv two-row sweep, XA string pruning, streamed last
+      --bam=0 batch, no start-up calibration sleep, THP for the shm index), two
+      methylation features (--meth=5base, --meth-context cpg, both opt-in) and 13
+      fixes for inputs or options this corpus does not exercise (negative seed
+      scores, '-' read bases, kswv tier bounds, option validation), none of which
+      moves a record here.
+
+      Gate #1 passes (72/72): all 70 DNA vs-upstream cells 100.0000%; meth
+      confident relocation vs bwameth 0.1257% (meth-twist-emseq-5M) and 0.1717%
+      (smoke-meth) against a 0.25% budget, identical to v0.15.1. vs_x86 is 100.0000%
+      on all 14 ARM cells (62 compares). All 432 --compat identity checks (216
+      bwa-mem2 + 216 bwa) are IDENTICAL, as is compat thread-invariance on c8g64 and
+      the arena's fgumi full-content check against v0.15.1 on m8a and m8g. Gate #3
+      passes; the v0.15.1 ladder reads super-linear, so the gate fell back to
+      per-rung PROCESS() time, which is 9-16% lower at every rung (64 threads 9.91
+      -> 9.03 s).
+
+      PERFORMANCE, arena (first release on the paired-rounds arena, fg-labs/
+      bwa-mem3-bench#132: candidate and prior release back-to-back for 5 rounds,
+      every bwa-mem3 arm writing native --bam=0, so absolute walls are not
+      comparable with earlier arena rows): default preset 1.14x (m8a, 18.65 ->
+      16.36 s) / 1.09x (m8g, 31.29 -> 28.72 s) vs v0.15.1 as a ratio of medians;
+      the paired per-round estimate is 1.150x / 1.090x. --fast 1.17x (10.60 ->
+      9.05 s, paired estimate inconclusive: per-round spread 1.08-1.18x) / 1.13x
+      (14.08 -> 12.46 s). PROCESS() ratios 1.16x / 1.09x. Against minibwa (SAM
+      through samtools view -u) on the default preset, bwa-mem3 is 1.84x faster
+      on m8a (16.36 vs 30.10 s) and 1.40x on m8g (28.72 vs 40.35 s). The cross-run
+      perf table flags no regression: of 171 cells, 93 improvement, 21 flat, 57
+      noisy, mean -12.0%. No drift, so nothing to accept.
+    expected_drift_pct: 0.0
+    # Golden lives under 0a65bec1 -- main, benched via biffix run-04e9148f with
+    # target bless_release, reps=5 across the six sweep archs, plus the
+    # thread-scaling ladder (smokes: run-1be3219f / run-1584db9b). Its arena was
+    # re-run on the paired-rounds method as run-84a68223 (the first-method arena
+    # outputs are archived). The v0.16.0 tag (fa688f0b, release-please #637) is 3
+    # commits ahead; they touch only tests, CI, CHANGELOG, version.txt and one
+    # Makefile test-target line, so src/ is identical and the shipped binary
+    # differs only in its version string. Aliased so a vs-golden run pinned to
+    # the tag resolves here.
+    aliases:
+      - fa688f0bc019968844073ae7d3fe124cf66d0011   # v0.16.0 release tag (release-please #637; src/ identical to 0a65bec1)

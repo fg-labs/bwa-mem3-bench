@@ -39,8 +39,10 @@ All commands are `pixi run python -m bwa_mem3_bench.cli <subcommand>`.
    ECR URI / bucket / region from `cdk/outputs.json` (or env vars) and writes
    `workflow/profiles/aws-batch/config.yaml` (gitignored).
 4. **Build + push image**: `build --fg-labs-sha <sha> --image-name <ecr-uri>
-   --push`. **Always required** when `workflow/`, `config/`, `docker/`, or the
-   `bwa_mem3_bench` package changes — those are `COPY`ed into the image.
+   --push`. **Always required** when `workflow/`, `config/`, `docker/`,
+   `docs/release-allowances.yaml`, or the `bwa_mem3_bench` package changes —
+   those are `COPY`ed into the image. The ledger is read at parse time by the
+   arena's ladder guard, so a ledger-only alias edit still needs a rebuild.
    This builds `FROM` the base image (see below), which must already be pushed.
    **Plus one push per host-locked variant `config/archs.yaml` routes an arch
    to** — today `build ... --baseline-arch neoverse-v2 --push`, the

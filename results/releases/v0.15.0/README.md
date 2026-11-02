@@ -9,7 +9,9 @@ How these numbers were produced, and what each comparison means, is in [the meth
 
 ## Headline: same-host speed (arena)
 
-Every aligner below ran interleaved on one dedicated on-demand host per architecture, aligning `wgs-5M` with 16 threads, so these ratios are like-for-like. Speedup is the other aligner's wall time divided by bwa-mem3's: above 1 means bwa-mem3 is faster. bwa-mem3 v0.15.0 used a denser stride-2 suffix-array index (byte-identical output, more memory, reflected in its RSS); every other arm used its stock index.
+Every aligner below ran interleaved on one dedicated on-demand host per architecture, aligning `wgs-5M` with 16 threads, so these ratios are like-for-like. Speedup is the other aligner's wall time divided by bwa-mem3's: above 1 means bwa-mem3 is faster. bwa-mem3 v0.15.0 and releases v0.13.0 to v0.14.1 used a denser stride-2 suffix-array index (byte-identical output, more memory, reflected in their RSS); v0.12.0 and older releases, and the other aligners, used their stock index.
+
+Every row, earlier releases included, was re-measured in this release's arena run, so the rows compare with each other but not with the walls on another release's page: the arena's method has changed between releases (see [the methodology page](../../methodology.md)).
 
 ### m8a (AMD EPYC Turin (Zen 5), AVX-512), 3 reps, median
 
