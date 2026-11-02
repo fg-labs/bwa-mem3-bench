@@ -1117,7 +1117,7 @@ def test_shipped_config_sets_an_arena_host_probe_budget() -> None:
 def test_arena_rejects_a_bad_label_probe_budget(seconds: object) -> None:
     """Same rigour as `arena.host_probe_seconds`, for the same reason: the
     value is pasted into `align_arena`'s shell body
-    (`emit-host-probe "label-${label}" {params.label_probe_seconds}`), so a
+    (`emit-host-probe "round-${block}-${round}" {params.label_probe_seconds}`), so a
     malformed one would fail a paid on-demand Batch job rather than the
     config load."""
     with pytest.raises(ValueError, match=r"arena\.label_probe_seconds"):
@@ -1560,3 +1560,42 @@ def test_image_variants_lists_what_a_build_must_publish() -> None:
 )
 def test_variant_platform(variant: str, expected: str | None) -> None:
     assert variant_platform(variant) == expected
+
+
+def test_arena_schedule_knobs_default_when_omitted() -> None:
+    arena = _arena()
+    assert arena.context_reps == 2  # noqa: PLR2004
+    assert arena.prewarm_passes == 2  # noqa: PLR2004
+    assert arena.balloon_mb == 40000  # noqa: PLR2004
+    assert arena.sam_writer_control is False
+
+
+def test_shipped_arena_balloon_fits_under_the_job_memory_limit() -> None:
+    """The balloon is pasted into `dd bs=<N>M`; above align_arena's 56000 MB
+    cgroup limit it would get the job OOM-killed at the first block boundary."""
+    arena_smk = (CONFIG_DIR.parent / "workflow" / "rules" / "arena.smk").read_text()
+    match = re.search(r"^ARENA_MEM_MB = (\d+)$", arena_smk, re.MULTILINE)
+    assert match, "arena.smk must declare ARENA_MEM_MB"
+    assert load_config(CONFIG_DIR).arena.balloon_mb < int(match.group(1))
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("context_reps", 0),
+        ("context_reps", 1.5),
+        ("prewarm_passes", 0),
+        ("prewarm_passes", True),
+        ("balloon_mb", -1),
+        ("balloon_mb", "40000"),
+        ("balloon_mb", False),
+        ("sam_writer_control", "yes"),
+    ],
+)
+def test_arena_rejects_malformed_schedule_knobs(key: str, value: object) -> None:
+    with pytest.raises(ValueError, match=key):
+        _arena(**{key: value})
+
+
+def test_arena_accepts_a_disabled_balloon() -> None:
+    assert _arena(balloon_mb=0).balloon_mb == 0

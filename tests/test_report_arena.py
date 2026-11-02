@@ -22,6 +22,7 @@ import pandas as pd
 from bwa_mem3_bench.report.arena import (
     build_arena_table,
     build_release_speedup_table,
+    build_writer_control_table,
     render_arena_markdown,
     render_release_speedup_markdown,
 )
@@ -121,7 +122,7 @@ def test_vs_prior_release_walks_each_releases_own_predecessor(tmp_path: Path) ->
 
 def test_vs_prior_release_survives_shuffled_insertion_order(tmp_path: Path) -> None:
     """The bug this guards: `align_arena` writes arms to arena.tsv in an order
-    that `arena_arms.front_load_fast_arms` SHUFFLES per run (seeded by the SHA),
+    that `arena_arms.build_schedule` SHUFFLES every round (seeded by the SHA),
     so `arena.id` insertion order is NOT chronological. The report used to sort
     the release chain by `min_id` and so divided each release by whatever label
     happened to precede it in the shuffle -- a real, silent corruption seen in
@@ -174,13 +175,17 @@ def test_vs_prior_release_includes_fg_labs_default(tmp_path: Path) -> None:
     )
 
 
-def test_vs_prior_release_excludes_fast_and_comparators(tmp_path: Path) -> None:
+def test_vs_prior_release_chains_fast_arms_and_excludes_comparators(tmp_path: Path) -> None:
+    """`--fast` arms chain to the previous release's `--fast` arm (release notes
+    quote both modes); comparators never get a prior-release ratio."""
     db_path = tmp_path / "benchmark.db"
     _seed_db(db_path)
     df = build_arena_table(db_path=db_path, fg_labs_sha=FG_LABS_SHA)
 
     fast_row = df[(df["label"] == "fg-labs-fast") & (df["mode"] == "fast")].iloc[0]
-    assert fast_row["vs_prior_release"] is None or math.isnan(fast_row["vs_prior_release"])
+    assert math.isclose(fast_row["vs_prior_release"], 40.0 / 65.0, rel_tol=TOL)
+    oldest_fast = df[(df["label"] == "v040-fast") & (df["mode"] == "fast")].iloc[0]
+    assert math.isnan(oldest_fast["vs_prior_release"])
     for label in ("bwa", "minibwa", "bwa-mem2-upstream"):
         row = df[(df["label"] == label) & (df["mode"] == "default")].iloc[0]
         assert row["vs_prior_release"] is None or math.isnan(row["vs_prior_release"])
@@ -274,7 +279,7 @@ def test_render_arena_markdown_mentions_fg_labs_default_predecessor(tmp_path: Pa
     _seed_db(db_path)
     text = render_arena_markdown(db_path=db_path, fg_labs_sha=FG_LABS_SHA)
     assert "fg-labs-default" in text
-    assert f"{80.0 / 70.0:.2f}x" in text
+    assert f"{80.0 / 70.0:.3f}x" in text
 
 
 def _speedup_row(df: pd.DataFrame, label: str) -> pd.Series:
@@ -482,3 +487,260 @@ def test_render_release_speedup_markdown_mentions_every_release(tmp_path: Path) 
     for label in ("v021", "v022", "v030", "v040", "fg-labs-default"):
         assert label in text
     assert f"{50.0 / 40.0:.2f}x" in text
+
+
+# --- paired-round arenas ------------------------------------------------------
+
+_DENSE_BLOCK = "bwa-mem2-dense"
+
+
+def _paired_row(  # noqa: PLR0913
+    conn: sqlite3.Connection,
+    *,
+    label: str,
+    rep: int,
+    wall: float | None,
+    position: int,
+    mode: str = "default",
+    index_read: float = 0.5,
+    io_in: float = 0.0,
+) -> None:
+    upsert_arena(
+        conn,
+        fg_labs_sha=FG_LABS_SHA,
+        arch=ARCH,
+        label=label,
+        mode=mode,
+        rep=rep,
+        wall_seconds=wall,
+        cpu_time=None if wall is None else wall * 10,
+        max_rss_mb=None if wall is None else 1024.0,
+        process_seconds=None if wall is None else wall - 1.0,
+        block=_DENSE_BLOCK,
+        position=position,
+        writer="bam",
+        index_read_seconds=index_read,
+        io_in_mb=io_in,
+        thp_fault_fallback=0,
+    )
+
+
+def _seed_paired(
+    db_path: Path,
+    rounds: dict[int, tuple[float | None, float | None]],
+    *,
+    adjacent: bool = True,
+    cold: dict[str, dict[int, str]] | None = None,
+) -> None:
+    """Seed `v151` (prior) and `fg-labs-default` (candidate), one run per round.
+
+    `rounds` maps round -> (prior wall, candidate wall). The prior leads in odd
+    rounds and the candidate in even ones, as `build_schedule` alternates them;
+    with `adjacent=False` the two sit three positions apart. `cold` maps
+    "prior"/"candidate" to {round: "index"|"io"} to make that run cold.
+    """
+    cold = cold or {}
+    gap = 1 if adjacent else 3
+    conn = connect(db_path)
+    upsert_run(conn, fg_labs_sha=FG_LABS_SHA)
+    for rep, (prior_wall, cand_wall) in rounds.items():
+        prior_first = rep % 2 == 1
+        positions = {
+            "prior": 1 if prior_first else 1 + gap,
+            "candidate": 1 + gap if prior_first else 1,
+        }
+        for label, wall, key in (
+            ("v151", prior_wall, "prior"),
+            ("fg-labs-default", cand_wall, "candidate"),
+        ):
+            how = cold.get(key, {}).get(rep)
+            _paired_row(
+                conn,
+                label=label,
+                rep=rep,
+                wall=wall,
+                position=positions[key],
+                index_read=10.0 if how == "index" else 0.5,
+                io_in=5000.0 if how == "io" else 0.0,
+            )
+    conn.close()
+
+
+def _candidate(db_path: Path) -> pd.Series:
+    df = build_arena_table(db_path=db_path, fg_labs_sha=FG_LABS_SHA)
+    return df[(df["label"] == "fg-labs-default") & (df["mode"] == "default")].iloc[0]
+
+
+def test_paired_ratio_is_not_a_ratio_of_medians(tmp_path: Path) -> None:
+    """Round-to-round drift moves both arms of a round together; the per-round
+    ratio cancels it while a ratio of medians does not. Here the medians give
+    24/20 = 1.20, but every round's ratio is 1.10."""
+    db_path = tmp_path / "benchmark.db"
+    _seed_paired(db_path, {1: (22.0, 20.0), 2: (33.0, 30.0), 3: (24.2, 22.0), 4: (11.0, 10.0)})
+    row = _candidate(db_path)
+    assert math.isclose(row["vs_prior_release"], 1.10, rel_tol=1e-9)
+    assert row["prior_note"] == "paired"
+    assert row["prior_rounds"] == 4  # noqa: PLR2004
+    assert math.isclose(row["prior_min"], 1.10, rel_tol=1e-9)
+
+
+def test_lead_balance_cancels_a_second_runner_penalty_at_an_odd_round_count(
+    tmp_path: Path,
+) -> None:
+    """Whichever arm of a pair runs second pays a penalty here (2%). With 5
+    rounds one order gets 3 rounds and the other 2, so a plain median lands in
+    the majority cluster (1.10 x 1.02 = 1.122). Balancing the two orders
+    recovers the true 1.10."""
+    db_path = tmp_path / "benchmark.db"
+    penalty = 1.02
+    rounds = {}
+    for rep in range(1, 6):
+        prior_first = rep % 2 == 1
+        prior, cand = 22.0, 20.0
+        if prior_first:
+            cand *= penalty
+        else:
+            prior *= penalty
+        rounds[rep] = (prior, cand)
+    _seed_paired(db_path, rounds)
+    assert math.isclose(_candidate(db_path)["vs_prior_release"], 1.10, rel_tol=1e-9)
+
+
+def test_warmup_round_zero_is_excluded(tmp_path: Path) -> None:
+    db_path = tmp_path / "benchmark.db"
+    _seed_paired(db_path, {0: (100.0, 10.0), 1: (22.0, 20.0), 2: (22.0, 20.0), 3: (22.0, 20.0)})
+    row = _candidate(db_path)
+    assert math.isclose(row["vs_prior_release"], 1.10, rel_tol=1e-9)
+    assert row["n_reps"] == 3  # noqa: PLR2004
+
+
+def test_a_cold_candidate_run_drops_its_whole_round(tmp_path: Path) -> None:
+    """A cold run would read as a slowdown; dropping only that run would unpair
+    the round, so the round goes."""
+    db_path = tmp_path / "benchmark.db"
+    rounds = {1: (22.0, 20.0), 2: (22.0, 30.0), 3: (22.0, 20.0), 4: (22.0, 20.0), 5: (22.0, 40.0)}
+    _seed_paired(db_path, rounds, cold={"candidate": {2: "index", 5: "io"}})
+    row = _candidate(db_path)
+    assert row["cold_runs"] == 2  # noqa: PLR2004
+    assert row["prior_rounds"] == 3  # noqa: PLR2004
+    assert math.isclose(row["vs_prior_release"], 1.10, rel_tol=1e-9)
+    assert row["prior_note"] == "paired"
+
+
+def test_a_cold_prior_run_drops_its_whole_round(tmp_path: Path) -> None:
+    db_path = tmp_path / "benchmark.db"
+    rounds = {1: (22.0, 20.0), 2: (40.0, 20.0), 3: (22.0, 20.0), 4: (22.0, 20.0)}
+    _seed_paired(db_path, rounds, cold={"prior": {2: "io"}})
+    row = _candidate(db_path)
+    assert row["prior_rounds"] == 3  # noqa: PLR2004
+    assert math.isclose(row["vs_prior_release"], 1.10, rel_tol=1e-9)
+
+
+def test_too_few_clean_rounds_is_inconclusive(tmp_path: Path) -> None:
+    db_path = tmp_path / "benchmark.db"
+    rounds = {1: (22.0, 20.0), 2: (22.0, 20.0), 3: (22.0, 20.0), 4: (22.0, 20.0)}
+    _seed_paired(db_path, rounds, cold={"candidate": {1: "io", 2: "io"}})
+    assert _candidate(db_path)["prior_note"] == "inconclusive"
+
+
+def test_every_round_cold_is_inconclusive_with_no_ratio(tmp_path: Path) -> None:
+    db_path = tmp_path / "benchmark.db"
+    rounds = {r: (22.0, 20.0) for r in (1, 2, 3)}
+    _seed_paired(db_path, rounds, cold={"candidate": {1: "io", 2: "io", 3: "io"}})
+    row = _candidate(db_path)
+    assert row["prior_note"] == "inconclusive"
+    assert math.isnan(row["vs_prior_release"])
+
+
+def test_a_block_scheduled_with_too_few_rounds_is_context(tmp_path: Path) -> None:
+    """`context_reps` (2) is below MIN_CLEAN_ROUNDS by design: those links are
+    context, not failed measurements."""
+    db_path = tmp_path / "benchmark.db"
+    _seed_paired(db_path, {1: (22.0, 20.0), 2: (22.0, 20.0)})
+    row = _candidate(db_path)
+    assert row["prior_note"] == "context"
+    assert math.isclose(row["vs_prior_release"], 1.10, rel_tol=1e-9)
+
+
+def test_same_block_neighbours_that_are_not_adjacent_are_same_round(tmp_path: Path) -> None:
+    db_path = tmp_path / "benchmark.db"
+    _seed_paired(db_path, {r: (22.0, 20.0) for r in (1, 2, 3)}, adjacent=False)
+    assert _candidate(db_path)["prior_note"] == "same-round"
+
+
+def test_a_wide_spread_of_round_ratios_is_inconclusive(tmp_path: Path) -> None:
+    db_path = tmp_path / "benchmark.db"
+    _seed_paired(db_path, {1: (22.0, 20.0), 2: (26.0, 20.0), 3: (22.0, 20.0)})
+    row = _candidate(db_path)
+    assert row["prior_note"] == "inconclusive"
+    assert math.isclose(row["prior_max"], 1.30, rel_tol=1e-9)
+
+
+def test_paired_process_ratio_is_reported_beside_wall(tmp_path: Path) -> None:
+    db_path = tmp_path / "benchmark.db"
+    _seed_paired(db_path, {r: (22.0, 20.0) for r in (1, 2, 3)})
+    assert math.isclose(_candidate(db_path)["vs_prior_process"], 21.0 / 19.0, rel_tol=1e-9)
+
+
+def test_legacy_rows_without_a_block_fall_back_to_unpaired(tmp_path: Path) -> None:
+    db_path = tmp_path / "benchmark.db"
+    _seed_db(db_path)
+    df = build_arena_table(db_path=db_path, fg_labs_sha=FG_LABS_SHA)
+    row = df[(df["label"] == "fg-labs-default")].iloc[0]
+    assert row["prior_note"] == "unpaired"
+
+
+def _seed_writer_controls(db_path: Path) -> None:
+    conn = connect(db_path)
+    for rep in (1, 2, 3):
+        _paired_row(conn, label="fg-labs-default-sam", rep=rep, wall=21.0, position=3)
+        _paired_row(conn, label="v151-sam", rep=rep, wall=23.1, position=4)
+    conn.close()
+
+
+def test_sam_writer_control_arms_are_not_treated_as_releases(tmp_path: Path) -> None:
+    db_path = tmp_path / "benchmark.db"
+    _seed_paired(db_path, {r: (22.0, 20.0) for r in (1, 2, 3)})
+    _seed_writer_controls(db_path)
+    df = build_arena_table(db_path=db_path, fg_labs_sha=FG_LABS_SHA)
+    assert not df["label"].str.endswith("-sam").any()
+    assert math.isclose(_candidate(db_path)["vs_prior_release"], 1.10, rel_tol=1e-9)
+
+
+def test_writer_control_reports_what_native_bam_saves(tmp_path: Path) -> None:
+    db_path = tmp_path / "benchmark.db"
+    _seed_paired(db_path, {r: (22.0, 20.0) for r in (1, 2, 3)})
+    _seed_writer_controls(db_path)
+    table = build_writer_control_table(db_path=db_path, fg_labs_sha=FG_LABS_SHA)
+    by_label = table.set_index("label")
+    assert math.isclose(by_label.loc["fg-labs-default", "native_saves"], 21.0 / 20.0)
+    assert math.isclose(by_label.loc["v151", "native_saves"], 23.1 / 22.0)
+    text = render_arena_markdown(db_path=db_path, fg_labs_sha=FG_LABS_SHA)
+    assert "## Output writer control" in text
+    assert f"| {ARCH} | fg-labs-default | {21.0 / 20.0:.3f}x |" in text
+
+
+def test_no_writer_control_section_without_control_arms(tmp_path: Path) -> None:
+    db_path = tmp_path / "benchmark.db"
+    _seed_paired(db_path, {r: (22.0, 20.0) for r in (1, 2, 3)})
+    assert "writer control" not in render_arena_markdown(db_path=db_path, fg_labs_sha=FG_LABS_SHA)
+
+
+def test_render_marks_an_inconclusive_ratio(tmp_path: Path) -> None:
+    db_path = tmp_path / "benchmark.db"
+    _seed_paired(db_path, {1: (22.0, 20.0), 2: (26.0, 20.0), 3: (22.0, 20.0)})
+    text = render_arena_markdown(db_path=db_path, fg_labs_sha=FG_LABS_SHA)
+    candidate_line = next(line for line in text.splitlines() if "| fg-labs-default |" in line)
+    assert "inconclusive" in candidate_line
+
+
+def test_a_single_surviving_lead_order_is_inconclusive(tmp_path: Path) -> None:
+    """When cold rounds leave only rounds the same arm led, the second-runner
+    penalty is not cancelled, so the estimate must not be presented as paired."""
+    db_path = tmp_path / "benchmark.db"
+    rounds = {r: (22.0, 20.0) for r in range(1, 7)}
+    # Prior leads in odd rounds; drop every even round -> only prior-first survives.
+    _seed_paired(db_path, rounds, cold={"candidate": {2: "io", 4: "io", 6: "io"}})
+    row = _candidate(db_path)
+    assert row["prior_rounds"] == 3  # noqa: PLR2004
+    assert row["prior_note"] == "inconclusive"

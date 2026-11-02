@@ -148,23 +148,42 @@ arena:
   # m-series legs carry 64 GB (vs 32 GB) so the `re-sa -u 1` stride-2 arm
   # (`dense_sa_shift`) fits -- see config/archs.yaml and arena.smk's docstring.
   archs: [m8a, m8g]
-  reps: 3
+  # Measured ROUNDS (not back-to-back reps) for the block holding today's
+  # candidate: every arm in the block runs once per round, the candidate and the
+  # prior release back-to-back. `context_reps` is every other block's count (the
+  # stock-index ladder, bwa, minibwa). Each block also runs one discarded warmup
+  # round. See bwa_mem3_bench/arena_arms.py's `build_schedule`.
+  # `reps` applies to the candidate's whole block: with `dense_sa_shift: 3`
+  # every bwa-mem3 release shares the stock index and so that block, and the
+  # whole ladder runs `reps` rounds -- roughly doubling the arena's runtime.
+  reps: 5
+  context_reps: 2
   threads: 16
+  # Untimed `cat` passes over an arm's index before each run (2 keeps the pages
+  # on the kernel's active LRU), and the anonymous-memory balloon (MB) run at
+  # every block boundary to evict the previous index family's cache. The
+  # balloon must stay below align_arena's 56000 MB cgroup limit; 0 disables it.
+  prewarm_passes: 2
+  balloon_mb: 40000
+  # Opt-in control arms running the candidate and prior release through the
+  # SAM-text writer, to publish what native `--bam=0` saves. Off by default.
+  sam_writer_control: false
   # SA-sample-rate shift the arena's `> v0.12.0` arms align against, staged as a
   # separate stride-2 on-disk index (fg-labs/bwa-mem3#510 `re-sa -u INT`, rate
   # 1/(1<<INT)): 1 = stride-2 (+~12 GB resident), 2 = stride-4 (+~4 GB), 3 =
   # stride-8 (stock, no separate index). Older arms + upstream + minibwa always
   # use the stock stride-8 index; see `_arm_uses_dense_sa` in arena.smk.
   dense_sa_shift: 1
-  # Same rationale as thread_scaling.host_probe_seconds -- at ~13-14 arms x
-  # 4 cycles (1 warmup + 3 reps), the arena runs well over an hour per arch
+  # Same rationale as thread_scaling.host_probe_seconds -- at ~40 arms, each
+  # block running 1 warmup round plus `reps`/`context_reps` measured rounds, the
+  # arena runs well over two hours per arch
   # (see align_arena's own `resources.runtime = 14400` budget), so two 10s
   # probes are still a small fraction of it.
   host_probe_seconds: 10.0
-  # A SEPARATE, cheaper probe taken once per label (not just twice for the
-  # whole job) -- see bwa_mem3_bench/arena_arms.py's module docstring for the
-  # host-drift confound this diagnoses. ~26 labels x 2s is ~1 minute, still a
-  # small fraction of an hour-plus job.
+  # A SEPARATE, cheaper probe taken at the start of every schedule round (not
+  # just twice for the whole job) -- see bwa_mem3_bench/arena_arms.py's module
+  # docstring for the host-drift confound this diagnoses. ~15 rounds x 2s is
+  # well under a minute. The key name predates the per-round schedule.
   label_probe_seconds: 2.0
 
 references:

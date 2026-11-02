@@ -120,96 +120,72 @@ this codebase's normal fail-fast contract (see e.g. `align_fg_labs`'s
 failure mode is "an ancient binary doesn't understand a flag", which carries
 no ambiguity the way a silent partial output would.
 
-Interleaved, front-loaded, shuffled, with a discarded warmup cycle. The
-measured cycles run LABEL-MAJOR (every rep of one label back-to-back, then
-the next label) over an arm order that groups every `--fast` arm ahead of
-every `--default` arm and shuffles each block with a seed tied to the
-fg-labs SHA under measurement -- see
-`bwa_mem3_bench.arena_arms.front_load_fast_arms` for the full rationale and
-`_arena_arms`/this rule's `arm_spec` param for where the seed comes from.
+Schedule: paired rounds inside index-family blocks. The arena's headline
+number is a candidate-vs-prior-release ratio, and it is only sound if whatever
+slowly-varying host state exists at a given moment hits BOTH arms equally. The
+schedule (`bwa_mem3_bench.arena_arms.build_schedule`, emitted as this rule's
+`arm_spec` param, seeded by the fg-labs SHA) is built for that:
 
-This replaced an earlier REP-OUTER / ARM-INNER, FIXED-order design whose
-comment claimed interleaving "spread a monotonic drift evenly across every
-arm instead of biasing whichever arm happened to run first or last" -- true
-only if arm order varies per rep, which it did not: the SAME arm always ran
-last in every rep (today's candidate, `fg-labs-fast`), so it always paid the
-worst accumulated host state, every single rep. A real c8a arena run caught
-this concretely: `process_s` (the aligner's own timer) was flat within noise
-between v0.9.0 and v0.10.0's `--fast` arms (~17.6-17.9s both), while `wall_s`
-grew from a ~1.3s "outside-process" gap in the first measured rep to ~13.5s
-in the third, on EVERY `--fast` label in the run -- `--default` arms
-(43-100+s) were unaffected, since the same fixed/growing overhead is a much
-smaller fraction of a long run. The README's v0.9.0-vs-v0.10.0 `--fast`
-"regression" this produced was a host-drift artifact of the arena's own
-methodology, not a codegen change -- exactly the class of bug the arena
-exists to catch in fg-labs/bwa-mem3 itself (see the module docstring's
-opening), just found here instead. Label-major shrinks the exposure to a
-within-label concern; front-loading the short, drift-sensitive `--fast`
-block ahead of the long, drift-tolerant `--default` block bounds how much of
-the job's total drift the fragile metric can accumulate; per-submission
-shuffling stops whichever label is newest from always landing in the same
-(possibly worst) position.
+  - Arms are grouped into BLOCKS by index family (densified bwa-mem3, stock
+    bwa-mem3 + upstream bwa-mem2, bwa, minibwa), in shuffled block order. Only
+    arms reading the same index can alternate without each run evicting the
+    next one's page cache; round-robin across families would make every run a
+    cold first rep.
+  - Each block runs one discarded WARMUP round (round 0) and then N measured
+    ROUNDS: `arena.reps` for the candidate's block, `arena.context_reps` for
+    every other block. Every arm runs once per round, in a fresh seeded order.
+  - The candidate and the prior release (and their `--fast` siblings) always
+    run BACK-TO-BACK within a round, alternating which goes first, so each
+    round yields one paired ratio. The report's `vs_prior_release` is the
+    median of those per-round ratios (`report/arena.py`).
 
-Warmup: per-rep cat, not per-label alignment. An untimed page-cache
-top-off (`prewarm_arm` below: `cat` of that label's own index files + the
-fastqs) runs immediately before EVERY measured rep -- not once per label,
-and not by running a full alignment.
+History, because each of these replaced a design that looked sound. A fixed
+rep-outer / arm-inner order always measured the newest release last, under the
+worst accumulated drift: a c8a run showed `process_s` flat between v0.9.0 and
+v0.10.0's `--fast` arms while their `wall_s` "outside-process" gap grew from
+~1.3 s to ~13.5 s over the job -- a false regression. Its replacement ran every
+rep of one label back-to-back and shuffled only the label ORDER, so all of a
+label's reps shared one moment of host state. The 0a65bec mock bless (2026-11)
+caught that: on m8a the candidate's three reps all ran with 1.4-1.9 GiB of heap
+on 4 KB pages and BSW ~17% slower, while the SAME binary's pin-probe run earlier
+in the same job measured PROCESS() 16.80 s against 18.27-18.76 s. The reported
+1.02x was a position effect; the prior release's reps 2-3 had huge pages.
 
-This is the second of two fixes layered on top of the original fixed-order
-host-drift bug (front-loading + seeded shuffling + label-major reps, above).
-The FIRST fix folded a full-alignment warmup into each label's own loop
-iteration, immediately before its own measured reps, which closed the
-CROSS-ARM eviction bias: a real c8a/c8g arena run (golden SHA 371a1819)
-confirmed `process_s` fell nearly monotonically release-over-release on both
-archs while `wall_s` did not -- e.g. c8a v0.6.0's wall_s (84.58s) was HIGHER
-than both v0.5.0's (66.78s) and v0.7.0's (62.39s) despite `process_s` falling
-smoothly across all three.
+Warmup: per-run cat, not per-label alignment. An untimed page-cache top-off
+(`prewarm_arm`: `cat` of that arm's own index files + the fastqs,
+`arena.prewarm_passes` times) runs immediately before EVERY run. bwa-mem2 and
+every bwa-mem3 release `_mm_malloc` a fresh heap buffer and `fread` the index
+into it (`FMI_search.cpp`'s `load_index()`), so index load transiently needs
+close to 2x the index size, and on a memory-constrained host one untimed pass
+does not converge (a real 32 GB c8a run's `io_in` took 3-4 passes). A `cat` has
+near-zero RSS, so it can spend the whole page-cache budget on the file it is
+warming. The second pass is there because pages touched once sit on the
+kernel's inactive LRU and are the first evicted when the next run's ~27 GB heap
+forces reclaim; in the 0a65bec run every label's first rep after an
+index-family change read the index cold (mean index-read 2.87 s vs 0.52 s).
 
-A FOLLOW-UP real arena run with `--trace`'s per-tick `io_in` (real
-disk-read bytes, not just page faults) showed that fix left a residual
-problem: for large-index tools, ONE untimed full-alignment pass does not
-fully populate the page cache on a memory-constrained host (32GB RAM;
-bwa-mem2-format tools reach 15-22GB RSS). `v060`'s own `io_in` DECLINED
-across its own warmup -> rep1 -> rep2 -> rep3 (1.09M -> 0.96M -> 0.375M ->
-0.092M) -- 3-4 full passes to converge, not one. Root cause, confirmed by
-reading `FMI_search.cpp`'s `load_index()` (both bwa-mem2 upstream and every
-bwa-mem3 release `_mm_malloc` a FRESH heap buffer and `pread`/`fread` the
-on-disk index into it, rather than aliasing mmap'd pages -- a deliberate
-tradeoff for transparent-hugepage coverage on the hot Occ-lookup loop, per
-that file's own comment): index LOAD transiently needs close to 2x the
-index's own size (the file's page-cache copy, plus the heap copy being
-built). For bwa-mem2-upstream's ~21GB index that is ~43GB against a 32GB
-swapless host, which the data confirms: its own `io_in` never converges,
-plateauing flat (~2.8M) across every rep -- a structural ceiling no warmup
-design can close (only more RAM or `shm` would, both out of scope here --
-see "Prewarm: cat, not shm" below). `v060` is the marginal case a warmup
-CAN fix (~15-16GB index, right at the edge of that same host).
+Block boundaries: balloon. At the start of every block the rule allocates,
+touches and frees `arena.balloon_mb` of anonymous memory (`dd ... bs=<N>M`),
+which evicts the previous family's page cache and leaves the next block
+contiguous free memory for transparent huge pages. It needs no privileges,
+unlike `drop_caches` / `compact_memory`.
 
-A full-alignment warmup cannot close this gap efficiently: its own RSS
-(14-22GB) competes with itself for the SAME cache room it is trying to
-populate. A plain `cat` costs none of that -- near-zero RSS, so it can
-spend the whole page-cache budget on the file it is warming -- and
-repeating it before EVERY rep (not once per label) is what actually
-converges: rep 2's pre-cat IS the second pass, rep 3's the third, done
-untimed instead of leaking into `wall_s`.
+Instrumentation, per run. Every `arena.tsv` row carries its schedule position
+(`rep` = round, `block`, `position`), the output `writer`, and the host state it
+ran under: the binary's own index-read time, tricorder's `io_in` and starting
+page-cache size, `/proc/vmstat` deltas over the run (`thp_fault_fallback`,
+`compact_stall`, `pgmajfault`) and `MemFree` / `AnonHugePages` at its start.
+These come from the kernel, not the binary, so they are recorded for every
+release, old or new. The report flags a COLD run (index read far above its
+block's median, or more than 1 GB of disk input) and drops that round's pair,
+so a confound becomes visible instead of being folded into a median. A
+per-round tachyon probe (phase `round-<block>-<n>`) and `/proc/meminfo`
+snapshot are appended to `host-probe.jsonl` / `meminfo.jsonl`.
 
-The SMEM-lockstep pin (below) is deliberately NOT derived from any label's
-own prewarm: front-loading means `fg-labs-fast` can run its own reps before
-`fg-labs-default`'s turn ever comes up, so the pin is set from a dedicated
-probe invocation instead.
-
-Instrumentation: confirm the mechanism, don't just work around it. Two
-diagnostic-only additions exist to test the host-drift hypothesis above
-directly rather than only mitigate it: a per-label tachyon memory-access-rate
-probe (phase `label-<label>`, appended to `host-probe.jsonl` alongside the
-existing whole-job "pre"/"post" readings -- see `_ingest_host_probes`, which
-needed no changes since `phase` is a free-text row key) and a per-label
-`/proc/meminfo` snapshot (`meminfo.jsonl`, Cached/Dirty/Buffers) that
-directly tracks page-cache SIZE rather than inferring pressure from `wall_s`.
-Neither is ingested into `benchmark.db` (same "diagnostic, never
-load-bearing" status as `fgumi-compare.txt`) -- they exist to be pulled and
-inspected by hand when a `--fast` delta looks surprising, not to feed a
-report column.
+The SMEM-lockstep pin (below) comes from a dedicated probe invocation, not any
+arm's measured run, so it is set before the first block whatever the schedule.
+The probe is a full candidate alignment, so it is skipped -- and every arm runs
+unpinned -- when `--config arena_labels=` leaves no candidate arm.
 
 Correctness, narrowly scoped. Every arm is a WALL-TIME comparator except one
 pairwise check: the run's own `fg-labs-default` BAM against the immediately
@@ -232,21 +208,33 @@ here: `bwa` and every tracked bwa-mem3 release support it, but `minibwa` and
 upstream bwa-mem2 do not (confirmed directly against their sources -- no
 `shm`-related symbol exists in either). Using it selectively would change
 what the cross-tool ratios (`vs bwa`, `vs bwa-mem2`, `vs minibwa`) actually
-measure -- "pure compute under identical conditions" vs. "best achievable
-performance per tool's own capabilities" -- for exactly the two tools
-(bwa-mem3, bwa) that would benefit, muddying a codegen claim with a
-measurement-technique difference. So every arm here -- bwa-mem3 (every
-release), bwa-mem2.upstream, bwa, and minibwa alike -- is warmed the SAME
-way `align_baseline`/`align_bwa`/`align_minibwa` already do: an untimed
-`cat` of that arm's own index family's sidecars (plus the fastqs) into
-`/dev/null`, immediately before EVERY measured rep (see `prewarm_arm` and
-"Warmup: per-rep cat, not per-label alignment" above for why per-rep, not
-once per job). Every timed run emits SAM piped through `samtools view -u`
-rather than any binary's native BAM writer (which `--bam=0` may also not be
-universal). This trades a little fidelity against `align_fg_labs`'s numbers
-(which use the native writer) for one uniform measurement technique every
-arm here can be compared against — the arena's rows are compared against
-EACH OTHER, not against `trials.wall_seconds`.
+measure, so every arm is warmed the SAME way `align_baseline`/`align_bwa`/
+`align_minibwa` already are: an untimed `cat` of that arm's own index family
+into `/dev/null` before every run (see "Warmup" above).
+
+Output: every arm produces uncompressed BAM, by the cheapest route the tool
+has, streamed through a pipe into `cat > file`. Every bwa-mem3 build writes it
+natively (`--bam=0 -o -`), as the sweep (`align.smk`) and the thread-scaling
+ladder (`scaling.smk`) also time it (there to a file directly);
+`--bam` predates the oldest tracked release (fg-labs/bwa-mem3#12, before
+v0.2.1). bwa, upstream bwa-mem2 and minibwa only emit SAM, so their route is
+SAM piped through `samtools view -u`, and that cost is part of what using them
+costs. Until 2026-11 every arm, bwa-mem3 included, went through the SAM pipe:
+bwa-mem3 paid SAM formatting it never pays in real use (WORKER_SAM was 5.5 of
+18.7 s PROCESS() on m8a), and output-path changes such as fg-labs/bwa-mem3#652
+were invisible here. Arena rows before that change are a different method; do
+not compare their absolute walls with later rows. `arena.sam_writer_control`
+adds `<label>-sam` control arms that run the candidate and prior release
+through the SAM pipe, to publish the difference.
+
+Why the final writer is `cat`. htslib's `bgzf_close` fdatasync()s an output
+that is a regular file. `samtools view -@4` uses htslib's multithreaded BGZF
+writer, which syncs every 512 blocks DURING the run, but bwa-mem3's default
+single-threaded writer leaves the whole ~3.5 GB to close. Measured on m8a with
+a 500 MB/s gp3 volume (2026-11): native `--bam=0 -o file` sat idle ~6 s after
+PROCESS() ended and lost to the SAM pipe end to end (24.1 vs 19.1 s) despite a
+faster PROCESS() -- the arena was timing the disk. Writing through a pipe
+removes the sync for every arm alike.
 """
 
 from collections import namedtuple
@@ -374,6 +362,14 @@ ARENA_DENSE_REFERENCE = (
 # ~27 GB) that never fit alongside their RSS on 32 GB.
 ARENA_MEM_MB = 56000
 
+# The block-boundary balloon allocates `arena.balloon_mb` inside this job's
+# cgroup; at or above its limit the job is OOM-killed at the first boundary.
+if CONFIG.arena.balloon_mb >= ARENA_MEM_MB:
+    raise ValueError(
+        f"arena.balloon_mb ({CONFIG.arena.balloon_mb}) must be below align_arena's "
+        f"{ARENA_MEM_MB} MB memory limit"
+    )
+
 # ARENA_RELEASES is oldest-first, so an arm's release is "newer than v0.12.0"
 # iff its label sits after v120's in the list. Keyed on list position, not a
 # parse of the ambiguous `vNNN` label (v120 = v0.12.0 but v100 = v0.10.0, not
@@ -401,8 +397,49 @@ def _arm_uses_dense_sa(label: str, binary: str) -> bool:
     return _DENSE_SA_POLICY.uses_dense_sa(label, binary)
 
 
-def _arena_arms(arch: str, *, seed: str) -> list[tuple[str, str, str]]:
-    """Return (label, binary, mode) for every arm `arch` runs, in run order.
+# The prior release's `--fast` sibling, paired with `fg-labs-fast` the way the
+# prior release is paired with `fg-labs-default` (see `ARENA_PAIRS`).
+ARENA_PRIOR_FAST_LABEL = f"{ARENA_PRIOR_RELEASE_LABEL}-fast"
+
+# `--config arena_labels=a,b,...` restricts the arena to the named arm labels
+# (e.g. `v151,v151-fast,fg-labs-default,fg-labs-fast` for a two-release
+# check). Empty, the default, runs every arm. Only the index families the
+# remaining arms read are staged, so a narrowed run downloads less.
+# Validated in `_arena_arms`: a typo would otherwise silently drop arms from a
+# paid on-demand job.
+ARENA_ONLY_LABELS = frozenset(
+    label.strip() for label in str(config.get("arena_labels", "")).split(",") if label.strip()
+)
+
+
+def _parse_arena_sam_control(raw) -> bool:
+    """`--config arena_sam_control=true|false` (any case), else the config default.
+
+    Anything else raises rather than silently meaning "off".
+    """
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text not in ("true", "false"):
+        raise ValueError(f"--config arena_sam_control must be true or false; got {raw!r}")
+    return text == "true"
+
+
+ARENA_SAM_CONTROL = _parse_arena_sam_control(
+    config.get("arena_sam_control", CONFIG.arena.sam_writer_control)
+)
+
+# Arms that must run back-to-back in every round, so each round yields one
+# paired candidate-vs-prior ratio (see `build_schedule`).
+ARENA_PAIRS = (
+    ("fg-labs-default", ARENA_PRIOR_RELEASE_LABEL),
+    ("fg-labs-fast", ARENA_PRIOR_FAST_LABEL),
+    (f"fg-labs-default{SAM_CONTROL_SUFFIX}", f"{ARENA_PRIOR_RELEASE_LABEL}{SAM_CONTROL_SUFFIX}"),
+)
+
+
+def _arena_arms(arch: str) -> list[tuple[str, str, str]]:
+    """Return (label, binary, mode) for every arm `arch` runs, unordered.
 
     `mode` is 'default' or 'fast'. Every historical release gets BOTH a
     default-mode arm (label `<release>`) and a `--fast` arm (label
@@ -413,17 +450,9 @@ def _arena_arms(arch: str, *, seed: str) -> list[tuple[str, str, str]]:
     rely on. bwa-mem2-upstream is dropped on ARM (upstream v2.2.1 has no ARM
     build), matching `_has_upstream_baseline`.
 
-    The raw arm list built here is unordered with respect to the job's actual
-    run order -- `front_load_fast_arms` (bwa_mem3_bench/arena_arms.py) is what
-    groups every `--fast` arm ahead of every `--default` arm and shuffles each
-    block by `seed`. See that module's docstring for why: a fixed run order
-    means whichever label is newest is always measured last, under the worst
-    accumulated host state, which is exactly what produced a false
-    v0.9.0-vs-v0.10.0 `--fast` "regression" this fixes.
-
-    :param seed: passed straight through to `front_load_fast_arms` -- the
-        caller supplies the fg-labs SHA under measurement, so a different
-        candidate shuffles differently.
+    With `arena.sam_writer_control` on, two control arms run the candidate and
+    the prior release through the SAM-text writer. `--config arena_labels=...`
+    filters the result. Run order is `_arena_schedule`'s job.
     """
     arms: list[tuple[str, str, str]] = [
         ("bwa", "bwa", "default"),
@@ -438,20 +467,86 @@ def _arena_arms(arch: str, *, seed: str) -> list[tuple[str, str, str]]:
         ("fg-labs-default", "bwa-mem2.fg-labs", "default"),
         ("fg-labs-fast", "bwa-mem2.fg-labs", "fast"),
     ]
-    return front_load_fast_arms(arms, seed=seed)
+    if ARENA_SAM_CONTROL:
+        arms += [
+            (f"fg-labs-default{SAM_CONTROL_SUFFIX}", "bwa-mem2.fg-labs", "default"),
+            (
+                f"{ARENA_PRIOR_RELEASE_LABEL}{SAM_CONTROL_SUFFIX}",
+                f"bwa-mem3.{ARENA_PRIOR_RELEASE_LABEL}",
+                "default",
+            ),
+        ]
+    if ARENA_ONLY_LABELS:
+        _check_arena_labels(arch, {label for label, _, _ in arms})
+        arms = [arm for arm in arms if arm[0] in ARENA_ONLY_LABELS]
+    return arms
+
+
+def _check_arena_labels(arch: str, available: set[str]) -> None:
+    """Reject a `--config arena_labels=` entry that names no arm.
+
+    A label is accepted if ANY arena arch runs it (`bwa-mem2-upstream` exists on
+    x86 only), so one list can narrow every arch; a label no arch runs is a typo.
+    An arch left with no arm at all is also an error, since the job would run
+    nothing and still succeed.
+    """
+    unknown = ARENA_ONLY_LABELS - _ALL_ARENA_LABELS
+    if unknown:
+        raise ValueError(
+            f"--config arena_labels names no arena arm: {sorted(unknown)}; "
+            f"valid labels: {sorted(_ALL_ARENA_LABELS)}"
+        )
+    if not ARENA_ONLY_LABELS & available:
+        raise ValueError(
+            f"--config arena_labels={','.join(sorted(ARENA_ONLY_LABELS))} leaves arch "
+            f"{arch} with no arm to run"
+        )
+
+
+def _unfiltered_arena_labels() -> frozenset[str]:
+    """Every label any arena arch runs, before `--config arena_labels=` narrowing."""
+    labels = {"bwa", "minibwa", "bwa-mem2-upstream", "fg-labs-default", "fg-labs-fast"}
+    for label, _ in ARENA_RELEASES:
+        labels |= {label, f"{label}-fast"}
+    if ARENA_SAM_CONTROL:
+        labels |= {
+            f"fg-labs-default{SAM_CONTROL_SUFFIX}",
+            f"{ARENA_PRIOR_RELEASE_LABEL}{SAM_CONTROL_SUFFIX}",
+        }
+    return frozenset(labels)
+
+
+_ALL_ARENA_LABELS = _unfiltered_arena_labels()
+
+
+def _arena_schedule(arch: str, *, seed: str):
+    """Every run `arch` makes, in execution order (`build_schedule`).
+
+    :param seed: the fg-labs SHA under measurement, so a different candidate
+        gets a different (but reproducible) order.
+    """
+    arms = _arena_arms(arch)
+    return build_schedule(
+        arms,
+        dense_labels=frozenset(
+            label for label, binary, _ in arms if _arm_uses_dense_sa(label, binary)
+        ),
+        pairs=ARENA_PAIRS,
+        candidate_label="fg-labs-default",
+        seed=seed,
+        headline_rounds=CONFIG.arena.reps,
+        context_rounds=CONFIG.arena.context_reps,
+    )
 
 
 def _arena_arm_spec(arch: str, *, seed: str) -> str:
-    """`_arena_arms` as `label|binary|mode|dense` tokens for the shell loop.
+    """`_arena_schedule` as space-separated `ScheduledRun.to_token` strings,
+    `block|round|position|label|binary|mode|dense|writer`, for the shell loop.
 
-    The 4th field is `1` when the arm aligns against the stride-2 `re-sa` index
-    and `0` otherwise (`_arm_uses_dense_sa`) -- decided in Python (unit-tested)
-    so the shell only has to pick which staged idxbase to pass.
+    Density and writer are decided in Python (unit-tested) so the shell only
+    picks which staged idxbase and which output path to use.
     """
-    return " ".join(
-        f"{label}|{binary}|{mode}|{int(_arm_uses_dense_sa(label, binary))}"
-        for label, binary, mode in _arena_arms(arch, seed=seed)
-    )
+    return " ".join(run.to_token() for run in _arena_schedule(arch, seed=seed))
 
 
 # `_ref_inputs` / `_bwa_ref_inputs` / `_minibwa_ref_inputs` each take a
@@ -464,27 +559,39 @@ _ArenaSampleWildcards = namedtuple("_ArenaSampleWildcards", ["sample"])
 _ARENA_WC = _ArenaSampleWildcards(sample=ARENA_SAMPLE)
 
 
+def _arena_runs_candidate(arch: str) -> bool:
+    """Whether `arch` runs either candidate arm (and so needs the pin probe)."""
+    return any(binary == "bwa-mem2.fg-labs" for _, binary, _ in _arena_arms(arch))
+
+
 def _arena_ref_inputs(wc):
-    """Union of every reference sidecar the arena's three index families need.
+    """Every reference sidecar the selected arms read, outside the dense copy.
 
     Delegates to each family's own helper -- `_ref_inputs` (bwa-mem2/bwa-mem3,
     from align.smk), `_bwa_ref_inputs` (align_bwa.smk), `_minibwa_ref_inputs`
     (align_minibwa.smk) -- rather than restating the file lists, so a future
     change to any one family's sidecars (e.g. a new bwa-mem3 index file)
-    reaches the arena automatically. All three compute the same plain-.fasta
-    path first (same sample, same reference), so deduping preserves it at
-    index 0, which the shell body relies on via `{input.ref[0]}`.
-
-    `wc` (align_arena's real wildcards, `sha`/`arch` only) is accepted for
-    signature compatibility with snakemake's `input:` calling convention but
-    unused -- see `_ARENA_WC` above for why the sample is fixed instead.
+    reaches the arena automatically. Each family is staged only when a selected
+    arm reads it: a `--config arena_labels=` run may drop any of them, and the
+    bwa-mem2-format sets are ~20-30 GB each. The plain `.fasta` is always index
+    0 (every family's helper lists it first), which the shell body relies on
+    via `{input.ref[0]}`. `wc.arch` picks the arm list; the sample is fixed --
+    see `_ARENA_WC` above.
     """
+    arms = _arena_arms(wc.arch)
+    binaries = {binary for _, binary, _ in arms}
+    reads_stock_bwa_mem2 = any(
+        binary not in ("bwa", "minibwa") and not _arm_uses_dense_sa(label, binary)
+        for label, binary, _ in arms
+    )
+    stock = _ref_inputs(_ARENA_WC, meth_index="d3")
+    paths = list(stock) if reads_stock_bwa_mem2 else [stock[0]]
+    if "bwa" in binaries:
+        paths += _bwa_ref_inputs(_ARENA_WC)
+    if "minibwa" in binaries:
+        paths += _minibwa_ref_inputs(_ARENA_WC)
     seen: list[str] = []
-    for path in (
-        _ref_inputs(_ARENA_WC, meth_index="d3")
-        + _bwa_ref_inputs(_ARENA_WC)
-        + _minibwa_ref_inputs(_ARENA_WC)
-    ):
+    for path in paths:
         if path not in seen:
             seen.append(path)
     return seen
@@ -494,15 +601,16 @@ def _arena_dense_ref_inputs(wc):
     """bwa-mem3 sidecars for the stride-2 `re-sa` index the dense arms use.
 
     Reuses `_ref_inputs` with a reference override (`ARENA_DENSE_REFERENCE`,
-    e.g. `hg38-u1`) so the sidecar list is never restated. When the feature is
-    off (`ARENA_DENSE_SA_SHIFT == STOCK_SA_SHIFT`) this resolves to the STOCK
-    reference, so the list is always non-empty and `{input.ref_dense[0]}`
-    always formats -- the shell just never routes an arm to it, because
-    `_arm_uses_dense_sa` is then False for all of them.
+    e.g. `hg38-u1`) so the sidecar list is never restated. When no selected arm
+    is dense -- the feature is off (`ARENA_DENSE_SA_SHIFT == STOCK_SA_SHIFT`) or
+    a `--config arena_labels=` run kept none -- only the stock plain `.fasta`
+    is returned: the list must stay non-empty because the shell formats
+    `{input.ref_dense[0]}`, but no arm routes to it, so nothing more is staged.
 
-    Only the bwa-mem2/bwa-mem3 family is staged (bwa/minibwa are never dense
-    arms). `wc` is unused -- see `_arena_ref_inputs`.
+    Only the bwa-mem2/bwa-mem3 family is ever dense (bwa/minibwa are not).
     """
+    if not any(_arm_uses_dense_sa(label, binary) for label, binary, _ in _arena_arms(wc.arch)):
+        return _ref_inputs(_ARENA_WC, meth_index="d3")[:1]
     return _ref_inputs(_ARENA_WC, meth_index="d3", reference=ARENA_DENSE_REFERENCE)
 
 
@@ -541,24 +649,29 @@ rule align_arena:
         batch_queue = lambda wc: arena_queue_for(wc.arch),
         mem_mb = ARENA_MEM_MB,
         aws_batch_container_image = lambda wc: image_for_arch(wc.arch),
-        # The arena is long by construction: an interleaved warmup + N measured
-        # cycles across 13-14 arms. The profile default (7200 s) can be tight
-        # once reps > 3; match the ladder's own bump.
+        # The arena is long by construction: every block runs a warmup round
+        # plus `reps` (candidate block) or `context_reps` measured rounds across
+        # ~40 arms -- about 2.5 h on m8g. The profile default (7200 s) is too
+        # tight; match the ladder's own bump.
         runtime = 14400,
     params:
-        # Seeded by the fg-labs SHA under measurement -- see
-        # `_arena_arms`/`front_load_fast_arms` for why the shuffle must vary
-        # per candidate rather than being a fixed literal order.
+        # Seeded by the fg-labs SHA under measurement -- see `_arena_schedule`
+        # for why the order must vary per candidate rather than being fixed.
         arm_spec = lambda wc: _arena_arm_spec(wc.arch, seed=wc.sha),
-        reps = CONFIG.arena.reps,
         prior_label = ARENA_PRIOR_RELEASE_LABEL,
         # Whether the candidate's dedicated SMEM-lockstep pin probe reads the
         # stride-2 `re-sa` index -- the candidate is always a dense arm when the
         # feature is on, so the probe must load the same idxbase its measured
-        # reps do (1) or the stock one (0). See `_arm_uses_dense_sa`.
+        # runs do (1) or the stock one (0). See `_arm_uses_dense_sa`.
         fg_labs_dense = int(_arm_uses_dense_sa("fg-labs-default", "bwa-mem2.fg-labs")),
+        pin_probe = lambda wc: int(_arena_runs_candidate(wc.arch)),
         probe_seconds = CONFIG.arena.host_probe_seconds,
         label_probe_seconds = CONFIG.arena.label_probe_seconds,
+        prewarm_passes = CONFIG.arena.prewarm_passes,
+        balloon_mb = CONFIG.arena.balloon_mb,
+        # Non-empty only for a `--config arena_labels=` run; recorded in the
+        # job's outputs so a narrowed arena is never mistaken for a full one.
+        only_labels = ",".join(sorted(ARENA_ONLY_LABELS)),
         fg_labs_flags = ARENA_FG_LABS_FLAGS,
         mem_flags = ARENA_MEM_FLAGS,
         minibwa_flags = ARENA_MINIBWA_FLAGS,
@@ -571,22 +684,25 @@ rule align_arena:
         mkdir -p "$OUTDIR/runs"
 
         emit-host-meta "{wildcards.sha}" "{params.sample}" "{wildcards.arch}" 0 > {output.meta}
+        if [ -n "{params.only_labels}" ]; then
+            echo "{params.only_labels}" > "$OUTDIR/runs/NARROWED-arena_labels.txt"
+            echo "WARNING: narrowed arena (arena_labels={params.only_labels}); its outputs are not a full arena" >&2
+        fi
 
         emit-host-probe pre {params.probe_seconds} > {output.host_probe}
         : > {output.meminfo}
 
-        printf 'label\tmode\trep\twall_s\tcpu_s\tmax_rss_mb\tprocess_s\n' > {output.tsv}
+        # Columns 1-7 keep their pre-2026-11 order so a reader of the old
+        # format still finds them; `rep` is now the schedule ROUND (0 = the
+        # block's discarded warmup). The rest are per-run schedule position and
+        # host state -- see the module docstring's "Instrumentation, per run".
+        printf 'label\tmode\trep\twall_s\tcpu_s\tmax_rss_mb\tprocess_s\tblock\tposition\twriter\tindex_read_s\tio_in_mb\tpage_cache_start_mb\tthp_fault_fallback\tcompact_stall\tpgmajfault\tmemfree_mb\tanon_huge_mb\n' > {output.tsv}
 
         # Diagnostic-only page-cache snapshot -- Cached/Dirty/Buffers from
-        # /proc/meminfo, one JSON line per call. Complements the per-label
-        # tachyon probe (which measures memory ACCESS RATE) with the system's
-        # actual page-cache SIZE, so a page-cache-eviction hypothesis for the
-        # arena's `--fast`-only wall_s drift (see the module docstring and
-        # bwa_mem3_bench/arena_arms.py) can be checked directly rather than
-        # inferred. `|| echo null` on each lookup: a missing/unparseable
-        # meminfo field must degrade that one field to `null`, matching
-        # emit-host-probe's own "diagnostic, never load-bearing" contract,
-        # not abort a multi-hour on-demand job over a proc-fs read.
+        # /proc/meminfo, one JSON line per call, taken at the start of every
+        # round. `|| echo null` on each lookup: a missing/unparseable field
+        # degrades that one field to `null` rather than aborting a multi-hour
+        # on-demand job over a proc-fs read.
         emit_meminfo_snapshot() {{
             local phase="$1"
             local cached dirty buffers
@@ -598,13 +714,41 @@ rule align_arena:
         }}
         emit_meminfo_snapshot pre
 
+        # Per-run host-state readers. All print `NA` rather than fail: they are
+        # diagnostics recorded beside the timing, never a reason to lose a run.
+        # /proc/vmstat counters are host-wide, which is what we want on a host
+        # this job has to itself.
+        vmstat_counter() {{
+            mawk -v key="$1" '$1 == key {{ print $2; found = 1 }} END {{ if (!found) print "NA" }}' \
+                /proc/vmstat 2>/dev/null || echo NA
+        }}
+        meminfo_mb() {{
+            mawk -v key="$1:" '$1 == key {{ printf "%.0f\n", $2 / 1024; found = 1 }} END {{ if (!found) print "NA" }}' \
+                /proc/meminfo 2>/dev/null || echo NA
+        }}
+        counter_delta() {{
+            if [ "$1" = NA ] || [ "$2" = NA ]; then echo NA; else echo $(( $2 - $1 )); fi
+        }}
+        # One column of tricorder's two-line timing.tsv, by header name.
+        timing_column() {{
+            mawk -F '\t' -v name="$2" \
+                'NR == 1 {{ for (i = 1; i <= NF; i++) if ($i == name) col = i }}
+                 NR == 2 {{ print (col ? $col : "NA") }}' "$1" 2>/dev/null || echo NA
+        }}
+
         run_arm() {{
             # Runs one (label, binary, mode), writing "${{out}}.timing.tsv" /
             # "${{out}}.stderr.log" / "${{out}}.bam.raw". Returns 1 on a
             # 0-record (or missing) BAM; the caller reads it under `set +e`,
             # deliberately suspended around this call -- see the module
             # docstring's "Never hard-fail on an old binary".
-            local label="$1" binary="$2" mode="$3" rep="$4" out="$5" dense="$6"
+            #
+            # `writer` (decided in Python, `arena_arms.output_writer`) picks the
+            # output path: `bam` is the binary's own `--bam=0 -o` (every bwa-mem3
+            # build), `sam` pipes SAM text through `samtools view -u` (bwa,
+            # minibwa, upstream bwa-mem2, and the `-sam` control arms). Either
+            # way the run ends with an uncompressed BAM on disk.
+            local label="$1" binary="$2" mode="$3" rep="$4" out="$5" dense="$6" writer="$7"
             local cmd
             # Arms newer than v0.12.0 (`dense=1`, decided by `_arm_uses_dense_sa`
             # in Python) align against the stride-2 `re-sa` index staged under
@@ -613,6 +757,10 @@ rule align_arena:
             # are ever dense, so bwa/minibwa always fall through to the stock ref.
             local ref="{input.ref[0]}"
             [ "$dense" = "1" ] && ref="{input.ref_dense[0]}"
+            # `-o -` streams the BAM to stdout; see "Output" in the module
+            # docstring for why no arm writes its output file directly.
+            local out_flags=""
+            [ "$writer" = "bam" ] && out_flags="--bam=0 -o -"
             case "$binary" in
                 bwa)
                     cmd="bwa mem -t {threads} {params.batch_flag} {params.mem_flags} $ref {input.fastqs}"
@@ -623,57 +771,55 @@ rule align_arena:
                 bwa-mem2.fg-labs)
                     local fast_flag=""
                     [ "$mode" = "fast" ] && fast_flag="--fast"
-                    # -v 3 is needed ONLY on the warmup invocation (rep=0), so
-                    # it prints its resolved "phase-2 SMEM lockstep width"
-                    # line (see the BWA3_SMEM_LOCKSTEP_N pin below). Measured
-                    # reps must NOT get it: the verbose stderr writes happen
-                    # inside the tricorder-timed region and can perturb the
-                    # very wall_s values this pin exists to keep clean.
+                    # -v 3 is needed ONLY on the pin probe (rep=probe), so it
+                    # prints its resolved "phase-2 SMEM lockstep width" line
+                    # (see the BWA3_SMEM_LOCKSTEP_N pin below). No scheduled run,
+                    # warmup included, gets it: the verbose stderr writes happen
+                    # inside the tricorder-timed region.
                     local verbosity_flag=""
-                    [ "$rep" -eq 0 ] && verbosity_flag="-v 3"
-                    cmd="$binary mem -t {threads} $verbosity_flag {params.batch_flag} {params.mem_flags} {params.fg_labs_flags} $fast_flag $ref {input.fastqs}"
+                    [ "$rep" = "probe" ] && verbosity_flag="-v 3"
+                    cmd="$binary mem -t {threads} $verbosity_flag {params.batch_flag} {params.mem_flags} {params.fg_labs_flags} $fast_flag $out_flags $ref {input.fastqs}"
                     ;;
                 *)
                     # Historical bwa-mem3 releases and bwa-mem2-upstream: NEVER
                     # today's candidate's fg_labs_flags -- those are scoped to
                     # the CURRENT candidate's CLI surface (align.smk's
                     # _fg_labs_flags), not to an arbitrary older/foreign binary.
-                    # bwa-mem2-upstream never gets a `mode = fast` arm (see
-                    # _arena_arms), so $fast_flag is always empty for it -- this
-                    # branch only ever adds --fast for a historical bwa-mem3
-                    # release's `<label>-fast` arm. A release that predates the
+                    # bwa-mem2-upstream never gets a `mode = fast` arm, and its
+                    # writer is always `sam` (empty $out_flags) -- see
+                    # `_arena_arms` / `output_writer`. A release that predates a
                     # flag exits non-zero here, which `run_arm`'s caller turns
                     # into a SKIPPED row, not a job failure.
                     local fast_flag=""
                     [ "$mode" = "fast" ] && fast_flag="--fast"
-                    cmd="$binary mem -t {threads} {params.batch_flag} {params.mem_flags} $fast_flag $ref {input.fastqs}"
+                    cmd="$binary mem -t {threads} {params.batch_flag} {params.mem_flags} $fast_flag $out_flags $ref {input.fastqs}"
                     ;;
             esac
-            # --trace: per-tick RSS/IO/page-fault samples, not just the
-            # aggregate row. Diagnostic-only (folded into runtime-profiles.tar.gz
-            # below, same as every other per-arm file under runs/) -- a rising
-            # major_page_faults / io_in count across a label's own reps is the
-            # most DIRECT test of the page-cache-eviction hypothesis in the
-            # module docstring, since it is measured on the exact process that
-            # (dis)proves it, not inferred from wall_s minus process_s.
-            tricorder --out "${{out}}.timing.tsv" --trace "${{out}}.trace.tsv" -- \
-                bash -c "set -o pipefail; $cmd 2>'${{out}}.stderr.log' | samtools view -@4 -u -o '${{out}}.bam.raw' -"
+            # Every arm's final writer is `cat` into the file, never htslib:
+            # htslib's `bgzf_close` fdatasync()s a regular-file output, and a
+            # single-threaded BGZF writer (bwa-mem3's default) defers the whole
+            # ~3.5 GB sync to close -- ~6 s of idle disk wait on a 500 MB/s
+            # volume, timing the disk instead of the aligner. Through a pipe
+            # there is no sync, which is also how a real pipeline consumes it.
+            #
+            # `--interval 0.1`: tricorder's wall time resolves to its sampling
+            # tick (0.5 s by default), which on a ~20 s run is a 2.5% step --
+            # coarser than the release-over-release deltas the arena measures.
+            # --trace: per-tick RSS/IO/page-fault samples, folded into
+            # runtime-profiles.tar.gz below; diagnostic only.
+            local to_bam=""
+            [ "$writer" = "sam" ] && to_bam="samtools view -@4 -u -o - - |"
+            tricorder --interval 0.1 --out "${{out}}.timing.tsv" --trace "${{out}}.trace.tsv" -- \
+                bash -c "set -o pipefail; $cmd 2>'${{out}}.stderr.log' | $to_bam cat > '${{out}}.bam.raw'"
             if [ "$(samtools view -c "${{out}}.bam.raw" 2>/dev/null || echo 0)" -eq 0 ]; then
                 return 1
             fi
         }}
 
         # Untimed page-cache top-off of ONE arm's own index family + the
-        # fastqs, run immediately before EVERY measured rep -- see the module
-        # docstring's "Prewarm: cat, not shm" (per-rep, not once per job).
-        # Same three file lists, same technique, as the job's own index
-        # files: a plain `cat ... > /dev/null` populates the page cache
-        # identically whether it is read via mmap (minibwa) or fread'd into
-        # a heap buffer (bwa, bwa-mem2, every bwa-mem3 release) at `mem`
-        # time -- it is the SAME underlying file, and the kernel's page
-        # cache does not care which syscall touches it. `|| true` on each:
-        # a missing sidecar must not fail the whole job over a warm-cache
-        # nicety.
+        # fastqs, run `prewarm_passes` times immediately before EVERY run --
+        # see the module docstring's "Warmup: per-run cat". `|| true`: a
+        # missing sidecar must not fail the whole job over a warm-cache nicety.
         prewarm_arm() {{
             local binary="$1" dense="$2"
             # Warm the SAME idxbase the matching run_arm will read: dense
@@ -693,6 +839,20 @@ rule align_arena:
                     ;;
             esac > /dev/null 2>/dev/null || true
             cat {input.fastqs} > /dev/null 2>/dev/null || true
+        }}
+
+        # Allocate, touch and free `balloon_mb` of anonymous memory at a block
+        # boundary: evicts the previous index family's page cache and leaves
+        # contiguous free memory for the next block's huge pages. `dd` with
+        # `bs=<N>M count=1 iflag=fullblock` reads <N> MB of zeros into ONE
+        # buffer, touching every page of it, then exits. Never fatal.
+        balloon() {{
+            local block="$1"
+            [ {params.balloon_mb} -gt 0 ] || return 0
+            local t0=$SECONDS
+            dd if=/dev/zero of=/dev/null bs={params.balloon_mb}M count=1 iflag=fullblock 2>/dev/null \
+                || echo "WARNING: balloon before block=$block failed; continuing" >&2
+            echo "balloon: block=$block mb={params.balloon_mb} s=$((SECONDS - t0))" >&2
         }}
 
         # `{{params.arm_spec}}` is a Snakemake `.format()` field -- it is
@@ -726,17 +886,11 @@ rule align_arena:
         # This is deliberately a STANDALONE probe. The per-rep prewarm
         # (`prewarm_arm`, above) is a plain `cat`, not an alignment, so it
         # never prints the "phase-2 SMEM lockstep width" line this pin
-        # parses -- this probe is the ONLY rep=0 alignment invocation left
-        # in the whole job. Even if something else did run an early
-        # fg-labs-default alignment: front-loading puts `fg-labs-fast` ahead
-        # of `fg-labs-default` in $ARM_SPEC, so `fg-labs-fast`'s own reps can
-        # run to completion before `fg-labs-default`'s turn ever comes up,
-        # and deriving the pin from whichever label happened to run first
-        # would silently miss `fg-labs-fast`'s own measured rows,
-        # reintroducing the exact probe-cost inflation this pin exists to
-        # avoid. One dedicated full-alignment probe here (~similar cost to
-        # one measured rep) is simpler than special-casing the loop order
-        # below to guarantee `fg-labs-default` always runs first.
+        # parses -- and no measured or warmup run passes `-v 3`, so this
+        # probe is the ONLY invocation that prints it. Deriving the pin from
+        # whichever candidate run happened to come first would let
+        # `fg-labs-fast` runs scheduled before it go unpinned, reintroducing
+        # the probe-cost inflation this pin exists to avoid.
         #
         # Clear any INHERITED BWA3_SMEM_LOCKSTEP_N before parsing the probe
         # log. Without this, a value already present in the job's environment
@@ -745,32 +899,39 @@ rule align_arena:
         # probe log is missing or lacks a probe line -- masquerading as a pin
         # from a probe that never actually ran this time.
         unset BWA3_SMEM_LOCKSTEP_N
-        # As of fg-labs/bwa-mem3 #414 the startup MLP probe is OPT-IN (default
-        # off); the pin probe must explicitly request it, or a #414+ candidate
-        # would echo its compiled default width here instead of measuring one.
-        # No-op on #393..#413 builds (probe on by default, this var unread) and
-        # on pre-#393 builds (feature absent). Unset again after the probe (see
-        # below) so the measured cycles never re-probe on the unpinned fallback.
-        export BWA3_SMEM_LOCKSTEP_PROBE=1
-        PIN_PROBE_OUT="$OUTDIR/runs/fg-labs-default.default.pinprobe"
-        set +e
-        run_arm "fg-labs-default" "bwa-mem2.fg-labs" "default" 0 "$PIN_PROBE_OUT" {params.fg_labs_dense}
-        status=$?
-        set -e
-        [ $status -ne 0 ] && echo "pin probe: fg-labs-default failed (exit=$status); a parsed width will be used if available, otherwise --fast rows will run unpinned (the build's own default width resolution)" >&2
-        rm -f "${{PIN_PROBE_OUT}}.bam.raw"
-        PIN_PROBE_LOG="${{PIN_PROBE_OUT}}.stderr.log"
-        if [ -f "$PIN_PROBE_LOG" ]; then
-            FG_LABS_LOCKSTEP_N=$(grep -oE 'phase-2 SMEM lockstep width: [0-9]+' "$PIN_PROBE_LOG" \
-                | grep -oE '[0-9]+$' | tail -1 || true)
-            if [ -n "$FG_LABS_LOCKSTEP_N" ]; then
-                export BWA3_SMEM_LOCKSTEP_N="$FG_LABS_LOCKSTEP_N"
-                echo "pinned BWA3_SMEM_LOCKSTEP_N=$FG_LABS_LOCKSTEP_N from the pin probe" >&2
+        # The probe is a full candidate alignment, so it runs only when the
+        # candidate is among the selected arms (`_arena_runs_candidate`); a
+        # narrowed arena without it leaves every arm unpinned.
+        if [ "{params.pin_probe}" = "1" ]; then
+            # As of fg-labs/bwa-mem3 #414 the startup MLP probe is OPT-IN (default
+            # off); the pin probe must explicitly request it, or a #414+ candidate
+            # would echo its compiled default width here instead of measuring one.
+            # No-op on #393..#413 builds (probe on by default, this var unread) and
+            # on pre-#393 builds (feature absent). Unset again after the probe (see
+            # below) so the measured cycles never re-probe on the unpinned fallback.
+            export BWA3_SMEM_LOCKSTEP_PROBE=1
+            PIN_PROBE_OUT="$OUTDIR/runs/fg-labs-default.default.pinprobe"
+            set +e
+            run_arm "fg-labs-default" "bwa-mem2.fg-labs" "default" probe "$PIN_PROBE_OUT" {params.fg_labs_dense} bam
+            status=$?
+            set -e
+            [ $status -ne 0 ] && echo "pin probe: fg-labs-default failed (exit=$status); a parsed width will be used if available, otherwise --fast rows will run unpinned (the build's own default width resolution)" >&2
+            rm -f "${{PIN_PROBE_OUT}}.bam.raw"
+            PIN_PROBE_LOG="${{PIN_PROBE_OUT}}.stderr.log"
+            if [ -f "$PIN_PROBE_LOG" ]; then
+                FG_LABS_LOCKSTEP_N=$(grep -oE 'phase-2 SMEM lockstep width: [0-9]+' "$PIN_PROBE_LOG" \
+                    | grep -oE '[0-9]+$' | tail -1 || true)
+                if [ -n "$FG_LABS_LOCKSTEP_N" ]; then
+                    export BWA3_SMEM_LOCKSTEP_N="$FG_LABS_LOCKSTEP_N"
+                    echo "pinned BWA3_SMEM_LOCKSTEP_N=$FG_LABS_LOCKSTEP_N from the pin probe" >&2
+                else
+                    echo "WARNING: could not find a phase-2 SMEM lockstep width line in $PIN_PROBE_LOG -- today's candidate's measured --fast rows will run unpinned (the build's own default width resolution)" >&2
+                fi
             else
-                echo "WARNING: could not find a phase-2 SMEM lockstep width line in $PIN_PROBE_LOG -- today's candidate's measured --fast rows will run unpinned (the build's own default width resolution)" >&2
+                echo "WARNING: $PIN_PROBE_LOG missing -- pin probe likely failed; today's candidate's measured --fast rows will run unpinned (the build's own default width resolution)" >&2
             fi
         else
-            echo "WARNING: $PIN_PROBE_LOG missing -- pin probe likely failed; today's candidate's measured --fast rows will run unpinned (the build's own default width resolution)" >&2
+            echo "pin probe skipped: no candidate arm selected; every arm runs unpinned" >&2
         fi
         # Probe requested only for the dedicated pin invocation above; clear it so
         # the measured cycles never re-probe -- on the unpinned fallback path a
@@ -778,97 +939,86 @@ rule align_arena:
         # every measured rep, the exact inflation this pin exists to avoid.
         unset BWA3_SMEM_LOCKSTEP_PROBE
 
-        # Interleaved measured cycles: LABEL-MAJOR (every rep of one label
-        # runs back-to-back) over the FRONT-LOADED, PER-SUBMISSION-SEEDED
-        # $ARM_SPEC built above (every `--fast` arm, shuffled, ahead of every
-        # `--default` arm, shuffled -- see `front_load_fast_arms`'s
-        # docstring). This replaced a REP-OUTER / ARM-INNER, FIXED-ORDER loop
-        # whose own comment claimed it "spread a monotonic drift evenly
-        # across every arm instead of biasing whichever ran first or last" --
-        # which does not hold when the arm order inside each rep never
-        # varies: whichever arm is last in that fixed order (always today's
-        # candidate, `fg-labs-fast`) is disadvantaged by BOTH the within-rep
-        # drift (it is always measured latest within every single rep) and
-        # the whole-job drift (nothing here ever resets cache/host state
-        # between reps). Confirmed on a real c8a arena run: `process_s` (the
-        # aligner's own timer) was flat within noise between v0.9.0 and
-        # v0.10.0's `--fast` arms, while `wall_s`'s "outside-process" gap grew
-        # from ~1.3s in the first measured rep to ~13.5s in the third, on
-        # EVERY `--fast` label in the run -- a host-drift artifact that
-        # produced a false release-over-release regression, not a codegen
-        # change. Label-major shrinks that to a within-label concern (each
-        # label's own N reps span a narrower window of the job), and the
-        # front-loaded + shuffled block order (this rule's `arm_spec` param)
-        # is what stops whichever label happens to run last from always being
-        # the newest candidate.
+        # The schedule: index-family blocks of paired rounds, built in Python
+        # (`_arena_schedule` / `arena_arms.build_schedule`). Each token is
+        # `block|round|position|label|binary|mode|dense|writer`; round 0 is the
+        # block's discarded warmup. The balloon runs at every block change, and
+        # a tachyon probe + meminfo snapshot at every round change.
+        PREV_BLOCK=""
+        PREV_ROUND_KEY=""
         for entry in $ARM_SPEC; do
-            IFS='|' read -r label binary mode dense <<< "$entry"
+            IFS='|' read -r block round position label binary mode dense writer <<< "$entry"
 
-            for rep in $(seq 1 {params.reps}); do
-                # Untimed per-rep page-cache top-off, run immediately before
-                # THIS rep -- see `prewarm_arm` above and the module
-                # docstring's "Prewarm: cat, not shm". Replaces the old
-                # per-label full-alignment warmup: a `cat` is far cheaper,
-                # covers the whole index file regardless of read count (no
-                # coverage gap the way a smaller-read-count run would have),
-                # and -- being near-zero RSS itself -- does not compete with
-                # its own working set for the cache room it is trying to
-                # populate the way a full alignment does. Doing this every
-                # rep (not just once per label) is what actually closes the
-                # gap: for a large-index label, ONE untimed pass does not
-                # fully populate cache on a memory-constrained host, so
-                # repeating the cat before each rep is the second/third
-                # convergence pass, done untimed instead of leaking into
-                # wall_s.
-                CAT_T0=$SECONDS
+            if [ "$block" != "$PREV_BLOCK" ]; then
+                balloon "$block"
+                PREV_BLOCK="$block"
+            fi
+            if [ "$block-$round" != "$PREV_ROUND_KEY" ]; then
+                emit-host-probe "round-${{block}}-${{round}}" {params.label_probe_seconds} >> {output.host_probe}
+                emit_meminfo_snapshot "round-${{block}}-${{round}}"
+                PREV_ROUND_KEY="$block-$round"
+            fi
+
+            CAT_T0=$SECONDS
+            for pass in $(seq 1 {params.prewarm_passes}); do
                 prewarm_arm "$binary" "$dense"
-                echo "prewarm: label=$label mode=$mode rep=$rep dense=$dense cat_s=$((SECONDS - CAT_T0))" >&2
-                OUT="$OUTDIR/runs/${{label}}.${{mode}}.rep${{rep}}"
-                set +e
-                run_arm "$label" "$binary" "$mode" "$rep" "$OUT" "$dense"
-                status=$?
-                set -e
-                if [ $status -ne 0 ]; then
-                    echo "WARNING: arm=$label mode=$mode rep=$rep FAILED (exit=$status) -- likely an unsupported flag/subcommand on an old binary; recording SKIPPED and continuing" >&2
-                    printf '%s\t%s\t%s\tNA\tNA\tNA\tNA\n' "$label" "$mode" "$rep" >> {output.tsv}
-                    rm -f "${{OUT}}.bam.raw"
-                    continue
-                fi
-                WALL=$(mawk 'NR==2{{print $1}}' "${{OUT}}.timing.tsv")
-                RSS=$(mawk 'NR==2{{print $3}}' "${{OUT}}.timing.tsv")
-                CPU=$(mawk 'NR==2{{print $10}}' "${{OUT}}.timing.tsv")
-                PROC=$(grep -oE 'PROCESS\(\).*?:[[:space:]]*[0-9.]+' "${{OUT}}.stderr.log" \
-                       | grep -oE '[0-9.]+$' | head -1 || true)
-                printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-                    "$label" "$mode" "$rep" "$WALL" "$CPU" "$RSS" "${{PROC:-NA}}" >> {output.tsv}
-                # Tee the same row to stderr (-> CloudWatch) so a result is
-                # visible the moment an arm finishes, not just when the whole
-                # job completes and arena.tsv finally reaches S3 -- Snakemake's
-                # storage plugin uploads declared outputs on rule completion,
-                # not incrementally, so without this line there is no way to
-                # see a single number until the entire multi-hour job is done.
-                echo "RESULT: label=$label mode=$mode rep=$rep wall_s=$WALL cpu_s=$CPU max_rss_mb=$RSS process_s=${{PROC:-NA}}" >&2
-                # Keep the LAST measured rep's BAM for the two arms the
-                # correctness check compares -- default mode only (--fast
-                # prunes the candidate set on purpose, so its BAM is not a
-                # meaningful fgumi comparator -- see CLAUDE.md's vs_default note).
-                if [ "$rep" -eq {params.reps} ] && [ "$mode" = "default" ] \
-                   && {{ [ "$label" = "fg-labs-default" ] || [ "$label" = "{params.prior_label}" ]; }}; then
-                    cp "${{OUT}}.bam.raw" "$OUTDIR/keep.${{label}}.bam"
-                fi
-                rm -f "${{OUT}}.bam.raw"
             done
-            # Per-LABEL host telemetry, taken once this label's reps are all
-            # done: a cheap tachyon memory-access-rate reading (phase
-            # "label-$label", appended to the SAME host-probe.jsonl the
-            # whole-job "pre"/"post" readings already use -- `phase` is a
-            # free-text row key with no existing ingest changes needed, see
-            # `_ingest_host_probes`) plus a page-cache size snapshot. Together
-            # these turn the drift hypothesis above into something checkable
-            # directly against ~13-14 labels' worth of time-series, not just
-            # inferred from wall_s minus process_s.
-            emit-host-probe "label-${{label}}" {params.label_probe_seconds} >> {output.host_probe}
-            emit_meminfo_snapshot "label-${{label}}"
+            echo "prewarm: label=$label mode=$mode round=$round dense=$dense passes={params.prewarm_passes} cat_s=$((SECONDS - CAT_T0))" >&2
+
+            OUT="$OUTDIR/runs/${{label}}.${{mode}}.round${{round}}"
+            # Host state at the start of the run, after the prewarm, so the
+            # deltas below cover the timed run alone.
+            FALLBACK0=$(vmstat_counter thp_fault_fallback)
+            STALL0=$(vmstat_counter compact_stall)
+            MAJFLT0=$(vmstat_counter pgmajfault)
+            MEMFREE=$(meminfo_mb MemFree)
+            ANONHUGE=$(meminfo_mb AnonHugePages)
+            set +e
+            run_arm "$label" "$binary" "$mode" "$round" "$OUT" "$dense" "$writer"
+            status=$?
+            set -e
+            FALLBACK=$(counter_delta "$FALLBACK0" "$(vmstat_counter thp_fault_fallback)")
+            STALL=$(counter_delta "$STALL0" "$(vmstat_counter compact_stall)")
+            MAJFLT=$(counter_delta "$MAJFLT0" "$(vmstat_counter pgmajfault)")
+            if [ $status -ne 0 ]; then
+                echo "WARNING: arm=$label mode=$mode round=$round FAILED (exit=$status) -- likely an unsupported flag/subcommand on an old binary; recording SKIPPED and continuing" >&2
+                printf '%s\t%s\t%s\tNA\tNA\tNA\tNA\t%s\t%s\t%s\tNA\tNA\tNA\t%s\t%s\t%s\t%s\t%s\n' \
+                    "$label" "$mode" "$round" "$block" "$position" "$writer" \
+                    "$FALLBACK" "$STALL" "$MAJFLT" "$MEMFREE" "$ANONHUGE" >> {output.tsv}
+                rm -f "${{OUT}}.bam.raw"
+                continue
+            fi
+            WALL=$(mawk 'NR==2{{print $1}}' "${{OUT}}.timing.tsv")
+            RSS=$(mawk 'NR==2{{print $3}}' "${{OUT}}.timing.tsv")
+            CPU=$(mawk 'NR==2{{print $10}}' "${{OUT}}.timing.tsv")
+            IO_IN=$(timing_column "${{OUT}}.timing.tsv" io_in)
+            PCACHE=$(timing_column "${{OUT}}.timing.tsv" page_cache_start)
+            PROC=$(grep -oE 'PROCESS\(\).*?:[[:space:]]*[0-9.]+' "${{OUT}}.stderr.log" \
+                   | grep -oE '[0-9.]+$' | head -1 || true)
+            # The binary's own index-load time (bwa-mem2 and every bwa-mem3
+            # build print it); a cold page cache shows up here first.
+            IDX=$(grep -oE 'Index read time avg: [0-9.]+' "${{OUT}}.stderr.log" \
+                  | grep -oE '[0-9.]+$' | head -1 || true)
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$label" "$mode" "$round" "$WALL" "$CPU" "$RSS" "${{PROC:-NA}}" \
+                "$block" "$position" "$writer" "${{IDX:-NA}}" "${{IO_IN:-NA}}" "${{PCACHE:-NA}}" \
+                "$FALLBACK" "$STALL" "$MAJFLT" "$MEMFREE" "$ANONHUGE" >> {output.tsv}
+            # Tee the same row to stderr (-> CloudWatch) so a result is
+            # visible the moment a run finishes, not just when the whole job
+            # completes and arena.tsv finally reaches S3 -- Snakemake's
+            # storage plugin uploads declared outputs on rule completion,
+            # not incrementally.
+            echo "RESULT: label=$label mode=$mode round=$round wall_s=$WALL cpu_s=$CPU max_rss_mb=$RSS process_s=${{PROC:-NA}} index_read_s=${{IDX:-NA}} thp_fault_fallback=$FALLBACK" >&2
+            # Keep the latest MEASURED round's BAM for the two arms the
+            # correctness check compares -- default mode only (--fast prunes
+            # the candidate set on purpose, so its BAM is not a meaningful
+            # fgumi comparator -- see CLAUDE.md's vs_default note). `mv`
+            # overwrites the previous round's copy, so the last round wins.
+            if [ "$round" -ge 1 ] && [ "$mode" = "default" ] \
+               && {{ [ "$label" = "fg-labs-default" ] || [ "$label" = "{params.prior_label}" ]; }}; then
+                mv -f "${{OUT}}.bam.raw" "$OUTDIR/keep.${{label}}.bam"
+            fi
+            rm -f "${{OUT}}.bam.raw"
         done
 
         emit-host-probe post {params.probe_seconds} >> {output.host_probe}
@@ -886,7 +1036,7 @@ rule align_arena:
                 > {output.fgumi_compare} 2>&1
             set -e
         else
-            echo "fgumi correctness check skipped: fg-labs-default or {params.prior_label} BAM missing (see arena.tsv for which rep failed)" \
+            echo "fgumi correctness check skipped: fg-labs-default or {params.prior_label} BAM missing (see arena.tsv for which round failed)" \
                 > {output.fgumi_compare}
         fi
         rm -f "$KEEP_FG" "$KEEP_PRIOR"

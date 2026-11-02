@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Arena per-run host state** (schema v14). Every `arena.tsv` row records its
+  schedule position (`block`, `position`, round in `rep`), output `writer`, the
+  binary's index-read time, tricorder `io_in` and starting page cache, and
+  `/proc/vmstat` deltas over the run (`thp_fault_fallback`, `compact_stall`,
+  `pgmajfault`) with `MemFree` / `AnonHugePages` at its start. Ingest reads the
+  new columns by header name and replaces a `(sha, arch)` arena on re-ingest.
+- **Arena knobs**: `arena.context_reps`, `prewarm_passes`, `balloon_mb` and
+  `sam_writer_control` (control arms reported by `bench arena` as what native
+  BAM saves), plus `--config arena_labels=` (validated) to narrow a run to some
+  arms and stage only the indexes they read.
+
 - **Graviton4 core-tuned bwa-mem3 image for c8g / c8g64.** `baseline_arch:
   neoverse-v2` routes both to `<sha>-neoverse-v2`, a linux/arm64-only image
   built with the fg-labs Makefile's `ARM_CPU=neoverse-v2 ARM_CACHE_LINE=64`
@@ -50,6 +61,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The arena runs paired rounds, and its headline ratio is paired.** Arms are
+  grouped into index-family blocks; each block runs a discarded warmup round,
+  then `arena.reps` (candidate's block, now 5) or `context_reps` measured rounds
+  in a fresh seeded order, the candidate and prior release back-to-back with
+  alternating lead. `vs_prior_release` is the lead-balanced median of per-round
+  ratios with cold rounds dropped, noted `paired` / `same-round` / `context` /
+  `inconclusive` / `unpaired`; the results pages carry the same estimate. The
+  old schedule ran a label's reps back-to-back, so one moment of host state hit
+  all of them (m8a reported 1.02x for a change measuring 1.16x paired).
+- **Arena bwa-mem3 arms write native uncompressed BAM** (`--bam=0 -o -`), and
+  every arm's output goes through `| cat` so no arm is timed flushing its file
+  to disk (htslib fdatasync()s regular files at close). Absolute arena walls and
+  the vs-bwa / vs-minibwa ratios step at this change; arenas recorded before it
+  render as `unpaired`. tricorder samples at 0.1 s (0.5 s quantized walls).
 - **Variant tag suffix order** is now `<sha>-<make_target>-<baseline_arch>`
   (was `<sha>-<baseline_arch>-<make_target>`), matching the tag workers compose
   (`BUILD_VARIANT` then `baseline_arch`). The old order was never pullable.

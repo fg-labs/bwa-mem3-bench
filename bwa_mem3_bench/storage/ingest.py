@@ -15,6 +15,7 @@ from typing import Any, NamedTuple
 from bwa_mem3_bench.golden import is_rep_dir
 from bwa_mem3_bench.storage import VS_BASELINE, VS_DEFAULT, VS_GOLDEN, VS_X86
 from bwa_mem3_bench.storage.sqlite import (
+    ARENA_V14_COLUMNS,
     upsert_accuracy,
     upsert_arena,
     upsert_comparison,
@@ -110,8 +111,14 @@ _SCALING_COLUMNS = 6
 _SCALING_COLUMNS_FULL = 10
 
 # arena.tsv: label, mode, rep, wall_s, cpu_s, max_rss_mb, process_s (see
-# arena.smk's `printf` header).
+# arena.smk's `printf` header), then -- since the paired-round schedule -- the
+# per-run schedule position and host state, read BY HEADER NAME so a reordered
+# rule cannot misassign them. A legacy 7-column file is still ingested, with
+# those columns NULL.
 _ARENA_COLUMNS = 7
+
+# arena.tsv header name -> `arena` table column, where the two differ.
+_ARENA_HEADER_RENAMES = {"index_read_s": "index_read_seconds"}
 
 # tachyon reports its working set in bytes; `host_probes` stores MB.
 _BYTES_PER_MB = 1024 * 1024
@@ -1209,7 +1216,11 @@ def ingest_arena(
 
     Each ``arena.tsv`` is written by `align_arena` (one on-demand Batch job on
     one host per arch) with a header plus one row per (label, mode, rep):
-    ``label, mode, rep, wall_s, cpu_s, max_rss_mb, process_s``. A SKIPPED arm
+    ``label, mode, rep, wall_s, cpu_s, max_rss_mb, process_s``, followed on
+    paired-round arenas by the per-run schedule position and host state (read by
+    header name); ``rep`` is then the schedule round, 0 being the discarded
+    warmup. Each file with at least one valid row replaces that (sha, arch)'s
+    earlier rows; one with none is reported and leaves them. A SKIPPED arm
     (arena.smk's "Never hard-fail on an old binary") writes the literal "NA"
     for every numeric field, which loads as NULL -- see `upsert_arena`.
 
@@ -1252,11 +1263,30 @@ def ingest_arena(
             arch=arch,
             instance_id=instance_id,
         )
-        for line in tsv.read_text().splitlines()[1:]:  # skip header
-            fields = line.split("\t")
-            if len(fields) != _ARENA_COLUMNS:
-                continue
-            label, mode, rep, wall, cpu, rss, proc = fields
+        lines = tsv.read_text().splitlines()
+        header = lines[0].split("\t") if lines else []
+        extra_columns = [_ARENA_HEADER_RENAMES.get(name, name) for name in header[_ARENA_COLUMNS:]]
+        unknown = set(extra_columns) - {column for column, _ in ARENA_V14_COLUMNS}
+        if unknown:
+            raise ValueError(f"{tsv}: unknown arena.tsv columns {sorted(unknown)}")
+        rows = [line.split("\t") for line in lines[1:]]
+        valid = [fields for fields in rows if header and len(fields) == len(header)]
+        dropped = len(rows) - len(valid)
+        if not valid:
+            # Not a job's result (empty, header-only, or truncated): keep what an
+            # earlier, good file loaded rather than replacing it with nothing.
+            print(
+                f"WARNING: {tsv}: no valid row ({dropped} malformed); "
+                "kept this arch's earlier arena rows",
+                file=sys.stderr,
+            )
+            continue
+        # One arena.tsv is one whole job: it replaces whatever an earlier job
+        # for this (sha, arch) left behind, or a re-run would leave stale rows
+        # whose rounds the report would pair with the new job's.
+        conn.execute("DELETE FROM arena WHERE fg_labs_sha = ? AND arch = ?", (fg_labs_sha, arch))
+        for fields in valid:
+            label, mode, rep, wall, cpu, rss, proc = fields[:_ARENA_COLUMNS]
             upsert_arena(
                 conn,
                 fg_labs_sha=fg_labs_sha,
@@ -1269,8 +1299,35 @@ def ingest_arena(
                 max_rss_mb=_maybe_float(rss),
                 process_seconds=_maybe_float(proc),
                 instance_id=instance_id,
+                **_arena_host_state(dict(zip(extra_columns, fields[_ARENA_COLUMNS:], strict=True))),
                 commit=False,
             )
             ingested += 1
+        if dropped:
+            print(
+                f"WARNING: {tsv}: skipped {dropped} row(s) whose field count does not match "
+                f"the {len(header)}-column header (truncated or malformed)",
+                file=sys.stderr,
+            )
     conn.commit()
     return ingested
+
+
+def _arena_host_state(fields: dict[str, str]) -> dict[str, Any]:
+    """Convert an arena.tsv row's post-legacy fields, keyed by table column.
+
+    Each value is converted by the column's SQL type in `ARENA_V14_COLUMNS`.
+    ``NA`` (the rule's "not recorded" token) loads as NULL, as it does for the
+    timing fields.
+    """
+    sql_types = dict(ARENA_V14_COLUMNS)
+    state: dict[str, Any] = {}
+    for column, raw in fields.items():
+        if sql_types[column] == "TEXT":
+            state[column] = None if raw in ("", "NA") else raw
+            continue
+        value = _maybe_float(raw)
+        state[column] = (
+            int(value) if value is not None and sql_types[column] == "INTEGER" else value
+        )
+    return state

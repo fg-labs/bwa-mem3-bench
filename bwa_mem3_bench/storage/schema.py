@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 # Increment this whenever the schema changes in a backward-incompatible way.
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # The table definitions only. `user_version` is deliberately NOT set here:
 # `storage.sqlite.connect` stamps it from SCHEMA_VERSION in the same transaction
@@ -274,6 +274,22 @@ CREATE TABLE IF NOT EXISTS arena (
     -- constant across every row for that pair by construction. NULL for
     -- arenas ingested before the rule emitted meta.json.
     instance_id     TEXT,
+    -- Per-run schedule position and host state, added with the paired-round
+    -- schedule (2026-11). NULL on every row from earlier arenas, which is how
+    -- the report tells the two protocols apart: `rep` there was a back-to-back
+    -- rep of one label, here it is a schedule ROUND (0 = discarded warmup)
+    -- shared by every arm of the same `block`.
+    block               TEXT,
+    position            INTEGER,
+    writer              TEXT,
+    index_read_seconds  REAL,
+    io_in_mb            REAL,
+    page_cache_start_mb REAL,
+    thp_fault_fallback  INTEGER,
+    compact_stall       INTEGER,
+    pgmajfault          INTEGER,
+    memfree_mb          REAL,
+    anon_huge_mb        REAL,
     UNIQUE (fg_labs_sha, arch, label, mode, rep)
 );
 

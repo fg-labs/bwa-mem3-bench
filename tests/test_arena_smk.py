@@ -26,6 +26,8 @@ from pathlib import Path
 import pytest
 
 from bwa_mem3_bench import REPO_ROOT
+from bwa_mem3_bench.storage.ingest import _ARENA_COLUMNS, _ARENA_HEADER_RENAMES
+from bwa_mem3_bench.storage.sqlite import ARENA_V14_COLUMNS
 
 ARENA_SMK = Path(REPO_ROOT) / "workflow" / "rules" / "arena.smk"
 RULES_DIR = Path(REPO_ROOT) / "workflow" / "rules"
@@ -119,11 +121,12 @@ def test_align_arena_is_scheduled_ahead_of_every_other_rule() -> None:
 # 4th field is the dense-SA flag (`_arm_uses_dense_sa`): 1 for the candidate,
 # 0 for the historical/foreign arms shown here.
 _SAMPLE_ARM_SPEC = (
-    "bwa|bwa|default|0 minibwa|minibwa|default|0 "
-    "bwa-mem2-upstream|bwa-mem2.upstream|default|0 "
-    "v021|bwa-mem3.v021|default|0 394f8f8|bwa-mem3.394f8f8|default|0 "
-    "fg-labs-default|bwa-mem2.fg-labs|default|1 "
-    "fg-labs-fast|bwa-mem2.fg-labs|fast|1"
+    "bwa|0|1|bwa|bwa|default|0|sam minibwa|0|1|minibwa|minibwa|default|0|sam "
+    "bwa-mem2-stock|0|1|bwa-mem2-upstream|bwa-mem2.upstream|default|0|sam "
+    "bwa-mem2-stock|0|2|v021|bwa-mem3.v021|default|0|bam "
+    "bwa-mem2-stock|0|3|394f8f8|bwa-mem3.394f8f8|default|0|bam "
+    "bwa-mem2-dense|1|1|fg-labs-default|bwa-mem2.fg-labs|default|1|bam "
+    "bwa-mem2-dense|1|2|fg-labs-fast|bwa-mem2.fg-labs|fast|1|bam"
 )
 _SAMPLE_ARM_SPEC_COUNT = 7
 # The align_arena rule declares exactly one arm-spec-iterating `for` loop --
@@ -180,7 +183,7 @@ def test_arm_spec_for_loop_does_not_trigger_a_bash_syntax_error() -> None:
     ARM_SPEC="{_SAMPLE_ARM_SPEC}"
     count=0
     for entry in $ARM_SPEC; do
-        IFS='|' read -r label binary mode dense <<< "$entry"
+        IFS='|' read -r block round position label binary mode dense writer <<< "$entry"
         count=$((count + 1))
     done
     echo "$count"
@@ -304,9 +307,9 @@ def test_a_successful_measured_arm_tees_its_result_to_stderr() -> None:
     finishes. There was no way to see a single number mid-run.
     """
     text = ARENA_SMK.read_text()
-    measured_start = text.index("Interleaved measured cycles")
-    printf_idx = text.index("printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n'", measured_start)
-    keep_comment_idx = text.index("# Keep the LAST measured rep's BAM", printf_idx)
+    measured_start = text.index("# The schedule: index-family blocks")
+    printf_idx = text.index('"$label" "$mode" "$round" "$WALL"', measured_start)
+    keep_comment_idx = text.index("# Keep the latest MEASURED round's BAM", printf_idx)
     between = text[printf_idx:keep_comment_idx]
     assert 'echo "RESULT:' in between and ">&2" in between, (
         'expected a `echo "RESULT: ..." >&2` line between the printf that '
@@ -316,7 +319,7 @@ def test_a_successful_measured_arm_tees_its_result_to_stderr() -> None:
     expected_fields = (
         "label=$label",
         "mode=$mode",
-        "rep=$rep",
+        "round=$round",
         "wall_s=$WALL",
         "cpu_s=$CPU",
         "max_rss_mb=$RSS",
@@ -346,13 +349,13 @@ def _fg_labs_case_snippet() -> str:
     )
 
 
-def test_fg_labs_invocation_requests_v3_only_on_the_warmup_rep() -> None:
-    """The fg-labs binary must run with `-v 3` on the warmup rep (rep=0) so
+def test_fg_labs_invocation_requests_v3_only_on_the_pin_probe() -> None:
+    """The fg-labs binary must run with `-v 3` on the pin probe (rep=probe) so
     that invocation prints the "phase-2 SMEM lockstep width: N" line the pin
-    block below parses -- but MUST NOT carry `-v 3` on any measured rep
-    (rep>=1): the verbose stderr writes happen inside the tricorder-timed
-    region and can perturb the very wall_s values the pin exists to keep
-    clean. Verified by actually extracting the case branch and executing it
+    block below parses -- but MUST NOT carry `-v 3` on any scheduled run,
+    warmup round 0 included: the verbose stderr writes happen inside the
+    tricorder-timed region and can perturb the very wall_s values the pin
+    exists to keep clean. Verified by actually extracting the case branch and executing it
     in a real bash subprocess for rep=0 and rep=1, mirroring
     `test_arm_dispatch_fast_flag_covers_the_historical_release_branch` --
     a text search alone cannot tell "reads $rep and gates on it" apart from
@@ -368,8 +371,8 @@ def test_fg_labs_invocation_requests_v3_only_on_the_warmup_rep() -> None:
         esac
         echo "$cmd"
     }}
+    check_cmd "bwa-mem2.fg-labs" "default" probe
     check_cmd "bwa-mem2.fg-labs" "default" 0
-    check_cmd "bwa-mem2.fg-labs" "default" 1
     """
     result = subprocess.run(  # noqa: S603, S607 -- fixed, test-owned Bash script
         ["bash", "-c", script], capture_output=True, text=True, check=False
@@ -377,8 +380,8 @@ def test_fg_labs_invocation_requests_v3_only_on_the_warmup_rep() -> None:
     assert result.returncode == 0, f"stderr: {result.stderr}"
     lines = result.stdout.strip().splitlines()
     assert len(lines) == _EXPECTED_CHECK_CMD_INVOCATIONS, f"expected 2 output lines, got {lines!r}"
-    assert "-v 3" in lines[0], f"warmup (rep=0) must pass -v 3: {lines[0]!r}"
-    assert "-v 3" not in lines[1], f"measured rep (rep=1) must NOT pass -v 3: {lines[1]!r}"
+    assert "-v 3" in lines[0], f"the pin probe must pass -v 3: {lines[0]!r}"
+    assert "-v 3" not in lines[1], f"warmup round 0 must NOT pass -v 3: {lines[1]!r}"
 
 
 def test_dense_sa_min_label_is_a_real_release() -> None:
@@ -456,15 +459,15 @@ def test_run_arm_call_sites_pass_the_dense_argument() -> None:
     `set +e` window could silently default the ref."""
     text = ARENA_SMK.read_text()
     assert (
-        'run_arm "fg-labs-default" "bwa-mem2.fg-labs" "default" 0 "$PIN_PROBE_OUT" '
-        "{params.fg_labs_dense}" in text
+        'run_arm "fg-labs-default" "bwa-mem2.fg-labs" "default" probe "$PIN_PROBE_OUT" '
+        "{params.fg_labs_dense} bam" in text
     ), "pin-probe run_arm call must pass {params.fg_labs_dense} as the dense arg"
-    assert 'run_arm "$label" "$binary" "$mode" "$rep" "$OUT" "$dense"' in text, (
-        'measured-loop run_arm call must pass "$dense" as the 6th arg'
+    assert 'run_arm "$label" "$binary" "$mode" "$round" "$OUT" "$dense" "$writer"' in text, (
+        'scheduled-run run_arm call must pass "$dense" and "$writer" as the 6th/7th args'
     )
 
 
-def _lockstep_pin_snippet() -> str:
+def _lockstep_pin_snippet(pin_probe: str = "1") -> str:
     """Extracts the `unset BWA3_SMEM_LOCKSTEP_N` ... pin block from
     `align_arena`, unescaping Snakemake's `.format()` `{{`/`}}` literal-brace
     escapes so it can run standalone as valid bash.
@@ -474,15 +477,20 @@ def _lockstep_pin_snippet() -> str:
     harness below must exercise it as written in `align_arena`, not
     re-implement its own copy. The block now calls `run_arm` itself (a
     DEDICATED probe invocation, not a parse of some other loop's warmup log
-    -- see the module docstring's "Warmup: per-label, not per-job"), so
+    -- see the module docstring's "Warmup: per-run cat"), so
     callers must supply a stub `run_arm` (see `_stub_run_arm_snippet`)."""
     text = ARENA_SMK.read_text()
     start = text.index("unset BWA3_SMEM_LOCKSTEP_N")
-    end = text.index("# Interleaved measured cycles", start)
+    end = text.index("# The schedule: index-family blocks", start)
     # `{{`/`}}` are Snakemake .format() escapes for literal `{`/`}` -- none
     # appear in this slice, but keep the unescape for parity with how
     # Snakemake would actually render it, in case a future edit adds one.
-    return text[start:end].replace("{{", "{").replace("}}", "}")
+    return (
+        text[start:end]
+        .replace("{{", "{")
+        .replace("}}", "}")
+        .replace("{params.pin_probe}", pin_probe)
+    )
 
 
 def _stub_run_arm_snippet() -> str:
@@ -514,6 +522,7 @@ def _run_lockstep_pin_snippet(
     log_content: str = "",
     exit_code: int = 0,
     write_log: bool = True,
+    pin_probe: str = "1",
 ) -> subprocess.CompletedProcess[str]:
     """Runs `_lockstep_pin_snippet()`'s extracted pin block, backed by
     `_stub_run_arm_snippet()`'s fake `run_arm`, in a real bash subprocess
@@ -529,7 +538,7 @@ def _run_lockstep_pin_snippet(
     STUB_EXIT_CODE={exit_code}
     STUB_WRITE_LOG={"1" if write_log else "0"}
     {_stub_run_arm_snippet()}
-    {_lockstep_pin_snippet()}
+    {_lockstep_pin_snippet(pin_probe)}
     echo "RESULT_PIN=${{BWA3_SMEM_LOCKSTEP_N:-UNSET}}"
     echo "PROBE_AFTER=${{BWA3_SMEM_LOCKSTEP_PROBE:-UNSET}}"
     """
@@ -645,11 +654,10 @@ def test_smem_lockstep_pin_snippet_ignores_an_inherited_env_var(
 
 
 def _measured_cycle_body() -> str:
-    """Extracts the LABEL-MAJOR measured-cycle loop (from its introducing
-    comment through the per-label instrumentation block), for the ordering
-    and instrumentation regression tests below."""
+    """Extracts the scheduled-run loop (from its introducing comment through
+    the end of the loop), for the ordering and instrumentation tests below."""
     text = ARENA_SMK.read_text()
-    start = text.index("# Interleaved measured cycles")
+    start = text.index("# The schedule: index-family blocks")
     end = text.index("emit-host-probe post", start)
     return text[start:end]
 
@@ -668,66 +676,175 @@ def test_arm_spec_is_seeded_by_the_fg_labs_sha() -> None:
     )
 
 
-def test_measured_cycle_is_label_major_not_rep_major() -> None:
-    """Regression test for the fixed-order host-drift confound this rule
-    used to have: the measured cycle must iterate LABEL-outer / rep-inner (one
-    label's reps run back-to-back) so a label's own median is drawn from a
-    narrow slice of the job's wall-clock, not the fixed-order rep-outer shape
-    where the same arm was always measured last, every single rep."""
+def test_scheduled_loop_iterates_the_python_schedule_once() -> None:
+    """The run order is `build_schedule`'s (unit-tested in test_arena_arms.py):
+    the shell must walk its tokens exactly once and must not re-impose its own
+    label-major `for rep` loop, which is what let one moment of host state
+    land on all of a label's reps (see the module docstring's "Schedule")."""
     body = _measured_cycle_body()
-    entry_idx = body.index("for entry in $ARM_SPEC; do")
-    rep_idx = body.index("for rep in $(seq 1 {params.reps}); do")
-    assert entry_idx < rep_idx, (
-        "expected `for entry in $ARM_SPEC` (label-major, outer) to precede "
-        "`for rep in $(seq ...)` (inner) in the measured cycle -- got the "
-        "reverse, which is the old rep-major shape this rule moved away from"
-    )
-    # Exactly one of each: the per-rep cat prewarm runs inside this same
-    # loop (see `test_per_rep_prewarm_precedes_each_measured_rep` below),
-    # not as a separate pass with its own `for entry in $ARM_SPEC`.
     assert body.count("for entry in $ARM_SPEC; do") == 1
-    assert body.count("for rep in $(seq 1 {params.reps}); do") == 1
-
-
-def test_per_rep_prewarm_precedes_each_measured_rep() -> None:
-    """Regression test for the residual within-label decay the per-rep cat
-    prewarm fixes: `prewarm_arm` must run INSIDE the `for rep in ...` loop,
-    before `run_arm`, for EVERY rep -- not once per label via a full
-    alignment (the design this replaced). A real arena run's `--trace`
-    `io_in` data showed one untimed full-alignment pass does not fully
-    populate the page cache for large-index tools on a memory-constrained
-    host; repeating a cheap `cat` before every rep is what actually
-    converges -- see the module docstring's "Warmup: per-rep cat, not
-    per-label alignment"."""
-    body = _measured_cycle_body()
-    entry_idx = body.index("for entry in $ARM_SPEC; do")
-    rep_idx = body.index("for rep in $(seq 1 {params.reps}); do")
-    prewarm_idx = body.index('prewarm_arm "$binary"')
-    run_arm_idx = body.index('run_arm "$label" "$binary" "$mode" "$rep" ')
-    assert entry_idx < rep_idx < prewarm_idx < run_arm_idx, (
-        "expected prewarm_arm to run inside the `for rep in ...` loop, "
-        "before run_arm for that rep -- got "
-        f"entry_idx={entry_idx}, rep_idx={rep_idx}, "
-        f"prewarm_idx={prewarm_idx}, run_arm_idx={run_arm_idx}"
+    assert "for rep in $(seq" not in body
+    assert "IFS='|' read -r block round position label binary mode dense writer" in body, (
+        "the loop must parse every field of `ScheduledRun.to_token`"
     )
-    # Exactly one call site -- the rep loop itself (running `reps` times) is
-    # what gives multiple passes, not multiple calls within one rep.
+
+
+def test_prewarm_runs_prewarm_passes_times_before_each_run() -> None:
+    body = _measured_cycle_body()
+    passes_idx = body.index("for pass in $(seq 1 {params.prewarm_passes}); do")
+    prewarm_idx = body.index('prewarm_arm "$binary" "$dense"', passes_idx)
+    run_arm_idx = body.index('run_arm "$label" "$binary" "$mode" "$round" ')
+    assert passes_idx < prewarm_idx < run_arm_idx
     assert body.count('prewarm_arm "$binary"') == 1
 
 
-def test_no_per_label_full_alignment_warmup_remains() -> None:
-    """Regression guard against reintroducing the per-label full-alignment
-    warmup (rep=0) this fix replaced with a cheap per-rep `cat`. The ONLY
-    `run_arm` call with a literal `0` rep argument left in the file must be
-    the standalone SMEM-lockstep pin probe (`fg-labs-default`, explicitly
-    named), not a generic per-label warmup keyed off `$label`/`$binary`."""
+def test_balloon_runs_at_every_block_change_before_any_run_of_the_block() -> None:
+    body = _measured_cycle_body()
+    change_idx = body.index('if [ "$block" != "$PREV_BLOCK" ]; then')
+    balloon_idx = body.index('balloon "$block"', change_idx)
+    run_arm_idx = body.index('run_arm "$label"')
+    assert change_idx < balloon_idx < run_arm_idx
+
+
+def test_balloon_touches_the_configured_amount_and_never_fails_the_job(tmp_path: Path) -> None:
+    """Executes the real `balloon` function with `dd` stubbed: it must request one
+    `<balloon_mb>M` block with `iflag=fullblock` (so every page is touched), skip
+    entirely at 0, and survive a failing `dd`."""
     text = ARENA_SMK.read_text()
-    assert 'run_arm "$label" "$binary" "$mode" 0 ' not in text, (
-        "found a per-label rep=0 warmup call -- this was replaced by the "
-        "per-rep prewarm_arm cat; see the module docstring's "
-        '"Warmup: per-rep cat, not per-label alignment"'
+    start = text.index("balloon() {{")
+    end = text.index("\n        }}", start) + len("\n        }}")
+    func = text[start:end].replace("{{", "{").replace("}}", "}")
+    log = tmp_path / "dd.log"
+
+    def run(mb: int, dd_exit: int) -> subprocess.CompletedProcess[str]:
+        script = f"""
+        set -euo pipefail
+        dd() {{ echo "$@" >> {log}; return {dd_exit}; }}
+        {func.replace("{params.balloon_mb}", str(mb))}
+        balloon dense
+        echo done
+        """
+        return subprocess.run(  # noqa: S603, S607 -- fixed, test-owned Bash script
+            ["bash", "-c", script], capture_output=True, text=True, check=False
+        )
+
+    result = run(4000, 0)
+    assert result.returncode == 0 and "done" in result.stdout, result.stderr
+    assert "bs=4000M count=1 iflag=fullblock" in log.read_text()
+    log.unlink()
+    assert run(0, 0).returncode == 0
+    assert not log.exists(), "balloon_mb=0 must skip dd entirely"
+    failed = run(4000, 1)
+    assert failed.returncode == 0 and "done" in failed.stdout
+    assert "WARNING: balloon" in failed.stderr
+
+
+def test_bwa_mem3_builds_write_native_bam_and_others_pipe_through_samtools() -> None:
+    text = ARENA_SMK.read_text()
+    run_arm = text[text.index("run_arm() {{") : text.index("prewarm_arm() {{")]
+    assert '[ "$writer" = "bam" ] && out_flags="--bam=0 -o -"' in run_arm
+    for case in ("bwa-mem2.fg-labs)", "*)"):
+        case_body = run_arm[run_arm.index(case) :]
+        case_body = case_body[: case_body.index(";;")]
+        assert "$out_flags" in case_body, case
+    for case in ("bwa)", "minibwa)"):
+        case_body = run_arm[run_arm.index(f"                {case}") :]
+        case_body = case_body[: case_body.index(";;")]
+        assert "$out_flags" not in case_body, case
+    sam_stage = run_arm[run_arm.index('local to_bam=""') : run_arm.index("tricorder --interval")]
+    assert '[ "$writer" = "sam" ] && to_bam="samtools view -@4 -u -o - - |"' in sam_stage, (
+        "only the SAM writer may route through samtools"
     )
-    assert text.count('run_arm "fg-labs-default" "bwa-mem2.fg-labs" "default" 0 ') == 1
+    assert run_arm.count("samtools view -@4 -u") == 1, "samtools must appear only in the sam stage"
+
+
+def test_every_arm_writes_its_output_file_through_cat_not_htslib() -> None:
+    """htslib fdatasync()s a regular-file output at close; a single-threaded
+    BGZF writer defers the whole file's sync to then, so writing the file
+    directly would time the disk, not the aligner. The one timed pipeline must
+    end in `| cat > ...bam.raw`, with samtools (when present) writing stdout."""
+    text = ARENA_SMK.read_text()
+    run_arm = text[text.index("run_arm() {{") : text.index("prewarm_arm() {{")]
+    assert run_arm.count("tricorder --interval") == 1
+    assert "| $to_bam cat > '${{out}}.bam.raw'" in run_arm
+    assert "samtools view -@4 -u -o - - |" in run_arm
+    assert "-o '${{out}}.bam.raw'" not in run_arm
+
+
+def test_tricorder_samples_finely_enough_to_resolve_release_deltas() -> None:
+    """At tricorder's default 0.5 s tick a ~20 s wall resolves in 2.5% steps."""
+    text = ARENA_SMK.read_text()
+    run_arm = text[text.index("run_arm() {{") : text.index("prewarm_arm() {{")]
+    assert run_arm.count("tricorder --interval 0.1 ") == 1
+
+
+def test_each_row_records_schedule_position_and_host_state() -> None:
+    text = ARENA_SMK.read_text()
+    header = text[text.index("printf 'label\\t") :].split("\n", 1)[0]
+    columns = header.split("'")[1].split("\\t")
+    columns[-1] = columns[-1].removesuffix("\\n")
+    assert columns[:7] == [
+        "label",
+        "mode",
+        "rep",
+        "wall_s",
+        "cpu_s",
+        "max_rss_mb",
+        "process_s",
+    ], "columns 1-7 keep the legacy order"
+    assert columns[7:] == [
+        "block",
+        "position",
+        "writer",
+        "index_read_s",
+        "io_in_mb",
+        "page_cache_start_mb",
+        "thp_fault_fallback",
+        "compact_stall",
+        "pgmajfault",
+        "memfree_mb",
+        "anon_huge_mb",
+    ]
+    body = _measured_cycle_body()
+    for counter in ("thp_fault_fallback", "compact_stall", "pgmajfault"):
+        assert f"vmstat_counter {counter})" in body
+    snapshot_idx = body.index("FALLBACK0=$(vmstat_counter thp_fault_fallback)")
+    assert body.index("prewarm_arm") < snapshot_idx < body.index('run_arm "$label"'), (
+        "the pre-run counter snapshot must follow the prewarm, so deltas cover the run alone"
+    )
+
+
+def test_vmstat_and_meminfo_readers_parse_and_degrade_to_na(tmp_path: Path) -> None:
+    text = ARENA_SMK.read_text()
+    funcs = ""
+    for name in ("vmstat_counter", "meminfo_mb", "counter_delta"):
+        start = text.index(f"{name}() {{{{")
+        end = text.index("\n        }}", start) + len("\n        }}")
+        funcs += text[start:end].replace("{{", "{").replace("}}", "}") + "\n"
+    vmstat = tmp_path / "vmstat"
+    vmstat.write_text("thp_fault_alloc 10\nthp_fault_fallback 7\n")
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemFree:        2097152 kB\n")
+    funcs = funcs.replace("/proc/vmstat", str(vmstat)).replace("/proc/meminfo", str(meminfo))
+    script = f"""
+    set -euo pipefail
+    {funcs}
+    echo "$(vmstat_counter thp_fault_fallback) $(vmstat_counter nope) $(meminfo_mb MemFree)"
+    echo "$(meminfo_mb AnonHugePages) $(counter_delta 3 10) $(counter_delta NA 10)"
+    """
+    result = subprocess.run(  # noqa: S603, S607 -- fixed, test-owned Bash script
+        ["bash", "-c", script], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["7 NA 2048", "NA 7 NA"]
+
+
+def test_no_per_label_full_alignment_warmup_remains() -> None:
+    """The only alignment outside the schedule is the dedicated SMEM-lockstep pin
+    probe; warmup is the schedule's own discarded round 0."""
+    text = ARENA_SMK.read_text()
+    assert 'run_arm "$label" "$binary" "$mode" 0 ' not in text
+    assert text.count('run_arm "fg-labs-default" "bwa-mem2.fg-labs" "default" probe ') == 1
 
 
 def test_global_one_time_index_cat_prewarm_is_removed() -> None:
@@ -853,17 +970,15 @@ def test_tricorder_records_a_per_tick_trace() -> None:
     )
 
 
-def test_per_label_host_probe_and_meminfo_snapshot_are_emitted() -> None:
-    """Regression test for the arena's new per-label instrumentation: a
-    tachyon probe and a page-cache snapshot must both fire once per label,
-    after that label's reps finish, so the host-drift hypothesis in the
-    module docstring is checkable directly rather than only inferred."""
+def test_per_round_host_probe_and_meminfo_snapshot_are_emitted() -> None:
+    """A tachyon probe and a page-cache snapshot fire at the start of every
+    round, so host drift across a job is checkable round by round."""
     body = _measured_cycle_body()
     assert (
-        'emit-host-probe "label-${{label}}" {params.label_probe_seconds} >> {output.host_probe}'
-        in body
+        'emit-host-probe "round-${{block}}-${{round}}" {params.label_probe_seconds}'
+        " >> {output.host_probe}" in body
     )
-    assert 'emit_meminfo_snapshot "label-${{label}}"' in body
+    assert 'emit_meminfo_snapshot "round-${{block}}-${{round}}"' in body
 
     text = ARENA_SMK.read_text()
     assert 'meminfo        = "arena/{sha}/{arch}/meminfo.jsonl"' in text, (
@@ -914,3 +1029,154 @@ def test_meminfo_snapshot_reads_the_expected_proc_fields(tmp_path: Path) -> None
         "dirty_kb": 1024,
         "buffers_kb": 2048,
     }
+
+
+def _arena_missing_inputs(tmp_path: Path, *config: str) -> str:
+    """`snakemake -n` for one arena target in an empty directory: every input is
+    missing, so the error lists exactly what `align_arena` would stage."""
+    sha = "0a65bec1f47f8b773cf40b85d16833de010c8107"
+    result = subprocess.run(  # noqa: S603, S607 -- fixed args, no shell
+        [
+            "snakemake",
+            "-s",
+            str(SNAKEFILE),
+            "--directory",
+            str(tmp_path),
+            "-n",
+            "--config",
+            f"fg_labs_sha={sha}",
+            *config,
+            "--",
+            f"arena/{sha}/m8a/arena.tsv",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=180,
+    )
+    output = result.stdout + result.stderr
+    assert "Missing input files for rule align_arena" in output, output[-2000:]
+    return output
+
+
+def test_arena_labels_stages_only_the_index_families_its_arms_read(tmp_path: Path) -> None:
+    """A narrowed run (`--config arena_labels=`) must drop the bwa and minibwa
+    indexes it never reads, while a full run must still stage them: losing one
+    from a real bless fails at input staging hours into a paid run."""
+    narrowed = _arena_missing_inputs(tmp_path, "arena_labels=v151,fg-labs-default")
+    assert "references/hg38-u1/Homo_sapiens_assembly38.fasta.bwt.2bit.64" in narrowed
+    assert "Homo_sapiens_assembly38.fasta.sa" not in narrowed
+    assert "Homo_sapiens_assembly38.fasta.mbw" not in narrowed
+
+    full = _arena_missing_inputs(tmp_path)
+    assert "Homo_sapiens_assembly38.fasta.sa" in full
+    assert "Homo_sapiens_assembly38.fasta.mbw" in full
+
+
+def test_arena_labels_rejects_a_label_no_arm_runs(tmp_path: Path) -> None:
+    """A typo would otherwise silently drop arms from a paid on-demand job."""
+    sha = "0a65bec1f47f8b773cf40b85d16833de010c8107"
+    result = subprocess.run(  # noqa: S603, S607 -- fixed args, no shell
+        [
+            "snakemake",
+            "-s",
+            str(SNAKEFILE),
+            "--directory",
+            str(tmp_path),
+            "-n",
+            "--config",
+            f"fg_labs_sha={sha}",
+            "arena_labels=v151,fg-labs-defualt",
+            "--",
+            f"arena/{sha}/m8a/arena.tsv",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=180,
+    )
+    assert result.returncode != 0
+    assert "fg-labs-defualt" in result.stdout + result.stderr
+
+
+def test_arena_labels_accepts_an_x86_only_label_for_every_arch(tmp_path: Path) -> None:
+    """`bwa-mem2-upstream` has no ARM build; naming it must not fail the m8g job."""
+    output = _arena_missing_inputs(tmp_path, "arena_labels=bwa-mem2-upstream,fg-labs-default")
+    assert "Missing input files for rule align_arena" in output
+
+
+def _sam_control_parser():  # type: ignore[no-untyped-def]
+    text = ARENA_SMK.read_text()
+    start = text.index("def _parse_arena_sam_control(")
+    end = text.index("\n\n\nARENA_SAM_CONTROL", start)
+    namespace: dict[str, object] = {}
+    exec(text[start:end], namespace)  # noqa: S102 -- test-owned source from the repo
+    return namespace["_parse_arena_sam_control"]
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("true", True), ("False", False), (True, True)])
+def test_arena_sam_control_accepts_booleans(raw: object, expected: bool) -> None:
+    assert _sam_control_parser()(raw) is expected
+
+
+@pytest.mark.parametrize("raw", ["yes", "1", "ture"])
+def test_arena_sam_control_rejects_anything_else(raw: str) -> None:
+    with pytest.raises(ValueError, match="arena_sam_control"):
+        _sam_control_parser()(raw)
+
+
+def _printf_formats(body: str) -> list[str]:
+    """Every `printf '<format>'` format string in `body` that writes an arena.tsv row."""
+    return re.findall(r"printf '((?:%s|NA)(?:\\t(?:%s|NA))+\\n)'", body)
+
+
+def test_every_arena_tsv_row_matches_the_header_width() -> None:
+    """Ingest drops any row whose field count differs from the header, so a
+    printf that gains or loses a field would silently lose every row it writes
+    -- the SKIPPED-row format included, which the happy path never exercises."""
+    text = ARENA_SMK.read_text()
+    header = text[text.index("printf 'label\\t") :].split("'")[1]
+    width = header.removesuffix("\\n").count("\\t") + 1
+    formats = _printf_formats(_measured_cycle_body())
+    assert len(formats) == 2, formats  # noqa: PLR2004 -- success and SKIPPED rows
+    for fmt in formats:
+        assert fmt.removesuffix("\\n").count("\\t") + 1 == width, fmt
+
+
+def test_every_arena_tsv_header_column_is_a_known_db_column() -> None:
+    text = ARENA_SMK.read_text()
+    header = text[text.index("printf 'label\\t") :].split("'")[1].removesuffix("\\n").split("\\t")
+    extra = [_ARENA_HEADER_RENAMES.get(name, name) for name in header[_ARENA_COLUMNS:]]
+    assert extra == [column for column, _ in ARENA_V14_COLUMNS]
+
+
+def test_pin_probe_is_skipped_when_no_candidate_arm_is_selected(tmp_path: Path) -> None:
+    """A narrowed arena without the candidate must not pay a full probe
+    alignment, and must not inherit a pin from one."""
+    result = _run_lockstep_pin_snippet(
+        tmp_path,
+        log_content="[M::main_mem] phase-2 SMEM lockstep width: 24\n",
+        pin_probe="0",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "RESULT_PIN=UNSET" in result.stdout
+    assert not list(tmp_path.rglob("*.probe_env")), "run_arm must not be called"
+
+
+def test_pin_probe_flag_comes_from_the_selected_arms() -> None:
+    text = ARENA_SMK.read_text()
+    assert "pin_probe = lambda wc: int(_arena_runs_candidate(wc.arch))," in text
+    assert 'if [ "{params.pin_probe}" = "1" ]; then' in text
+
+
+def test_narrowed_staging_skips_unread_bwa_mem3_index_sets(tmp_path: Path) -> None:
+    """A bwa-only arena reads neither bwa-mem3 index; a stock-only one does not
+    read the densified copy. Staging them costs ~30 GB of S3 download each."""
+    bwa_only = _arena_missing_inputs(tmp_path, "arena_labels=bwa")
+    assert "Homo_sapiens_assembly38.fasta.bwt.2bit.64" not in bwa_only
+    assert "Homo_sapiens_assembly38.fasta.sa" in bwa_only
+    stock_only = _arena_missing_inputs(tmp_path, "arena_labels=v021")
+    assert "references/hg38/Homo_sapiens_assembly38.fasta.bwt.2bit.64" in stock_only
+    assert "references/hg38-u1/" not in stock_only
