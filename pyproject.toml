@@ -16,6 +16,7 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
     "Typing :: Typed",
@@ -48,14 +49,14 @@ include = ["bwa_mem3_bench*"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "PL"]
 
 [tool.mypy]
 strict = true
-python_version = "3.12"
+python_version = "3.11"
 
 [[tool.mypy.overrides]]
 module = "defopt"

@@ -21,7 +21,7 @@ import re
 import threading
 from collections.abc import Callable, Iterable
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, TypeVar
 
 import boto3
 import botocore.config
@@ -86,7 +86,13 @@ def _list_sample_prefixes(bucket: str, prefix: str) -> frozenset[str]:
     return frozenset(samples)
 
 
-def _with_wall_clock[T](listing: Callable[[], T], *, uri: str, seconds: float) -> T:
+# A TypeVar, not PEP 695 `def f[T]`: the bench image runs Debian bookworm's Python
+# 3.11, and the Snakefile imports this module, so 3.12-only syntax breaks in-image
+# snakemake at parse time.
+T = TypeVar("T")
+
+
+def _with_wall_clock(listing: Callable[[], T], *, uri: str, seconds: float) -> T:
     """Run an S3 ``listing`` of ``uri``, failing if it does not finish within ``seconds``.
 
     Socket timeouts bound each read and attempt but not DNS resolution or a whole

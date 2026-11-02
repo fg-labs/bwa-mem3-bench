@@ -91,6 +91,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **In-image snakemake parses the workflow again.** `bwa_mem3_bench/golden.py`
+  used PEP 695 generic syntax (`def f[T]`), which needs Python 3.12, but the
+  per-SHA image runs Debian bookworm's Python 3.11 and the Snakefile imports that
+  module, so the `cli submit` coordinator and native-executor workers failed at
+  parse time (biffix, which brings its own 3.12, was unaffected). ruff and mypy
+  now target 3.11 to match `requires-python`. A new `py311` pixi environment
+  compiles every package module with a real Python 3.11 interpreter
+  (`pixi run -e py311 py-floor-parse`, part of `pixi run check` and CI), since
+  `ast.parse(feature_version=...)` on a newer Python still accepts syntax such as
+  PEP 701 f-strings that 3.11 rejects. Not covered: `workflow/Snakefile` and
+  `workflow/rules/*.smk`, which the same interpreter compiles but which are
+  snakemake syntax rather than plain Python; a 3.12-only construct there would
+  still fail only at coordinator parse time.
 - **Panel benchmark sample replaced (data correction).** The former
   `panel-twist-5M` sample (SRA run `SRR34589119`) was found to be a mislabeled
   non-human sample (*Felis catus*): aligned to hg38 it maps ~0.8% on-target /

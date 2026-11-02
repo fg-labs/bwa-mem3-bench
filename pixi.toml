@@ -37,6 +37,16 @@ python-kaleido = ">=1.0.0,<2"
 pyyaml = ">=6.0"
 pysam = ">=0.22"
 
+# The per-SHA image's Python (Debian bookworm's python3). Only an interpreter of
+# that version proves the package parses there: `ast.parse(feature_version=...)`
+# on a newer Python is best-effort and accepts, e.g., PEP 701 f-strings that 3.11
+# rejects. Kept to the bare interpreter so the env stays tiny.
+[feature.py311.dependencies]
+python = "3.11.*"
+
+[feature.py311.tasks]
+py-floor-parse = "python scripts/check-python-floor.py bwa_mem3_bench"
+
 [feature.dev.dependencies]
 pre-commit = ">=3.0"
 
@@ -56,6 +66,7 @@ rich = ">=13"
 [environments]
 default = { features = ["workflow", "analysis", "cdk"] }
 dev = { features = ["workflow", "analysis", "dev", "cdk"] }
+py311 = { features = ["py311"], no-default-feature = true }
 
 [tasks]
 # Rust
@@ -66,10 +77,10 @@ cargo-test       = "cargo test --workspace"
 cargo-build      = "cargo build --workspace --release"
 
 # Python
-py-fmt-check = "ruff format --check bwa_mem3_bench tests"
-py-fmt       = "ruff format bwa_mem3_bench tests"
-py-lint      = "ruff check bwa_mem3_bench tests"
-py-type      = "mypy --strict bwa_mem3_bench"
+py-fmt-check = "ruff format --check bwa_mem3_bench tests scripts"
+py-fmt       = "ruff format bwa_mem3_bench tests scripts"
+py-lint      = "ruff check bwa_mem3_bench tests scripts"
+py-type      = "mypy --strict bwa_mem3_bench scripts"
 py-test      = "pytest -v"
 
 # GitHub Actions workflows. Checks the workflow SCHEMA and shellchecks every
@@ -90,7 +101,7 @@ workflow-lint = "actionlint .github/workflows/*.yml"
 install-fgumi = "bash scripts/install-fgumi.sh"
 
 # Combined
-check = { depends-on = ["cargo-fmt-check", "cargo-clippy", "cargo-test", "workflow-lint", "py-fmt-check", "py-lint", "py-type", "py-test"] }
+check = { depends-on = ["cargo-fmt-check", "cargo-clippy", "cargo-test", "workflow-lint", "py-fmt-check", "py-lint", "py-type", { task = "py-floor-parse", environment = "py311" }, "py-test"] }
 
 # Docker
 #
