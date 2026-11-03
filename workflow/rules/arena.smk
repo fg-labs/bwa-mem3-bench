@@ -264,12 +264,19 @@ ARENA_RELEASES = [
     ("v141", "e974f2666bae714afd942faf58e1cb27078b3fef"),
     ("v150", "cbe2db325cf057eff03a7ffb3ebd629453d0fd49"),
     ("v151", "a6b2ba1eb5cda2efbd45d22e2010b8afc87f928e"),
+    ("v160", "0a65bec1f47f8b773cf40b85d16833de010c8107"),
 ]
 
 # The release immediately preceding today's candidate -- the one arm the
 # fgumi correctness check runs against (see the module docstring). Always the
 # LAST entry: ARENA_RELEASES is oldest-first.
 ARENA_PRIOR_RELEASE_LABEL = ARENA_RELEASES[-1][0]
+
+# The release ledger, read only for the prior release's `aliases` (its tag
+# commit and any other SHA with the same code), so the candidate guard in
+# `_arena_schedule` also refuses that release under another name. The image ships
+# docs/release-allowances.yaml for this (see docker/Dockerfile).
+_ARENA_LEDGER = load_allowances(DEFAULT_ALLOWANCES_PATH)
 
 # ON-DEMAND queues, deliberately separate from the regular spot queues in
 # config/archs.yaml (CONFIG.archs[arch].batch_queue): a spot reclaim mid-job
@@ -523,8 +530,14 @@ def _arena_schedule(arch: str, *, seed: str):
     """Every run `arch` makes, in execution order (`build_schedule`).
 
     :param seed: the fg-labs SHA under measurement, so a different candidate
-        gets a different (but reproducible) order.
+        gets a different (but reproducible) order. When the run has a
+        candidate arm, it must not already be on the ladder (under its SHA, or a
+        ledger alias of the prior release), or the candidate would be paired with
+        its own build. A narrowed run with no candidate arm (e.g.
+        `arena_labels=v151,v160`) only compares releases, so it is allowed.
     """
+    if _arena_runs_candidate(arch):
+        check_candidate_not_on_ladder(seed, ARENA_RELEASES, _ARENA_LEDGER)
     arms = _arena_arms(arch)
     return build_schedule(
         arms,

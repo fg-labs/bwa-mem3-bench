@@ -9,12 +9,31 @@ page is written by hand.
 **The arena** is the number to quote. Every aligner (the release being published,
 every earlier bwa-mem3 release, bwa, bwa-mem2 and minibwa) runs on the same
 dedicated on-demand host, one host per architecture, aligning `wgs-5M` (5M read
-pairs) with 16 threads. The arms run interleaved, one warmup cycle and then three
-measured reps, with each arm's index and the FASTQs read into the page cache
-immediately before every rep. Every arm writes SAM piped through
-`samtools view -u`, so no aligner gains from its own BAM writer. The ratios in the
-arena tables are therefore like-for-like: same host, same inputs, same time
-window.
+pairs) with 16 threads. Arms that read the same index run together as a block of
+rounds: one discarded warmup round, then measured rounds in a seeded random
+order, with the release being published and the release before it run
+back-to-back in every round (alternating which goes first), and each arm's index
+and the FASTQs read into the page cache immediately before every run. Every
+aligner writes uncompressed BAM by its cheapest route, piped through `cat`:
+bwa-mem3 natively (`--bam=0`), and bwa, bwa-mem2 and minibwa, which emit only
+SAM, through `samtools view -u`. The ratios in the arena tables are therefore
+like-for-like: same host, same inputs, same time window. When the denser
+suffix-array index is on, every bwa-mem3 release after v0.12.0 reads it too, so
+those releases share the block of the release being published, and the step
+from v0.12.0 to the next release also changes the index (and RSS). That block
+runs five measured rounds; every other block runs two, so a "vs previous row"
+ratio between two releases there is marked `context`: indicative only. Optional
+`-sam` control arms, which run the release being published and the one before
+it through the SAM pipe to measure what native BAM saves, are left out of the
+tables.
+
+Every row of a release's arena tables, earlier releases included, is
+re-measured in that release's own arena run, so its rows compare with each
+other. Absolute arena walls do **not** compare across release pages, because the
+method has changed: up to v0.15.1 every bwa-mem3 arm, too, went through the SAM
+pipe (paying SAM formatting it never pays in real use) and each arm's reps ran
+back-to-back rather than in paired rounds. From v0.16.0, bwa-mem3 arms write
+native BAM, so their walls drop with no code change.
 
 **The sweep** runs every dataset on six AWS Batch spot instance types, all
 `*.4xlarge` (16 vCPU), with `-t 16` and `-K 160000000` (a fixed batch size, so

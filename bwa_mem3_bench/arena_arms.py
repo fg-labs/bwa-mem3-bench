@@ -34,6 +34,8 @@ import random
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from bwa_mem3_bench.release_allowances import ReleaseAllowance, sha_prefix_match
+
 ArenaArm = tuple[str, str, str]
 """An arena arm as ``(label, binary, mode)``."""
 
@@ -54,6 +56,41 @@ WRITER_SAM = "sam"
 SAM_CONTROL_SUFFIX = "-sam"
 """Label suffix of an opt-in control arm that runs a bwa-mem3 binary through the
 SAM-text writer, to measure what native BAM output saves."""
+
+
+def check_candidate_not_on_ladder(
+    candidate_sha: str,
+    releases: Sequence[tuple[str, str]],
+    allowances: Sequence[ReleaseAllowance] = (),
+) -> None:
+    """Refuse an arena candidate whose SHA is already a release on the ladder.
+
+    The last ladder entry is the prior-release arm the candidate is paired with
+    for `vs_prior_release` and checked against by fgumi. Once a bless appends the
+    new release, re-running that release's own arena would pair `fg-labs-default`
+    with the same build, so both measure the candidate against itself. The prior
+    release's ledger ``aliases`` (e.g. its tag commit, the same code under another
+    SHA) are refused too. An earlier release's aliases are not: the candidate is
+    never paired with those, and a measured alias may carry a real code change
+    worth timing. Abbreviated SHAs on either side are matched by prefix.
+
+    :param allowances: the release ledger, whose ``aliases`` name the other SHAs
+        the prior (last) ladder release is known by.
+    :raises ValueError: naming the matching label.
+    """
+    for i, (label, sha) in enumerate(releases):
+        known = [sha]
+        if i == len(releases) - 1:
+            for allowance in allowances:
+                if sha_prefix_match(allowance.to_sha, sha):
+                    known.extend(allowance.aliases)
+        if any(sha_prefix_match(candidate_sha, s) for s in known):
+            raise ValueError(
+                f"arena candidate {candidate_sha} is already on the arena ladder as "
+                f"{label!r} (ARENA_RELEASES); its prior-release pairing would compare "
+                "it with itself. Run it from a checkout whose ladder ends before that "
+                "release."
+            )
 
 
 def index_family(binary: str, *, dense: bool) -> str:

@@ -14,8 +14,10 @@ from bwa_mem3_bench.arena_arms import (
     DenseSaPolicy,
     ScheduledRun,
     build_schedule,
+    check_candidate_not_on_ladder,
     output_writer,
 )
+from bwa_mem3_bench.release_allowances import ReleaseAllowance
 
 # Oldest-first release labels, mirroring `arena.smk`'s ARENA_RELEASES. `v120`
 # (v0.12.0) is the dense-SA threshold; a hypothetical future `v130` is included
@@ -275,3 +277,63 @@ def test_rejects_duplicate_labels() -> None:
             headline_rounds=_HEADLINE,
             context_rounds=_CONTEXT,
         )
+
+
+_LADDER = [
+    ("v151", "a6b2ba1eb5cda2efbd45d22e2010b8afc87f928e"),
+    ("v160", "0a65bec1f47f8b773cf40b85d16833de010c8107"),
+]
+
+
+def test_a_new_candidate_passes_the_ladder_check() -> None:
+    check_candidate_not_on_ladder("1" * 40, _LADDER)
+
+
+@pytest.mark.parametrize("sha", [_LADDER[-1][1], _LADDER[0][1], "0a65bec"])
+def test_a_candidate_already_on_the_ladder_is_rejected(sha: str) -> None:
+    """Re-running a listed release would pair `fg-labs-default` with its own build.
+
+    Its `vs_prior_release` ratio and fgumi spot-check would then compare the
+    candidate with itself; an abbreviated SHA must be caught too.
+    """
+    with pytest.raises(ValueError, match=r"already on the arena ladder"):
+        check_candidate_not_on_ladder(sha, _LADDER)
+
+
+def test_a_ledger_alias_of_a_ladder_release_is_rejected() -> None:
+    """A release's tag commit is the same code under another SHA, so it self-pairs too."""
+    tag = "fa688f0bc019968844073ae7d3fe124cf66d0011"
+    ledger = [
+        ReleaseAllowance(
+            to_sha=_LADDER[-1][1],
+            pr="fg-labs/bwa-mem3-bench#135",
+            date="2026-11-02",
+            summary="v0.16.0",
+            expected_drift_pct=0.0,
+            aliases=(tag,),
+        )
+    ]
+    check_candidate_not_on_ladder(tag, _LADDER)  # without the ledger it is unknown
+    with pytest.raises(ValueError, match=r"already on the arena ladder as 'v160'"):
+        check_candidate_not_on_ladder(tag, _LADDER, ledger)
+
+
+def test_an_alias_of_an_earlier_ladder_release_passes() -> None:
+    """Only the last ladder entry is the prior-release pairing.
+
+    An alias of an earlier release, such as a measured alias that carries a real
+    code change (``e722ed06`` of ``394f8f8``), never pairs the candidate with its
+    own build, so the guard leaves it alone.
+    """
+    alias = "e722ed06dd71d0186c401ce2f0e163d32b0a7ad7"
+    ledger = [
+        ReleaseAllowance(
+            to_sha=_LADDER[0][1],
+            pr="fg-labs/bwa-mem3-bench#135",
+            date="2026-11-02",
+            summary="v0.15.1",
+            expected_drift_pct=0.0,
+            aliases=(alias,),
+        )
+    ]
+    check_candidate_not_on_ladder(alias, _LADDER, ledger)

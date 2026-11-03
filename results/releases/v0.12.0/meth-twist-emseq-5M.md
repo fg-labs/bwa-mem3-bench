@@ -10,7 +10,7 @@ Compared against bwameth, not bwa-mem2, and run only on m7i (the methylation ind
 
 ## Speed by instance type
 
-Median wall-clock seconds, 16 threads, on AWS Batch spot hosts. bwa-mem3 used its stock stride-8 suffix-array index, as did the comparator. **Indicative only**: the reps of one cell can land on different hosts, and the bwameth column was measured in a separate run on other hosts, so the ratio mixes code speed with host variation. The same-host [arena](README.md#headline-same-host-speed-arena) is the number to quote. `vs bwameth` above 1 means bwa-mem3 is faster.
+Median wall-clock seconds, 16 threads, on AWS Batch spot hosts. bwa-mem3 used its stock stride-8 suffix-array index, as did the comparator. **Indicative only**: the reps of one cell can land on different hosts, and the bwameth column was measured in a separate run on other hosts, so the ratio mixes code speed with host variation. The same-host [arena](README.md#headline-same-host-speed-arena) measures only `wgs-5M` (against bwa, bwa-mem2, minibwa), so this dataset has no same-host number. `vs bwameth` above 1 means bwa-mem3 is faster.
 
 | instance | bwa-mem3 (s) | CV | `--fast` (s) | `--compat` (s) | bwameth (s) | vs bwameth | reps |
 | --- | --- | --- | --- | --- | --- | --- | --- |

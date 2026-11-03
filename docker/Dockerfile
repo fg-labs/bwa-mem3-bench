@@ -292,6 +292,9 @@ COPY config /opt/config
 # image). Without it every coordinator run — not just minibwa targets — would
 # fail to parse the Snakefile.
 COPY docker/build-arg-defaults.env /opt/docker/build-arg-defaults.env
+# The release ledger: arena.smk reads its `aliases` at parse time so the arena
+# refuses a candidate that is already a ladder release under another SHA.
+COPY docs/release-allowances.yaml /opt/docs/release-allowances.yaml
 
 # Coordinator entrypoint: reads FG_LABS_SHA + TARGET env vars and invokes snakemake.
 # NOTE: no ENTRYPOINT — snakemake-registered worker jobs run `/bin/bash -c "..."`.
