@@ -156,10 +156,22 @@ The four production samples in `config/samples.yaml`:
 | `wgs-5M`            | 1000 Genomes WGS HG00096 (downsampled)                       | 5M    |
 | `wes-5M`            | 1000 Genomes WES HG00100 (downsampled)                       | 5M    |
 | `panel-agilent-qxt-5M` | Agilent SureSelect QXT hereditary-cancer panel — SRR15497869 (PRJNA755485), human germline, public | 5M |
-| `meth-twist-emseq-5M` | Twist EM-seq dataset, provided by Twist                    | 5M    |
+| `meth-twist-emseq-trim-5M` | Twist EM-seq dataset, provided by Twist; 7 bp 5' trim | 5M |
 
-The two smoke samples (`smoke-1M` and `smoke-meth`) are heavy downsamples
-of the panel-agilent-qxt and meth-twist-emseq sources respectively.
+The two smoke samples (`smoke-1M` and `smoke-meth-trim`) are heavy downsamples
+of the panel-agilent-qxt and twist-emseq sources respectively.
+
+The Twist EM-seq reads carry a 7 bp inline UMI + spacer (a 5-base UMI, then a
+2-base skip) at the 5' end of **both** R1 and R2. bwa-mem3's `--meth` expects
+inline UMIs trimmed first (fg-labs/bwa-mem3#756), so the meth samples set
+`trim_5p=7` in `bwa_mem3_bench/data_sources.py`: `upload-data` drops the first 7
+characters of every SEQ and QUAL line after downsampling, leaving the header and
+`+` lines alone (a kept read of 7 bases or fewer fails the staging rather than
+becoming an empty read, as does a kept record cut short or with SEQ and QUAL of
+different lengths), and uploads to
+`data/meth/twist-emseq/downsampled-5M-trim7/` and `data/smoke-meth/10K-trim7/`. The untrimmed `meth-twist-emseq-5M` / `smoke-meth`
+sources (`downsampled-5M/`, `10K/`) are kept for reproducing releases up to
+v0.16.0, which aligned them.
 
 ### 1000 Genomes (HG00096 WGS, HG00100 WES)
 

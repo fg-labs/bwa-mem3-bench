@@ -98,7 +98,9 @@ def _compare(  # noqa: PLR0913
     )
 
 
-def _seed(db: Path, *, meth_placement: bool = True) -> None:  # noqa: PLR0915
+def _seed(  # noqa: PLR0915
+    db: Path, *, meth_placement: bool = True, meth_sample: str = "meth-twist-emseq-trim-5M"
+) -> None:
     conn = connect(db)
     for sha in (SHA, baseline_sha_for("v2.2.1")):
         upsert_run(conn, fg_labs_sha=sha)
@@ -123,7 +125,7 @@ def _seed(db: Path, *, meth_placement: bool = True) -> None:  # noqa: PLR0915
     for rep in (1, 2, 3):
         _trial(conn, baseline_sha_for("v2.2.1"), "wgs-5M", "c6a", rep, 22.0)
     # meth: m7i only, one rep.
-    tid = _trial(conn, SHA, "meth-twist-emseq-5M", "m7i", 1, 50.0)
+    tid = _trial(conn, SHA, meth_sample, "m7i", 1, 50.0)
     _compare(
         conn,
         tid,
@@ -231,7 +233,7 @@ def test_writes_every_page_for_the_datasets_that_ran(tmp_path: Path, snap: dict[
             "README.md",
             "accuracy.md",
             "data.json",
-            "meth-twist-emseq-5M.md",
+            "meth-twist-emseq-trim-5M.md",
             "scaling.md",
             "wgs-5M.md",
         ]
@@ -285,7 +287,7 @@ def test_fast_divergence_is_broken_down_not_just_a_percentage(snap: dict[str, An
 
 
 def test_meth_reports_confident_relocation_not_concordance(snap: dict[str, Any]) -> None:
-    meth = next(d for d in snap["datasets"] if d["sample"] == "meth-twist-emseq-5M")
+    meth = next(d for d in snap["datasets"] if d["sample"] == "meth-twist-emseq-trim-5M")
     page = results.render_dataset_page(meth, snap)
     vs_bwameth = page.split("### vs bwameth")[1].split("###")[0]
     assert "0.126%" in vs_bwameth
@@ -298,7 +300,7 @@ def test_meth_without_the_placement_metric_says_not_measured(
     db = tmp_path / "bench.db"
     _seed(db, meth_placement=False)
     snap = _snapshot(db, config)
-    meth = next(d for d in snap["datasets"] if d["sample"] == "meth-twist-emseq-5M")
+    meth = next(d for d in snap["datasets"] if d["sample"] == "meth-twist-emseq-trim-5M")
     vs_bwameth = results.render_dataset_page(meth, snap).split("### vs bwameth")[1]
     assert "_Not measured for this release._" in vs_bwameth.split("###")[0]
     assert "72.0000%" not in vs_bwameth.split("###")[0]
@@ -389,7 +391,9 @@ def test_release_label_to_version(label: str, expected: str) -> None:
 
 def test_every_published_dataset_is_a_configured_sample(config: WorkflowConfig) -> None:
     for dataset in DATASETS:
-        assert dataset.sample in config.samples
+        assert dataset.configured_as in config.samples
+        if dataset.config_sample:  # retired: must really be gone from the config
+            assert dataset.sample not in config.samples
 
 
 def test_alt_rep_note_counts_instance_types_not_architectures() -> None:
@@ -597,19 +601,19 @@ def test_only_the_arena_dataset_page_points_at_the_arena(snap: dict[str, Any]) -
     that sample and an arena comparator may call the arena "the number to quote"."""
     pages = {d["sample"]: results.render_dataset_page(d, snap) for d in snap["datasets"]}
     assert "is the number to quote" in pages["wgs-5M"]
-    meth = pages["meth-twist-emseq-5M"]  # bwameth, and not the arena sample
+    meth = pages["meth-twist-emseq-trim-5M"]  # bwameth, and not the arena sample
     assert "is the number to quote" not in meth
     assert "measures only `wgs-5M`" in meth
     # A non-arena sample is not covered even when its comparator is in the arena...
-    moved = {**snap, "arena_sample": "meth-twist-emseq-5M"}
+    moved = {**snap, "arena_sample": "meth-twist-emseq-trim-5M"}
     pages = {d["sample"]: results.render_dataset_page(d, moved) for d in moved["datasets"]}
     assert "is the number to quote" not in pages["wgs-5M"]
     # ...and the arena sample's page with a comparator the arena lacks says so.
-    assert "but not bwameth" in pages["meth-twist-emseq-5M"]
+    assert "but not bwameth" in pages["meth-twist-emseq-trim-5M"]
 
 
 def test_arena_note_names_only_comparators_the_arena_ran(snap: dict[str, Any]) -> None:
-    meth = next(d for d in snap["datasets"] if d["sample"] == "meth-twist-emseq-5M")
+    meth = next(d for d in snap["datasets"] if d["sample"] == "meth-twist-emseq-trim-5M")
     names = results._arena_comparator_names(snap)
     assert names  # the fixture's arena has comparators
     page = results.render_dataset_page(meth, snap)
@@ -653,3 +657,19 @@ def test_arena_readme_says_every_row_comes_from_this_release_run(snap: dict[str,
     readme = results.render_release_readme(snap)
     assert "re-measured in this release's arena run" in readme
     assert "not with the walls on another release's page" in readme
+
+
+def test_a_historical_release_keeps_its_retired_meth_dataset(
+    tmp_path: Path, config: WorkflowConfig
+) -> None:
+    """Rebuilding a pre-v0.17.0 snapshot keeps the untrimmed meth dataset, though
+    that sample is no longer configured: it borrows the trimmed sample's settings."""
+    db = tmp_path / "b.db"
+    _seed(db, meth_sample="meth-twist-emseq-5M")
+    snap = _snapshot(db, config)
+    samples = [d["sample"] for d in snap["datasets"]]
+    assert "meth-twist-emseq-5M" in samples
+    assert "meth-twist-emseq-trim-5M" not in samples
+    meth = next(d for d in snap["datasets"] if d["sample"] == "meth-twist-emseq-5M")
+    assert meth["is_meth"] is True
+    assert meth["comparator"] == "bwameth"

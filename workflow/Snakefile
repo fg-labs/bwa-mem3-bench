@@ -374,7 +374,7 @@ FAST_REAL_BASES = [
     "panel-agilent-qxt-5M",
     "hic-1M",
     "sbx-1M",
-    "meth-twist-emseq-5M",
+    "meth-twist-emseq-trim-5M",
 ]
 # Truth bases (holodeck-graded accuracy).
 FAST_SIM_BASES = ["sim-wgs-place", "sim-wgs-vars", "sim-meth-place", "sim-meth-vars"]
@@ -605,7 +605,7 @@ def _fast_minibwa_targets() -> list:
         for r in range(1, REPS + 1)
     ]
     targets += [
-        f"minibwa/{MINIBWA_SHA}/meth-twist-emseq-5M/m7i/rep-{r}/aligned.minibwa.bam"
+        f"minibwa/{MINIBWA_SHA}/meth-twist-emseq-trim-5M/m7i/rep-{r}/aligned.minibwa.bam"
         for r in range(1, REPS + 1)
     ]
     return targets
@@ -1003,8 +1003,8 @@ rule smoke_meth:
             --config fg_labs_sha=<sha> -- smoke_meth
     """
     input:
-        "runs/{sha}/smoke-meth/m7i/rep-1/aligned.bam".format(sha=FG_LABS_SHA),
-        "runs/{sha}/smoke-meth/m7i/rep-1/compare/vs-baseline.json".format(sha=FG_LABS_SHA),
+        "runs/{sha}/smoke-meth-trim/m7i/rep-1/aligned.bam".format(sha=FG_LABS_SHA),
+        "runs/{sha}/smoke-meth-trim/m7i/rep-1/compare/vs-baseline.json".format(sha=FG_LABS_SHA),
 
 
 rule minibwa_smoke:
@@ -1154,17 +1154,17 @@ rule fast_meth:
     """
     input:
         [
-            f"runs/{FG_LABS_SHA}/meth-twist-emseq-5M/m7i/rep-{r}/compare/vs-baseline.json"
+            f"runs/{FG_LABS_SHA}/meth-twist-emseq-trim-5M/m7i/rep-{r}/compare/vs-baseline.json"
             for r in range(1, REPS + 1)
         ],
         [
-            f"runs/{FG_LABS_SHA}/meth-twist-emseq-5M-fast/m7i/rep-{r}/compare/vs-default.json"
+            f"runs/{FG_LABS_SHA}/meth-twist-emseq-trim-5M-fast/m7i/rep-{r}/compare/vs-default.json"
             for r in range(1, REPS + 1)
         ],
         _accuracy_targets(["sim-meth-place", "sim-meth-vars"], REPS),
         _accuracy_targets(["sim-meth-place-fast", "sim-meth-vars-fast"], REPS),
         [
-            f"minibwa/{MINIBWA_SHA}/meth-twist-emseq-5M/m7i/rep-{r}/aligned.minibwa.bam"
+            f"minibwa/{MINIBWA_SHA}/meth-twist-emseq-trim-5M/m7i/rep-{r}/aligned.minibwa.bam"
             for r in range(1, REPS + 1)
         ],
 
@@ -1174,7 +1174,7 @@ rule fast_smoke:
     validation before the full `fast` run. Exercises, at 1 rep:
       - `--fast` align (smoke-1M-fast) + fast-vs-default + fast-vs-upstream on
         c6a (x86 baseline), plus fast-vs-default + transitive vs-x86 on c8g,
-      - `--meth --fast` align (smoke-meth-fast) + compares on m7i,
+      - `--meth --fast` align (smoke-meth-trim-fast) + compares on m7i,
       - the accuracy fast arm (sim-smoke-vars-fast grades vs holodeck truth) on
         c6a.
     Submit with the matching archs (c6a,c8g,m7i) and build the image at PR
@@ -1192,8 +1192,8 @@ rule fast_smoke:
         f"runs/{FG_LABS_SHA}/smoke-1M-fast/c8g/rep-1/compare/vs-default.json",
         f"runs/{FG_LABS_SHA}/smoke-1M-fast/c8g/rep-1/compare/vs-x86.json",
         # Meth: default + fast vs bwameth (m7i); fast vs default (m7i).
-        f"runs/{FG_LABS_SHA}/smoke-meth/m7i/rep-1/compare/vs-baseline.json",
-        f"runs/{FG_LABS_SHA}/smoke-meth-fast/m7i/rep-1/compare/vs-baseline.json",
-        f"runs/{FG_LABS_SHA}/smoke-meth-fast/m7i/rep-1/compare/vs-default.json",
+        f"runs/{FG_LABS_SHA}/smoke-meth-trim/m7i/rep-1/compare/vs-baseline.json",
+        f"runs/{FG_LABS_SHA}/smoke-meth-trim-fast/m7i/rep-1/compare/vs-baseline.json",
+        f"runs/{FG_LABS_SHA}/smoke-meth-trim-fast/m7i/rep-1/compare/vs-default.json",
         # Accuracy: the fast arm grades against truth (chr22-slice).
         f"runs/{FG_LABS_SHA}/sim-smoke-vars-fast/c6a/rep-1/eval/fg-labs.variants.tsv",

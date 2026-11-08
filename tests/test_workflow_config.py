@@ -90,10 +90,10 @@ def test_load_config_returns_expected_samples() -> None:
     assert isinstance(cfg, WorkflowConfig)
     assert "smoke-1M" in cfg.samples
     assert "wgs-5M" in cfg.samples
-    assert "meth-twist-emseq-5M" in cfg.samples
+    assert "meth-twist-emseq-trim-5M" in cfg.samples
     assert cfg.samples["wgs-5M"].baseline_tool == "bwa-mem2-upstream"
-    assert cfg.samples["meth-twist-emseq-5M"].baseline_tool == "bwameth"
-    assert cfg.samples["meth-twist-emseq-5M"].fg_labs_flags == ["--meth"]
+    assert cfg.samples["meth-twist-emseq-trim-5M"].baseline_tool == "bwameth"
+    assert cfg.samples["meth-twist-emseq-trim-5M"].fg_labs_flags == ["--meth"]
 
 
 def test_load_config_returns_expected_archs() -> None:
@@ -406,7 +406,7 @@ def test_minibwa_flags_rejects_unmapped_flag() -> None:
 def test_truth_defaults_false_for_ordinary_samples() -> None:
     cfg = load_config(CONFIG_DIR)
     assert cfg.samples["wgs-5M"].truth is False
-    assert cfg.samples["meth-twist-emseq-5M"].truth is False
+    assert cfg.samples["meth-twist-emseq-trim-5M"].truth is False
     assert _make_sample().truth is False
 
 
@@ -469,7 +469,7 @@ def test_fast_siblings_share_source_and_only_add_fast_flag() -> None:
         "panel-agilent-qxt-5M": "panel-agilent-qxt-5M-fast",
         "hic-1M": "hic-1M-fast",
         "sbx-1M": "sbx-1M-fast",
-        "meth-twist-emseq-5M": "meth-twist-emseq-5M-fast",
+        "meth-twist-emseq-trim-5M": "meth-twist-emseq-trim-5M-fast",
         "sim-wgs-place": "sim-wgs-place-fast",
         "sim-wgs-vars": "sim-wgs-vars-fast",
         "sim-meth-place": "sim-meth-place-fast",
@@ -496,8 +496,8 @@ def test_meth_fast_sibling_keeps_compare_ignore_tags() -> None:
     """The meth `--fast` sibling carries the same bisulfite ignore-tags so its
     vs-default / vs-baseline compares stay apples-to-apples with the default."""
     cfg = load_config(CONFIG_DIR)
-    base = cfg.ignore_tags("meth-twist-emseq-5M", "vs_baseline")
-    fast = cfg.ignore_tags("meth-twist-emseq-5M-fast", "vs_baseline")
+    base = cfg.ignore_tags("meth-twist-emseq-trim-5M", "vs_baseline")
+    fast = cfg.ignore_tags("meth-twist-emseq-trim-5M-fast", "vs_baseline")
     assert fast == base
 
 
@@ -510,14 +510,14 @@ def test_every_meth_arm_resolves_the_same_ignore_list() -> None:
     """
     cfg = load_config(CONFIG_DIR)
     meth_samples = [
-        "meth-twist-emseq-5M",
-        "meth-twist-emseq-5M-fast",
-        "smoke-meth",
-        "smoke-meth-fast",
+        "meth-twist-emseq-trim-5M",
+        "meth-twist-emseq-trim-5M-fast",
+        "smoke-meth-trim",
+        "smoke-meth-trim-fast",
     ]
     resolved = {s: cfg.ignore_tags(s, "vs_baseline") for s in meth_samples}
     assert len(set(map(tuple, resolved.values()))) == 1, resolved
-    assert set(resolved["smoke-meth"]) >= METH_IGNORE_TAGS
+    assert set(resolved["smoke-meth-trim"]) >= METH_IGNORE_TAGS
 
 
 def test_ignore_tags_extend_rather_than_replace_the_kind_default() -> None:
@@ -528,7 +528,7 @@ def test_ignore_tags_extend_rather_than_replace_the_kind_default() -> None:
     score 0% concordance.
     """
     cfg = load_config(CONFIG_DIR)
-    tags = cfg.ignore_tags("meth-twist-emseq-5M", "vs_baseline")
+    tags = cfg.ignore_tags("meth-twist-emseq-trim-5M", "vs_baseline")
     assert {"MQ", "HN"}.issubset(tags), "kind default survived the override"
     # NM/MD/XA/SA are, or embed, an edit distance against the converted
     # reference; XM/XG/XR and YD/YC/RG are the two aligners' disjoint tag sets.
@@ -549,7 +549,7 @@ def test_same_behaviour_comparisons_skip_nothing() -> None:
     sides carry them, and the exemption is gone.
     """
     cfg = load_config(CONFIG_DIR)
-    for sample in ("wgs-5M", "meth-twist-emseq-5M", "sbx-1M"):
+    for sample in ("wgs-5M", "meth-twist-emseq-trim-5M", "sbx-1M"):
         for kind in ("vs_golden", "vs_x86"):
             assert set(cfg.ignore_tags(sample, kind)) == set(), f"{sample}/{kind}"
 
@@ -797,10 +797,10 @@ def test_meth_samples_excuse_mq_and_hn_from_the_audit() -> None:
     MQ or HN, whatever bwa-mem3 does.
     """
     cfg = load_config(CONFIG_DIR)
-    assert set(cfg.absent_ok_tags("meth-twist-emseq-5M", "vs_baseline")) == METH_UNEMITTED_TAGS
-    assert cfg.absent_ok_tags("meth-twist-emseq-5M", "vs_golden") == []
+    assert set(cfg.absent_ok_tags("meth-twist-emseq-trim-5M", "vs_baseline")) == METH_UNEMITTED_TAGS
+    assert cfg.absent_ok_tags("meth-twist-emseq-trim-5M", "vs_golden") == []
     # vs_x86 ignores nothing for meth, so there is nothing to excuse there.
-    assert cfg.absent_ok_tags("meth-twist-emseq-5M", "vs_x86") == []
+    assert cfg.absent_ok_tags("meth-twist-emseq-trim-5M", "vs_x86") == []
 
 
 def test_absent_ok_tags_never_exceeds_the_ignore_list() -> None:
@@ -808,7 +808,7 @@ def test_absent_ok_tags_never_exceeds_the_ignore_list() -> None:
     ignore entries are ever audited. Non-meth `vs_golden` ignores nothing, so
     nothing can be excused there even though the sample is single-end."""
     cfg = load_config(CONFIG_DIR)
-    for sample in ("sbx-1M", "meth-twist-emseq-5M"):
+    for sample in ("sbx-1M", "meth-twist-emseq-trim-5M"):
         for kind in COMPARE_KINDS:
             excused = set(cfg.absent_ok_tags(sample, kind))
             ignored = set(cfg.ignore_tags(sample, kind))
@@ -901,7 +901,7 @@ def test_known_but_unemitted_tags_are_deliberately_not_allowlisted() -> None:
             f"{kind} allowlists a tag we deliberately want to fail on: {allowed & known_unemitted}"
         )
     # RG is the one exception, and only on the meth side, where bwameth emits it.
-    assert "RG" in cfg.expect_tags("meth-twist-emseq-5M", "vs_baseline")
+    assert "RG" in cfg.expect_tags("meth-twist-emseq-trim-5M", "vs_baseline")
 
 
 def test_shipped_allowlist_covers_every_tag_the_shipped_policy_ignores() -> None:

@@ -83,7 +83,9 @@ def regression(
         --golden-ref-sha`). When given, Gate #2 fails closed: a run with no
         vs-golden comparison, or a cell the golden holds missing one on any rep,
         fails instead of passing silently. The golden's cells come from its
-        ingested trials, so it must be collected too. Pass it for every bless.
+        ingested trials, so it must be collected too. It also makes Gate #1b
+        fail a candidate with no graded truth meth cell, and a prior release
+        with no grades at all. Pass it for every bless.
     :param out: output .md path. Defaults to `runs/<sha>/regression.md`.
     """
     out_md = out or (LOCAL_MIRROR_ROOT / "runs" / fg_labs_sha / "regression.md")

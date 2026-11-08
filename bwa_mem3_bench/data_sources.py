@@ -48,6 +48,25 @@ class DataSource:
     downsample_every_nth: int | None = None  # None = full file
     source_bam: Path | None = None  # single-end: convert this BAM -> source_r1 FASTQ
     subsample_frac: float | None = None  # samtools view -s 42.<frac> when staging from BAM
+    # Bases removed from the 5' end of EVERY read (R1 and R2): the first N
+    # characters of SEQ and of QUAL, after downsampling. Header and `+` lines are
+    # untouched. For inline UMIs / spacers the aligner must not see; 0 = no trim.
+    trim_5p: int = 0
+
+    def __post_init__(self) -> None:
+        """Reject out-of-range sampling and trimming, and a trim on a BAM source."""
+        if self.downsample_every_nth is not None and self.downsample_every_nth < 1:
+            raise ValueError(
+                f"{self.sample}: downsample_every_nth must be >= 1, got {self.downsample_every_nth}"
+            )
+        if self.subsample_frac is not None and not 0.0 < self.subsample_frac <= 1.0:
+            raise ValueError(
+                f"{self.sample}: subsample_frac must be in (0, 1], got {self.subsample_frac}"
+            )
+        if self.trim_5p < 0:
+            raise ValueError(f"{self.sample}: trim_5p must be >= 0, got {self.trim_5p}")
+        if self.trim_5p and self.source_bam is not None:
+            raise ValueError(f"{self.sample}: trim_5p is only supported for FASTQ sources")
 
 
 def sample_sources(bucket: str) -> dict[str, DataSource]:
@@ -97,6 +116,21 @@ def sample_sources(bucket: str) -> dict[str, DataSource]:
             dest_prefix="data/meth/twist-emseq/downsampled-5M/",
             downsample_every_nth=3,  # 15.6M pairs / 3 ≈ 5.2M
         ),
+        # The Twist EM-seq reads carry a 7 bp inline UMI + spacer at the 5' end
+        # of BOTH R1 and R2 (Twist's 5-base UMI, then a 2-base skip). bwa-mem3's
+        # `--meth` docs (fg-labs/bwa-mem3#756) say to trim inline UMIs first:
+        # untrimmed, `--meth-scoring collapsed` force-aligns them and `genomic`
+        # soft-clips them, which inflates every meth comparison. The untrimmed
+        # `meth-twist-emseq-5M` / `smoke-meth` entries stay so the inputs of
+        # historical runs remain reproducible.
+        "meth-twist-emseq-trim-5M": DataSource(
+            sample="meth-twist-emseq-trim-5M",
+            source_r1=vendor / "twist-emseq_1.fastq.gz",
+            source_r2=vendor / "twist-emseq_2.fastq.gz",
+            dest_prefix="data/meth/twist-emseq/downsampled-5M-trim7/",
+            downsample_every_nth=3,
+            trim_5p=7,
+        ),
         "smoke-1M": DataSource(
             sample="smoke-1M",
             # Derived from the same human Agilent QXT panel as panel-agilent-qxt-5M
@@ -112,6 +146,14 @@ def sample_sources(bucket: str) -> dict[str, DataSource]:
             source_r2=vendor / "twist-emseq_2.fastq.gz",
             dest_prefix="data/smoke-meth/10K/",
             downsample_every_nth=1500,  # 15.6M pairs / 1500 ≈ 10.4K
+        ),
+        "smoke-meth-trim": DataSource(
+            sample="smoke-meth-trim",
+            source_r1=vendor / "twist-emseq_1.fastq.gz",
+            source_r2=vendor / "twist-emseq_2.fastq.gz",
+            dest_prefix="data/smoke-meth/10K-trim7/",
+            downsample_every_nth=1500,
+            trim_5p=7,  # see meth-twist-emseq-trim-5M
         ),
         "hic-1M": DataSource(
             sample="hic-1M",

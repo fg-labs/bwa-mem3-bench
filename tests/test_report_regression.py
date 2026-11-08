@@ -7,8 +7,15 @@ import pandas as pd
 import pytest
 
 from bwa_mem3_bench.registry import DivergenceEntry
-from bwa_mem3_bench.report.regression import _baseline_budget, check_regression
-from bwa_mem3_bench.storage.sqlite import connect, upsert_comparison, upsert_run, upsert_trial
+from bwa_mem3_bench.report import regression
+from bwa_mem3_bench.report.regression import _baseline_budget, _gate1_failures, check_regression
+from bwa_mem3_bench.storage.sqlite import (
+    connect,
+    upsert_accuracy,
+    upsert_comparison,
+    upsert_run,
+    upsert_trial,
+)
 
 
 def _seed(db: Path, golden_pct: float, perf_delta_pct: float) -> None:
@@ -168,10 +175,51 @@ def _seed_multi(  # noqa: PLR0913 — a fixture builder; each axis is exercised
 _FLAT = {"new_walls": [100.0, 100.5, 101.0], "prev_walls": [100.0, 100.5, 101.0]}
 
 
+def _add_graded_sim_meth(
+    db: Path, *, sample: str = "sim-meth-place", arch: str = "m7i", reps: int = 1
+) -> None:
+    """An identically graded truth meth cell in both runs, on reps ``1..reps``.
+
+    Gate #1b fails a truth meth cell whose trials lack grades, and (with
+    `golden_ref_sha`, a bless) a candidate with no graded truth meth cell, so
+    tests of other gates that expect an overall PASS grade their sim cells.
+    """
+    blob = json.dumps(
+        {
+            "bins": {"60+": {"total": 100, "correct": 99, "mismapped": 1}},
+            "all": {"total": 100, "correct": 99, "mismapped": 1},
+        }
+    )
+    conn = connect(db)
+    for sha, rep in ((sha, rep) for sha in ("old", "new") for rep in range(1, reps + 1)):
+        upsert_accuracy(
+            conn,
+            fg_labs_sha=sha,
+            sample=sample,
+            arch=arch,
+            rep=rep,
+            tool="fg-labs",
+            placement_total=100,
+            placement_correct_pct=None,
+            placement_mismapped_pct=None,
+            placement_unmapped_pct=None,
+            placement_json=blob,
+            variant_bearing_reads=None,
+            md_concordant_pct=None,
+            nm_concordant_pct=None,
+            by_class_json=None,
+            meth_n_cpg=None,
+            meth_pearson_r=None,
+            meth_rmse=None,
+        )
+    conn.close()
+
+
 def test_gate2_summary_is_printed_when_it_passes(tmp_path: Path) -> None:
     """A passing Gate #2 still reports how much it checked."""
     db = tmp_path / "b.db"
     _seed_multi(db, **_FLAT)
+    _add_graded_sim_meth(db)
     ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old", golden_ref_sha="old")
     assert ok is True
     assert "## Gate #2 — vs golden" in report
@@ -252,6 +300,7 @@ def test_gate2_expects_only_sweep_cells_the_golden_holds(tmp_path: Path) -> None
     for sample in ("sim-wgs-vars", "wgs-5M-fast", "wgs-5M-compat", "wgs-5M-alt"):
         _add_cell(db, sha="old", sample=sample, reps=1)
         _add_cell(db, sha="new", sample=sample, reps=1)
+    _add_graded_sim_meth(db)
     ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old", golden_ref_sha="old")
     assert "## Gate #2 failures" not in report
     assert ok is True
@@ -375,9 +424,11 @@ def test_truth_sample_is_excluded_from_the_perf_gate(tmp_path: Path) -> None:
         new_walls=[150, 155, 160],
         prev_walls=[100, 101, 102],
     )
+    _add_graded_sim_meth(db, reps=3)  # so Gate #1b, which does grade it, passes
     ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old")
     assert ok is True, "truth (accuracy) samples are not perf targets"
-    assert "sim-meth-place" not in report, "truth sample must not appear in the perf table"
+    perf_table = report.split("## Per-cell summary", 1)[1].split("\n## ", 1)[0]
+    assert "sim-meth-place" not in perf_table, "truth sample must not appear in the perf table"
 
 
 def test_non_truth_sample_with_the_same_delta_still_fails(tmp_path: Path) -> None:
@@ -411,16 +462,16 @@ def _entry(drift: float, samples: tuple[str, ...]) -> DivergenceEntry:
 def test_baseline_budget_flags_only_over_budget_cells() -> None:
     conc = pd.DataFrame(
         {
-            "sample": ["wgs-5M", "meth-twist-emseq-5M"],
+            "sample": ["wgs-5M", "meth-twist-emseq-trim-5M"],
             "arch": ["c6a", "m7i"],
             "baseline_concordance": [99.80, 99.00],  # drift 0.20%, 1.00%
         }
     )
-    registry = [_entry(0.10, ("wgs-5M",)), _entry(1.50, ("meth-twist-emseq-5M",))]
+    registry = [_entry(0.10, ("wgs-5M",)), _entry(1.50, ("meth-twist-emseq-trim-5M",))]
     out = _baseline_budget(conc, registry)
     verdicts = dict(zip(out["sample"], out["verdict"], strict=True))
     assert verdicts["wgs-5M"] == "over_budget"  # 0.20 > 0.10
-    assert verdicts["meth-twist-emseq-5M"] == "ok"  # 1.00 <= 1.50 (meth tier)
+    assert verdicts["meth-twist-emseq-trim-5M"] == "ok"  # 1.00 <= 1.50 (meth tier)
 
 
 def test_baseline_budget_scores_each_sample_on_its_declared_metric() -> None:
@@ -487,11 +538,40 @@ def test_baseline_budget_fails_a_cell_with_any_rep_missing_placement() -> None:
     assert out.loc["c7i", "verdict"] == "ok"
 
 
-def test_gate1_meth_with_null_relocation_fails_closed(tmp_path: Path) -> None:
+# The shipped meth relocation entry is report-only, so the fail-closed and
+# over-budget paths of a GATING relocation budget are exercised against a
+# registry that declares one.
+_GATING_METH_SAMPLE = "meth-gated"
+
+
+@pytest.fixture
+def gating_meth_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Point Gate #1 at a registry with a GATING relocation budget; return its sample."""
+    reg = tmp_path / "reg.yaml"
+    reg.write_text(
+        f"""
+divergences:
+  - id: M
+    pr: p
+    date: d
+    summary: s
+    affected: meth_alignment
+    metric: confident_relocation
+    expected_drift_pct: 0.25
+    samples: [{_GATING_METH_SAMPLE}]
+"""
+    )
+    monkeypatch.setattr(regression, "DEFAULT_REGISTRY_PATH", reg)
+    return _GATING_METH_SAMPLE
+
+
+def test_gate1_meth_with_null_relocation_fails_closed(
+    tmp_path: Path, gating_meth_registry: str
+) -> None:
     """compare-bams writes `relocated_pct: null` when no read was confident on
     either side; that cell measured nothing and must not pass."""
     db = tmp_path / "b.db"
-    _seed_baseline(db, sample="meth-twist-emseq-5M", arch="m7i", baseline_pct=100.0)
+    _seed_baseline(db, sample=gating_meth_registry, arch="m7i", baseline_pct=100.0)
     conn = connect(db)
     conn.execute(
         "UPDATE comparisons SET placement_json = ? WHERE kind = 'vs-baseline'",
@@ -504,16 +584,18 @@ def test_gate1_meth_with_null_relocation_fails_closed(tmp_path: Path) -> None:
     assert "missing_placement" in report
 
 
-def test_gate1_meth_fails_when_one_rep_lacks_placement(tmp_path: Path) -> None:
+def test_gate1_meth_fails_when_one_rep_lacks_placement(
+    tmp_path: Path, gating_meth_registry: str
+) -> None:
     db = tmp_path / "b.db"
     _seed_baseline(
-        db, sample="meth-twist-emseq-5M", arch="m7i", baseline_pct=96.0, relocated_pct=0.1
+        db, sample=gating_meth_registry, arch="m7i", baseline_pct=96.0, relocated_pct=0.1
     )
     conn = connect(db)
     second = upsert_trial(
         conn,
         fg_labs_sha="new",
-        sample="meth-twist-emseq-5M",
+        sample=gating_meth_registry,
         arch="m7i",
         rep=2,
         wall_seconds=100.0,
@@ -626,36 +708,99 @@ def test_gate1_fails_over_budget(tmp_path: Path) -> None:
     assert "Gate #1 failures" in report
 
 
-def test_gate1_meth_is_scored_on_confident_placement_not_concordance(tmp_path: Path) -> None:
+def test_gate1_meth_is_scored_on_confident_placement_not_concordance(
+    tmp_path: Path, gating_meth_registry: str
+) -> None:
     db = tmp_path / "b.db"
     # 27.77% concordance drift (the v0.13.0 figure, dominated by XS and repeat
     # choice) is irrelevant; 0.13% confident relocation is within the budget.
     _seed_baseline(
-        db, sample="meth-twist-emseq-5M", arch="m7i", baseline_pct=72.23, relocated_pct=0.13
+        db, sample=gating_meth_registry, arch="m7i", baseline_pct=72.23, relocated_pct=0.13
     )
     ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old")
     assert ok is True, report
     assert "confident_relocation" in report
 
 
-def test_gate1_meth_fails_on_confident_relocation(tmp_path: Path) -> None:
+def test_gate1_gating_relocation_entry_fails_over_budget(
+    tmp_path: Path, gating_meth_registry: str
+) -> None:
+    """A gating relocation budget still fails an over-budget cell."""
     db = tmp_path / "b.db"
     _seed_baseline(
-        db, sample="meth-twist-emseq-5M", arch="m7i", baseline_pct=99.9, relocated_pct=1.0
+        db, sample=gating_meth_registry, arch="m7i", baseline_pct=99.9, relocated_pct=1.0
     )
     ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old")
     assert ok is False
     assert "over_budget" in report
+    assert "Gate #1 failures" in report
 
 
-def test_gate1_meth_without_placement_fails_closed(tmp_path: Path) -> None:
+def test_gate1_meth_without_placement_fails_closed(
+    tmp_path: Path, gating_meth_registry: str
+) -> None:
     """A meth comparison predating the placement axis has not been measured on
     the metric its budget is expressed in, so it must fail rather than pass."""
     db = tmp_path / "b.db"
-    _seed_baseline(db, sample="meth-twist-emseq-5M", arch="m7i", baseline_pct=100.0)
+    _seed_baseline(db, sample=gating_meth_registry, arch="m7i", baseline_pct=100.0)
     ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old")
     assert ok is False
     assert "missing_placement" in report
+
+
+@pytest.mark.parametrize("sample", ["meth-twist-emseq-trim-5M", "smoke-meth-trim"])
+def test_shipped_meth_relocation_is_report_only(sample: str, tmp_path: Path) -> None:
+    """The shipped meth relocation budget is `gating: false`: an over-budget
+    cell (v0.17.0's ~0.8% against 0.25%) is shown, labeled, and does not fail."""
+    db = tmp_path / "b.db"
+    _seed_baseline(db, sample=sample, arch="m7i", baseline_pct=94.3, relocated_pct=0.8)
+    ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old")
+    assert ok is True, report
+    row = next(
+        line
+        for line in report.splitlines()
+        if line.startswith(f"| {sample} | m7i | confident_relocation |")
+    )
+    assert "over_budget" in row
+    assert "report-only" in row
+    assert "Gate #1 failures" not in report
+    assert "FG-METH-DIVERGENCE" in report  # the note names the entry
+
+
+def test_report_only_rows_never_fail_but_gating_rows_do() -> None:
+    """Report-only rows never fail, whatever their verdict; gating rows do."""
+    conc = pd.DataFrame(
+        {
+            "sample": ["shown", "gated", "shown"],
+            "arch": ["m7i", "m7i", "c7i"],
+            "baseline_concordance": [90.0, 90.0, 90.0],
+            "placement_relocated_pct": [1.0, 1.0, None],
+            "placement_missing": [0, 0, 1],
+        }
+    )
+
+    def reloc(id_: str, sample: str, *, gating: bool) -> DivergenceEntry:
+        """A confident_relocation entry scoped to ``sample``."""
+        return DivergenceEntry(
+            id=id_,
+            pr="p",
+            date="d",
+            summary="s",
+            affected="meth_alignment",
+            expected_drift_pct=0.25,
+            samples=(sample,),
+            metric="confident_relocation",
+            gating=gating,
+        )
+
+    registry = [reloc("R", "shown", gating=False), reloc("G", "gated", gating=True)]
+    out = _baseline_budget(conc, registry)
+    gating = dict(zip(zip(out["sample"], out["arch"], strict=True), out["gating"], strict=True))
+    assert gating[("shown", "m7i")] == "report-only"
+    assert gating[("gated", "m7i")] == "gate"
+    fails = _gate1_failures(out)
+    # Over budget AND missing placement on the report-only sample: neither fails.
+    assert list(zip(fails["sample"], fails["verdict"], strict=True)) == [("gated", "over_budget")]
 
 
 def _seed_missing(
@@ -755,6 +900,8 @@ def test_gate1_does_not_false_fail_truth_samples(sample: str, tmp_path: Path) ->
     """
     db = tmp_path / "b.db"
     _seed_missing(db, new_arch="c6a", baseline_arch="c6a", add_vs_baseline=False, sample=sample)
+    if sample.startswith("sim-meth"):
+        _add_graded_sim_meth(db, sample=sample, arch="c6a")  # Gate #1b grades meth truth
     ok, report = check_regression(db_path=db, new_sha="new", prev_sha="old")
     assert ok is True, report
     assert "PASS" in report

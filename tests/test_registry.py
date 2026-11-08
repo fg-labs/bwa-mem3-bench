@@ -11,6 +11,7 @@ from bwa_mem3_bench.registry import (
     DivergenceEntry,
     allowed_drift_pct,
     gate_metric,
+    is_report_only,
     load_registry,
 )
 
@@ -150,6 +151,74 @@ def test_shipped_meth_budget_is_on_confident_placement() -> None:
     for sample, relocated in observed.items():
         assert gate_metric(entries, sample) == CONFIDENT_RELOCATION, sample
         assert allowed_drift_pct(entries, sample, CONFIDENT_RELOCATION) >= relocated, sample
+
+
+def test_shipped_meth_relocation_is_report_only_for_trimmed_and_retired_names() -> None:
+    """From v0.17.0 meth relocation vs bwameth is shown but not gated; the
+    retired untrimmed names keep the same scoring for historical runs."""
+    entries = load_registry(REGISTRY)
+    for sample in (
+        "meth-twist-emseq-trim-5M",
+        "smoke-meth-trim",
+        "meth-twist-emseq-5M",
+        "smoke-meth",
+    ):
+        assert gate_metric(entries, sample) == CONFIDENT_RELOCATION, sample
+        assert is_report_only(entries, sample, CONFIDENT_RELOCATION), sample
+    # DNA samples stay gated.
+    assert not is_report_only(entries, "wgs-5M", CONCORDANCE)
+
+
+def test_gating_defaults_true_and_is_validated(tmp_path: Path) -> None:
+    """`gating` defaults to true and must be a real boolean."""
+    base = """
+divergences:
+  - id: A
+    pr: fg-labs/bwa-mem3#1
+    date: 2026-06-07
+    summary: s
+    affected: meth_alignment
+    expected_drift_pct: 0.25
+    samples: [m]
+"""
+    p = tmp_path / "reg.yaml"
+    p.write_text(base)
+    assert load_registry(p)[0].gating is True
+    p.write_text(base + "    gating: false\n")
+    assert load_registry(p)[0].gating is False
+    # A quoted "false" is a truthy string; it must be rejected, not read as gating.
+    p.write_text(base + '    gating: "false"\n')
+    with pytest.raises(ValueError, match="gating"):
+        load_registry(p)
+
+
+def test_one_gating_entry_keeps_a_row_gated() -> None:
+    """A report-only entry must not silently un-gate a budget another declares."""
+    shown = DivergenceEntry(
+        id="R",
+        pr="p",
+        date="d",
+        summary="s",
+        affected="a",
+        expected_drift_pct=0.1,
+        samples=("m",),
+        gating=False,
+    )
+    gated = DivergenceEntry(
+        id="G",
+        pr="p",
+        date="d",
+        summary="s",
+        affected="a",
+        expected_drift_pct=0.1,
+        samples=("m",),
+    )
+    assert is_report_only([shown], "m", CONCORDANCE)
+    assert not is_report_only([shown, gated], "m", CONCORDANCE)
+    # No applicable entry at all: gated (at a zero budget), never report-only.
+    assert not is_report_only([shown], "other", CONCORDANCE)
+    # Only entries on the row's metric count.
+    assert not is_report_only([shown], "m", CONFIDENT_RELOCATION)
 
 
 def test_metric_defaults_to_concordance_and_is_validated(tmp_path: Path) -> None:
