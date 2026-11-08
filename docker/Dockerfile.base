@@ -54,7 +54,7 @@ RUN wget -qO /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-s
     echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-${LLVM_VERSION} main" \
         > /etc/apt/sources.list.d/llvm.list && \
     apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        clang-${LLVM_VERSION} libomp-${LLVM_VERSION}-dev && \
+        clang-${LLVM_VERSION} lld-${LLVM_VERSION} libomp-${LLVM_VERSION}-dev && \
     rm -rf /var/lib/apt/lists/*
 # `clang` / `clang++` wrappers on /usr/local/bin (ahead of /usr/bin on PATH).
 # They pin clang-19 and append codegen-neutral compat flags so the 2021-era
@@ -75,6 +75,33 @@ RUN printf '#!/bin/sh\nexec clang-%s -Wno-error=implicit-function-declaration -W
     printf '#!/bin/sh\nexec clang++-%s -Wno-register "$@"\n' "${LLVM_VERSION}" > /usr/local/bin/clang++ && \
     chmod +x /usr/local/bin/clang /usr/local/bin/clang++ && \
     clang --version | head -1
+
+# `require-lto <make args>`, run in a bwa-mem3 checkout right after its build:
+# fails the image build unless the Makefile resolved full LTO with the same
+# make arguments. Since fg-labs/bwa-mem3 #621 (v0.15.1) the default binary links
+# with full LTO, but only when a probe link with `-fuse-ld=lld` succeeds;
+# otherwise the build falls back to a non-LTO binary with nothing but a make
+# NOTE. That fallback is silent in a Docker log, and it is how every bench image
+# from v0.15.1 to v0.17.0 timed a non-LTO binary on both architectures while the
+# release tarball ships LTO (fg-labs/bwa-mem3's release workflow installs lld-19
+# and asserts `full` the same way). Releases older than #621 have no LTO mode at
+# all, so the helper no-ops on a Makefile without BWA_LTO_MODE. Inlined (not a
+# COPY'd file) so it is part of the bytes base_image_tag() hashes.
+RUN printf '%s\n' \
+        '#!/bin/sh' \
+        'set -eu' \
+        'if ! grep -q "BWA_LTO_MODE" Makefile; then' \
+        '    echo "require-lto: Makefile predates LTO (fg-labs/bwa-mem3 #621); not checked"' \
+        '    exit 0' \
+        'fi' \
+        'mode=$(make -s print-BWA_LTO_MODE "$@" | tail -n 1)' \
+        'if [ "$mode" != full ]; then' \
+        '    echo "ERROR: bwa-mem3 resolved LTO mode \"$mode\", expected \"full\" (is lld installed?)" >&2' \
+        '    exit 1' \
+        'fi' \
+        'echo "require-lto: LTO mode full"' \
+        > /usr/local/bin/require-lto && \
+    chmod +x /usr/local/bin/require-lto
 # autoconf-archive + libtool aren't strictly required by the current
 # ext/htslib submodule, but they're on upstream's official prereqs list
 # (fg-labs/bwa-mem3 PR #93 → docs/src/getting-started/installation.md) and an
@@ -177,9 +204,11 @@ RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-relea
     git submodule update --init --recursive && \
     { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto arch=arm64 CXX=clang++ CC=clang; \
     else \
-        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto BASELINE_ARCH=avx2 CXX=clang++ CC=clang; \
     fi && \
     install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v021 && \
     cd /build && \
@@ -192,9 +221,11 @@ RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-relea
     git submodule update --init --recursive && \
     { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto arch=arm64 CXX=clang++ CC=clang; \
     else \
-        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto BASELINE_ARCH=avx2 CXX=clang++ CC=clang; \
     fi && \
     install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v022 && \
     cd /build && \
@@ -207,9 +238,11 @@ RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-relea
     git submodule update --init --recursive && \
     { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto arch=arm64 CXX=clang++ CC=clang; \
     else \
-        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto BASELINE_ARCH=avx2 CXX=clang++ CC=clang; \
     fi && \
     install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v030 && \
     cd /build && \
@@ -222,9 +255,11 @@ RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-relea
     git submodule update --init --recursive && \
     { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto arch=arm64 CXX=clang++ CC=clang; \
     else \
-        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto BASELINE_ARCH=avx2 CXX=clang++ CC=clang; \
     fi && \
     install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v040 && \
     cd /build && \
@@ -237,9 +272,11 @@ RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-relea
     git submodule update --init --recursive && \
     { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto arch=arm64 CXX=clang++ CC=clang; \
     else \
-        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto BASELINE_ARCH=avx2 CXX=clang++ CC=clang; \
     fi && \
     install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v050 && \
     cd /build && \
@@ -252,9 +289,11 @@ RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-relea
     git submodule update --init --recursive && \
     { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto arch=arm64 CXX=clang++ CC=clang; \
     else \
-        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto BASELINE_ARCH=avx2 CXX=clang++ CC=clang; \
     fi && \
     install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v060 && \
     cd /build && \
@@ -267,9 +306,11 @@ RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-relea
     git submodule update --init --recursive && \
     { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto arch=arm64 CXX=clang++ CC=clang; \
     else \
-        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto BASELINE_ARCH=avx2 CXX=clang++ CC=clang; \
     fi && \
     install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v070 && \
     cd /build && \
@@ -282,9 +323,11 @@ RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-relea
     git submodule update --init --recursive && \
     { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto arch=arm64 CXX=clang++ CC=clang; \
     else \
-        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto BASELINE_ARCH=avx2 CXX=clang++ CC=clang; \
     fi && \
     install -Dm755 bwa-mem3 /out/bin/bwa-mem3.394f8f8 && \
     cd /build && \
@@ -297,9 +340,11 @@ RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-relea
     git submodule update --init --recursive && \
     { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto arch=arm64 CXX=clang++ CC=clang; \
     else \
-        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto BASELINE_ARCH=avx2 CXX=clang++ CC=clang; \
     fi && \
     install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v080 && \
     cd /build && \
@@ -312,9 +357,11 @@ RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-relea
     git submodule update --init --recursive && \
     { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto arch=arm64 CXX=clang++ CC=clang; \
     else \
-        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto BASELINE_ARCH=avx2 CXX=clang++ CC=clang; \
     fi && \
     install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v090 && \
     cd /build && \
@@ -327,9 +374,11 @@ RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-relea
     git submodule update --init --recursive && \
     { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto arch=arm64 CXX=clang++ CC=clang; \
     else \
-        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto BASELINE_ARCH=avx2 CXX=clang++ CC=clang; \
     fi && \
     install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v100 && \
     cd /build && \
@@ -342,9 +391,11 @@ RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-relea
     git submodule update --init --recursive && \
     { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto arch=arm64 CXX=clang++ CC=clang; \
     else \
-        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto BASELINE_ARCH=avx2 CXX=clang++ CC=clang; \
     fi && \
     install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v110 && \
     cd /build && \
@@ -357,9 +408,11 @@ RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-relea
     git submodule update --init --recursive && \
     { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto arch=arm64 CXX=clang++ CC=clang; \
     else \
-        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto BASELINE_ARCH=avx2 CXX=clang++ CC=clang; \
     fi && \
     install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v120 && \
     cd /build && \
@@ -372,9 +425,11 @@ RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-relea
     git submodule update --init --recursive && \
     { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto arch=arm64 CXX=clang++ CC=clang; \
     else \
-        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto BASELINE_ARCH=avx2 CXX=clang++ CC=clang; \
     fi && \
     install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v130 && \
     cd /build && \
@@ -387,9 +442,11 @@ RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-relea
     git submodule update --init --recursive && \
     { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto arch=arm64 CXX=clang++ CC=clang; \
     else \
-        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto BASELINE_ARCH=avx2 CXX=clang++ CC=clang; \
     fi && \
     install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v140 && \
     cd /build && \
@@ -402,9 +459,11 @@ RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-relea
     git submodule update --init --recursive && \
     { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto arch=arm64 CXX=clang++ CC=clang; \
     else \
-        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto BASELINE_ARCH=avx2 CXX=clang++ CC=clang; \
     fi && \
     install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v141 && \
     cd /build && \
@@ -417,9 +476,11 @@ RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-relea
     git submodule update --init --recursive && \
     { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto arch=arm64 CXX=clang++ CC=clang; \
     else \
-        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto BASELINE_ARCH=avx2 CXX=clang++ CC=clang; \
     fi && \
     install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v150 && \
     cd /build && \
@@ -432,9 +493,11 @@ RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-relea
     git submodule update --init --recursive && \
     { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto arch=arm64 CXX=clang++ CC=clang; \
     else \
-        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto BASELINE_ARCH=avx2 CXX=clang++ CC=clang; \
     fi && \
     install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v151 && \
     cd /build && \
@@ -447,9 +510,11 @@ RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-relea
     git submodule update --init --recursive && \
     { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto arch=arm64 CXX=clang++ CC=clang; \
     else \
-        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang; \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto BASELINE_ARCH=avx2 CXX=clang++ CC=clang; \
     fi && \
     install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v160 && \
     cd /build && \

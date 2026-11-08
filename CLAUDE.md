@@ -336,6 +336,22 @@ from `arch.baseline_arch` in `config/archs.yaml`:
   forward; grep CloudWatch / `docker run … bwa-mem3 version` and
   compare the two lines. ARM is unaffected — `arch=arm64` is a separate
   Makefile path that doesn't use `BASELINE_ARCH`.
+- **The bench built bwa-mem3 WITHOUT LTO from v0.15.1 to the v0.17.0
+  candidate, on every arch.** fg-labs/bwa-mem3 #621 (v0.15.1) made the default
+  binary link with full LTO, but only when a probe link with `-fuse-ld=lld`
+  succeeds; otherwise make prints one `NOTE: building without LTO` and builds a
+  non-LTO binary. The base image installed `clang-19` but not `lld-19`, so the
+  probe failed in every image and the bench timed a binary the release does not
+  ship (the release workflow installs `lld-19` and asserts mode `full`). #621
+  measured LTO at -3.1% wall on Zen 4 and -1.7% on Graviton4, so absolute
+  bwa-mem3 walls and the vs-comparator ratios drop at the fix, and the v0.15.1 /
+  v0.16.0 arena arms (the only ladder releases with an LTO mode) get faster while
+  older arms do not. Fixed by installing `lld-${LLVM_VERSION}` and ending every
+  bwa-mem3 build (candidate and arena ladder) in `require-lto <make args>`
+  (inlined in `docker/Dockerfile.base`), which fails the image build unless the
+  Makefile resolved `full`; it no-ops on a pre-#621 Makefile.
+  `tests/test_arena_dockerfile.py` pins all three. Like the `BASELINE_ARCH`
+  gotcha below, this was invisible: the build succeeded and the binary ran.
 - **A "regression" between two bench SHAs may be a bench-substrate
   artifact, not a codegen change.** fg-labs/bwa-mem3#92 hypothesised
   that PR #88's `always_inline` on `FMI_search::backwardExt` regressed

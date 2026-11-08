@@ -69,3 +69,69 @@ def test_every_arena_run_block_isolates_the_sed_fallback() -> None:
         assert _VULNERABLE_FORM + " && " not in block.replace(_SAFE_FORM, ""), (
             f"{label_line}: found the ungrouped, unsafe `sed ... || true &&` form"
         )
+
+
+# ---------------------------------------------------------------------------
+# LTO: every bwa-mem3 build must be the binary the release ships.
+#
+# Since fg-labs/bwa-mem3 #621 (v0.15.1) the default build links with full LTO,
+# but ONLY when a probe link with `-fuse-ld=lld` succeeds; without lld it falls
+# back to a non-LTO binary and says so in a single make NOTE. The base image
+# shipped clang-19 without lld-19, so every bench image from v0.15.1 through the
+# v0.17.0 candidate timed a non-LTO binary on both architectures. These guards
+# keep lld installed and keep every build asserting the resolved mode.
+# ---------------------------------------------------------------------------
+
+DOCKERFILE = Path(REPO_ROOT) / "docker" / "Dockerfile"
+# tuned arm64, portable arm64, x86.
+_DEFAULT_CANDIDATE_BUILDS = 3
+_ARENA_MAKES = (
+    'make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang',
+    'make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang',
+)
+
+
+def test_the_base_image_installs_lld_next_to_clang() -> None:
+    text = DOCKERFILE_BASE.read_text()
+    assert "clang-${LLVM_VERSION} lld-${LLVM_VERSION}" in text, (
+        "Dockerfile.base must install lld-${LLVM_VERSION} with clang: without it bwa-mem3's "
+        "LTO probe fails and the build silently drops to a non-LTO binary"
+    )
+
+
+def test_the_base_image_defines_require_lto() -> None:
+    text = DOCKERFILE_BASE.read_text()
+    assert "> /usr/local/bin/require-lto" in text
+    assert "print-BWA_LTO_MODE" in text
+    assert '"$mode" != full' in text
+
+
+def test_every_arena_build_asserts_full_lto() -> None:
+    for block in _arena_run_blocks():
+        label_line = block.splitlines()[0]
+        for make in _ARENA_MAKES:
+            assert block.count(make) == 1, f"{label_line}: expected one `{make}`"
+            after = block.split(make, 1)[1]
+            assert after.startswith(" && \\\n            require-lto "), (
+                f"{label_line}: `{make}` must be followed by `&& require-lto <same args>`"
+            )
+
+
+def test_every_default_candidate_build_asserts_full_lto() -> None:
+    """The three default-target builds in docker/Dockerfile (tuned arm64, portable
+    arm64, x86) each end in `require-lto` with the make arguments they built with."""
+    text = DOCKERFILE.read_text()
+    default_case = text.split('      "" ) \\\n', 1)[1].split("      lto-build ) \\\n", 1)[0]
+    makes = default_case.count("make arch=") + default_case.count("make BASELINE_ARCH=")
+    assert makes == _DEFAULT_CANDIDATE_BUILDS, (
+        f"expected {_DEFAULT_CANDIDATE_BUILDS} default builds, found {makes}"
+    )
+    assert default_case.count("require-lto ") == _DEFAULT_CANDIDATE_BUILDS, (
+        "every default bwa-mem3 build in docker/Dockerfile must end in `require-lto`"
+    )
+    for args in (
+        'arch=arm64 ARM_CPU="${TUNE_ARM_CPU}" ARM_CACHE_LINE="${TUNE_ARM_CACHE_LINE}"',
+        "arch=arm64 CXX=clang++ CC=clang",
+        'BASELINE_ARCH="${BASELINE_ARCH:-avx2}" CXX=clang++ CC=clang',
+    ):
+        assert f"require-lto {args}" in default_case, f"missing `require-lto {args}`"
