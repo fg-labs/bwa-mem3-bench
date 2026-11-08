@@ -144,6 +144,11 @@ RUN git clone --recursive "${FG_LABS_REPO}" fg-labs && \
 # A tuned build refuses a Makefile that predates ARM_CPU: make silently ignores
 # an unknown command-line variable, which would publish a generic binary under
 # the `-<tuning>` tag. Likewise refused on amd64, where it would be ignored too.
+#
+# Every default build ends in `require-lto` (defined in Dockerfile.base): a SHA
+# whose Makefile has an LTO mode (fg-labs #621, v0.15.1+) must resolve it to
+# `full`, as the release tarball does, or the image build fails instead of
+# quietly benchmarking a non-LTO binary.
 RUN cd fg-labs && \
     BUILT_BIN=bwa-mem3 && \
     if [ -n "${TUNE_ARM_CPU}" ]; then \
@@ -160,11 +165,15 @@ RUN cd fg-labs && \
       "" ) \
         if [ -n "${TUNE_ARM_CPU}" ]; then \
             make arch=arm64 ARM_CPU="${TUNE_ARM_CPU}" ARM_CACHE_LINE="${TUNE_ARM_CACHE_LINE}" \
-                -j"$(nproc)" CXX=clang++ CC=clang; \
+                -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto arch=arm64 ARM_CPU="${TUNE_ARM_CPU}" ARM_CACHE_LINE="${TUNE_ARM_CACHE_LINE}" \
+                CXX=clang++ CC=clang; \
         elif [ "$TARGETARCH" = "arm64" ]; then \
-            make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang; \
+            make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto arch=arm64 CXX=clang++ CC=clang; \
         else \
-            make BASELINE_ARCH="${BASELINE_ARCH:-avx2}" -j"$(nproc)" CXX=clang++ CC=clang; \
+            make BASELINE_ARCH="${BASELINE_ARCH:-avx2}" -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto BASELINE_ARCH="${BASELINE_ARCH:-avx2}" CXX=clang++ CC=clang; \
         fi ;; \
       lto-build ) \
         # `make lto-build` produces `bwa-mem3.lto`. LTO_ARCH selects the arch
