@@ -23,6 +23,7 @@ takes the lowest rep per cell (JSON blobs aren't meaningfully averaged).
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -34,6 +35,31 @@ EM_DASH = "—"
 # Display order for the aligner arms (fg-labs is the protagonist; baseline and
 # minibwa are the references it's graded against).
 _TOOL_ORDER = {"fg-labs": 0, "baseline": 1, "minibwa": 2}
+
+
+def mapq_bin_bounds(key: str) -> tuple[int, int | None]:
+    """Inclusive MAPQ bounds of a holodeck bin key (``"0"``, ``"20-29"``, ``"60+"``).
+
+    A single value is its own range and ``N+`` has no upper bound (``None``). The
+    whole key must match, so a digit-prefixed label (``"0garbage"``) is rejected
+    rather than read as its leading number, and so is a reversed range
+    (``"19-0"``), which would otherwise read as a low bin.
+    """
+    match = re.fullmatch(r"(\d+)(?:-(\d+)|(\+))?", key)
+    if match is None:
+        raise ValueError(f"unrecognised MAPQ bin {key!r}")
+    lower = int(match.group(1))
+    if match.group(3):
+        return lower, None
+    upper = int(match.group(2)) if match.group(2) else lower
+    if upper < lower:
+        raise ValueError(f"reversed MAPQ bin {key!r}")
+    return lower, upper
+
+
+def mapq_bin_lower_bound(key: str) -> int:
+    """Lower MAPQ bound of a holodeck bin key; see `mapq_bin_bounds`."""
+    return mapq_bin_bounds(key)[0]
 
 
 def _tool_rank(tool: str) -> int:

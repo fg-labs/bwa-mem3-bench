@@ -1,10 +1,18 @@
 """`bench regression` — gate a new SHA on concordance + perf.
 
-Three gates:
-  * Gate #1 (vs upstream bwa-mem2): observed concordance drift must stay within
-    the per-sample budget declared in the divergence registry.
+Gates:
+  * Gate #1 (vs upstream bwa-mem2 / bwameth): observed drift must stay within
+    the per-sample budget declared in the divergence registry. A sample whose
+    registry entries are all `gating: false` is shown as `report-only` and never
+    fails (meth relocation vs bwameth, since bwa-mem3 v0.17.0).
+  * Gate #1b (meth vs sim truth): every holodeck-graded `--meth` cell must place
+    reads no worse than the prior release (`--prev`): mismapped at MAPQ >= 20
+    and correct at MAPQ >= 20, within small tolerances. Fails closed on a
+    missing or short grade and on an unreadable table (a side-specific data
+    error). See `bwa_mem3_bench.report.meth_accuracy_gate`.
   * Gate #2 (vs the blessed golden / last release): concordance stays tight
     (>= CONCORDANCE_THRESHOLD) — two fg-labs builds should be ~identical.
+  * Gate #3 (thread scaling): efficiency vs the prior release.
   * Performance: median wall_seconds must not regress past the threshold.
 
 The report aggregates wall_seconds across reps to per-(sample, arch) medians
@@ -46,7 +54,15 @@ from bwa_mem3_bench.registry import (
     DivergenceEntry,
     allowed_drift_pct,
     gate_metric,
+    is_report_only,
     load_registry,
+)
+from bwa_mem3_bench.report.meth_accuracy_gate import (
+    ABS_TOL_PPM,
+    PP_TOL,
+    REL_TOL,
+    meth_accuracy_gate,
+    meth_accuracy_section,
 )
 from bwa_mem3_bench.report.tables import md_table
 from bwa_mem3_bench.storage import VS_BASELINE, VS_GOLDEN
@@ -65,6 +81,11 @@ PERF_REGRESSION_THRESHOLD_PCT = 5.0
 # methylation ~1.1%). MARGIN absorbs float noise; concordance is deterministic
 # per (sample), so it can be tiny.
 DRIFT_MARGIN_PCT = 0.001
+
+# Gate #1 `gating` labels. A `report-only` row's registry entries all say
+# `gating: false`: its number is shown, never gated.
+GATE = "gate"
+REPORT_ONLY = "report-only"
 
 # Sample-stdev (ddof=1) is undefined for a single sample; report 0% CV
 # instead of NaN so the markdown table stays tidy.
@@ -225,11 +246,13 @@ def _baseline_budget(conc_df: pd.DataFrame, registry: list[DivergenceEntry]) -> 
     on the metric its registry entries declare (`registry.gate_metric`):
     ``100 - baseline_concordance`` for `concordance`, ``placement_relocated_pct``
     for `confident_relocation`. Returns the rows plus ``metric``,
-    ``observed_drift_pct``, ``allowed_drift_pct`` and a ``verdict`` of ``ok`` /
-    ``over_budget`` / ``missing_placement``. The last fails closed: a sample
-    budgeted on placement with ANY rep lacking a placement measurement has not
-    been fully measured, and must not pass on the reps that were. Empty in,
-    empty out.
+    ``observed_drift_pct``, ``allowed_drift_pct``, a ``verdict`` of ``ok`` /
+    ``over_budget`` / ``missing_placement``, and ``gating`` (``gate`` or
+    ``report-only``, from `registry.is_report_only`). ``missing_placement`` fails
+    closed: a sample budgeted on placement with ANY rep lacking a placement
+    measurement has not been fully measured, and must not pass on the reps that
+    were. A ``report-only`` row keeps its verdict for display, but no verdict on
+    it fails the gate (see `_gate1_failures`). Empty in, empty out.
     """
     cols = [
         "sample",
@@ -239,6 +262,7 @@ def _baseline_budget(conc_df: pd.DataFrame, registry: list[DivergenceEntry]) -> 
         "observed_drift_pct",
         "allowed_drift_pct",
         "verdict",
+        "gating",
     ]
     if conc_df.empty:
         return pd.DataFrame(columns=cols)
@@ -268,7 +292,18 @@ def _baseline_budget(conc_df: pd.DataFrame, registry: list[DivergenceEntry]) -> 
         else ("over_budget" if obs > allowed + DRIFT_MARGIN_PCT else "ok")
         for obs, allowed in zip(out["observed_drift_pct"], out["allowed_drift_pct"], strict=True)
     ]
+    out["gating"] = [
+        REPORT_ONLY if is_report_only(registry, sample, metric) else GATE
+        for sample, metric in zip(out["sample"], out["metric"], strict=True)
+    ]
     return out.sort_values(["sample", "arch"]).reset_index(drop=True)[cols]
+
+
+def _gate1_failures(budget: pd.DataFrame) -> pd.DataFrame:
+    """The Gate #1 rows that fail: not ``ok``, and not ``report-only``."""
+    if budget.empty:
+        return budget
+    return budget[(budget["verdict"] != "ok") & (budget["gating"] == GATE)]
 
 
 def _missing_baseline_cells(
@@ -706,6 +741,93 @@ def _gate2_section(  # noqa: PLR0913
     return out
 
 
+def _gate1_section(
+    budget: pd.DataFrame,
+    budget_fails: pd.DataFrame,
+    missing_baseline: pd.DataFrame,
+    registry: list[DivergenceEntry],
+) -> list[str]:
+    """Markdown for Gate #1: the budget table, then its two failure tables."""
+    lines: list[str] = []
+    if not budget.empty:
+        lines.append("## Gate #1 — vs-upstream drift vs budget")
+        lines.append("")
+        lines.append(
+            md_table(
+                [
+                    "sample",
+                    "arch",
+                    "metric",
+                    "baseline_concordance",
+                    "observed_drift_%",
+                    "budget_%",
+                    "verdict",
+                    "gating",
+                ],
+                budget[
+                    [
+                        "sample",
+                        "arch",
+                        "metric",
+                        "baseline_concordance",
+                        "observed_drift_pct",
+                        "allowed_drift_pct",
+                        "verdict",
+                        "gating",
+                    ]
+                ]
+                .to_records(index=False)
+                .tolist(),
+                float_fmt="{:.4f}",
+            )
+        )
+        lines.append("")
+        if (budget["gating"] == REPORT_ONLY).any():
+            ids = ", ".join(sorted(e.id for e in registry if not e.gating))
+            lines.append(
+                f"> Rows marked `{REPORT_ONLY}` are computed and shown but never fail "
+                f"Gate #1: every registry entry budgeting them says `gating: false` "
+                f"({ids}; `docs/expected-divergences.yaml` records why)."
+            )
+            lines.append("")
+
+    if not missing_baseline.empty:
+        lines.append("## Gate #1 failures — missing vs-baseline comparisons")
+        lines.append("")
+        lines.append(
+            md_table(
+                ["sample", "arch"],
+                missing_baseline[["sample", "arch"]].to_records(index=False).tolist(),
+            )
+        )
+        lines.append("")
+
+    if not budget_fails.empty:
+        lines.append("## Gate #1 failures — unexplained upstream divergence")
+        lines.append("")
+        lines.append(
+            md_table(
+                ["sample", "arch", "metric", "observed_drift_%", "budget_%", "verdict"],
+                budget_fails[
+                    [
+                        "sample",
+                        "arch",
+                        "metric",
+                        "observed_drift_pct",
+                        "allowed_drift_pct",
+                        "verdict",
+                    ]
+                ]
+                .to_records(index=False)
+                .tolist(),
+                float_fmt="{:.4f}",
+            )
+        )
+        lines.append("")
+
+    return lines
+
+
 def check_regression(
     *,
     db_path: Path,
@@ -791,7 +913,7 @@ def check_regression(
         params=(VS_BASELINE, new_sha),
     )
     budget = _baseline_budget(baseline_conc, registry)
-    budget_fails = budget[budget["verdict"] != "ok"]
+    budget_fails = _gate1_failures(budget)
 
     # Gate #1 fails *closed*: every cell that has an upstream baseline counterpart
     # must have produced a vs-baseline comparison. Intersecting the run's cells
@@ -799,10 +921,20 @@ def check_regression(
     # a genuinely-missing x86/meth comparison fails rather than silently passing.
     missing_baseline = _missing_baseline_cells(db_path, new_df, baseline_conc)
 
+    # Gate #1b: truth meth cells graded no worse than the prior release.
+    # Like Gate #2, a pinned golden marks a bless, where an ungraded candidate fails.
+    meth_gate = meth_accuracy_gate(
+        db_path,
+        new_sha=new_sha,
+        prev_sha=prev_sha,
+        config=config,
+        expect_graded=bool(golden_ref_sha),
+    )
+
     # Gate #3: thread-scaling efficiency vs the last release. Empty (and thus
     # non-failing) when either run has no ladder — including the first run after
     # this gate lands, which has no predecessor and must not fail for that.
-    scaling_cfg = load_config(Path(REPO_ROOT) / "config").thread_scaling
+    scaling_cfg = config.thread_scaling
     scaling = _scaling_gate(
         db_path,
         new_sha,
@@ -822,6 +954,7 @@ def check_regression(
         or not perf_fails.empty
         or not budget_fails.empty
         or not missing_baseline.empty
+        or meth_gate.failing
         or not scaling_fails.empty
     )
     verdict = "FAIL" if failing else "PASS"
@@ -833,7 +966,16 @@ def check_regression(
         f"per-sample registry budget (margin {DRIFT_MARGIN_PCT}%). Scored on the "
         f"metric the budget declares: `concordance` (100 - concordance) or "
         f"`confident_relocation` (% of confidently-mapped primaries placed at a "
-        f"different locus).",
+        f"different locus). Rows labeled `{REPORT_ONLY}` are shown but not gated.",
+        f"- Gate #1b (meth vs sim truth): every truth meth cell's mismapped-at-MAPQ>=20 "
+        f"rate may rise at most {REL_TOL:.0%} + {ABS_TOL_PPM:g} ppm over the prior "
+        f"release's, and its correct-at-MAPQ>=20 rate may fall at most {PP_TOL:g} pp; "
+        f"fails closed on a missing or short grade and an unreadable table"
+        + (
+            ", and on a candidate with no graded truth meth cell (bless)."
+            if golden_ref_sha
+            else "; not evaluated when the candidate ran no truth meth sample."
+        ),
         f"- Gate #2 (vs golden / last release): concordance ≥ {CONCORDANCE_THRESHOLD}%"
         + (
             f" against golden `{golden_ref_sha}`; fails closed on missing comparisons."
@@ -892,71 +1034,8 @@ def check_regression(
         "",
     ]
 
-    if not budget.empty:
-        lines.append("## Gate #1 — vs-upstream drift vs budget")
-        lines.append("")
-        lines.append(
-            md_table(
-                [
-                    "sample",
-                    "arch",
-                    "metric",
-                    "baseline_concordance",
-                    "observed_drift_%",
-                    "budget_%",
-                    "verdict",
-                ],
-                budget[
-                    [
-                        "sample",
-                        "arch",
-                        "metric",
-                        "baseline_concordance",
-                        "observed_drift_pct",
-                        "allowed_drift_pct",
-                        "verdict",
-                    ]
-                ]
-                .to_records(index=False)
-                .tolist(),
-                float_fmt="{:.4f}",
-            )
-        )
-        lines.append("")
-
-    if not missing_baseline.empty:
-        lines.append("## Gate #1 failures — missing vs-baseline comparisons")
-        lines.append("")
-        lines.append(
-            md_table(
-                ["sample", "arch"],
-                missing_baseline[["sample", "arch"]].to_records(index=False).tolist(),
-            )
-        )
-        lines.append("")
-
-    if not budget_fails.empty:
-        lines.append("## Gate #1 failures — unexplained upstream divergence")
-        lines.append("")
-        lines.append(
-            md_table(
-                ["sample", "arch", "metric", "observed_drift_%", "budget_%", "verdict"],
-                budget_fails[
-                    [
-                        "sample",
-                        "arch",
-                        "metric",
-                        "observed_drift_pct",
-                        "allowed_drift_pct",
-                        "verdict",
-                    ]
-                ]
-                .to_records(index=False)
-                .tolist(),
-                float_fmt="{:.4f}",
-            )
-        )
-        lines.append("")
+    lines.extend(_gate1_section(budget, budget_fails, missing_baseline, registry))
+    lines.extend(meth_accuracy_section(meth_gate, prev_sha=prev_sha))
 
     lines.extend(
         _gate2_section(

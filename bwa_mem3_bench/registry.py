@@ -43,6 +43,11 @@ class DivergenceEntry:
     samples: tuple[str, ...] = ()
     # Which observed number the budget applies to; one of METRICS.
     metric: str = CONCORDANCE
+    # False = report-only: Gate #1 still computes and shows the sample's number
+    # against this budget, but an over-budget cell does not fail the gate. For a
+    # comparison that stopped being a correctness signal (e.g. meth relocation vs
+    # bwameth once bwa-mem3 out-scored it on sim truth), kept for visibility.
+    gating: bool = True
 
 
 _REQUIRED_FIELDS = ("id", "pr", "date", "summary", "affected", "expected_drift_pct")
@@ -79,6 +84,9 @@ def load_registry(path: Path) -> list[DivergenceEntry]:
             raise ValueError(
                 f"registry entry {i}: 'metric' must be one of {METRICS}, got {metric!r}"
             )
+        gating = item.get("gating", True)
+        if not isinstance(gating, bool):
+            raise ValueError(f"registry entry {i}: 'gating' must be true or false, got {gating!r}")
         entries.append(
             DivergenceEntry(
                 id=str(item["id"]),
@@ -89,6 +97,7 @@ def load_registry(path: Path) -> list[DivergenceEntry]:
                 expected_drift_pct=float(item["expected_drift_pct"]),
                 samples=_coerce_samples(item.get("samples"), entry_index=i),
                 metric=metric,
+                gating=gating,
             )
         )
     return entries
@@ -127,3 +136,15 @@ def allowed_drift_pct(
     return sum(
         e.expected_drift_pct for e in entries if e.metric == metric and _applies_to(e, sample)
     )
+
+
+def is_report_only(entries: list[DivergenceEntry], sample: str, metric: str) -> bool:
+    """Whether Gate #1 shows ``sample``'s ``metric`` row without gating on it.
+
+    True only when at least one entry applies to the sample on that metric and
+    EVERY such entry is ``gating: false``. One gating entry keeps the row gated,
+    so a report-only entry can never silently un-gate a budget another entry
+    declares; a sample with no applicable entry is gated (at a zero budget).
+    """
+    applicable = [e for e in entries if e.metric == metric and _applies_to(e, sample)]
+    return bool(applicable) and not any(e.gating for e in applicable)

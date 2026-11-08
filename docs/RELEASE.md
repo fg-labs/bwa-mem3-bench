@@ -54,14 +54,56 @@ densified on-disk SA.
 
 ## The steps
 
-The three named **gates** a bless exists to check (see `rule bless_release` in
-`workflow/Snakefile`):
+The named **gates** a bless exists to check (see `rule bless_release` in
+`workflow/Snakefile`), all run by `cli bench regression` in step 8 and by
+nothing else:
 
 - **Gate #1 — vs-upstream:** drift against a different aligner, within each
   sample's budget in `docs/expected-divergences.yaml` (x86 only). DNA samples
   are scored on concordance against `bwa-mem2 v2.2.1`; meth samples on confident
   relocation against `bwameth` (the share of primaries either aligner maps at
-  MAPQ >= 20 that the two place at a different locus).
+  MAPQ >= 20 that the two place at a different locus). The meth rows are
+  **report-only** from v0.17.0 (`gating: false` on `FG-METH-DIVERGENCE`): shown,
+  labeled `report-only`, never failing. bwa-mem3's genomic meth scoring
+  (fg-labs/bwa-mem3#756) is more accurate on sim truth but diverges from bwameth
+  by design, so relocation stopped being a correctness signal.
+- **Gate #1b — meth vs sim truth:** every holodeck-graded `--meth` cell
+  (`sim-meth-*`, all arms) must be no worse than the same cell of `--prev`:
+  mismapped reads at MAPQ >= 20 (per 10^6 reads) may rise at most 2% + 1 ppm,
+  and correct reads at MAPQ >= 20 (% of all reads) may fall at most 0.02 pp.
+  Bounds are inclusive. Cells are compared only when graded in both releases;
+  each release's median is over its own graded reps, restricted to that
+  release's trial reps when the cell has trials. A graded cell the prior never
+  ran is shown as `new_only` (the prior's ingested trials are the inventory).
+  Fails closed on:
+  - any candidate trial rep without a grade, new cells included;
+  - a compared cell's prior rep without a grade;
+  - a cell the prior graded that the candidate did not, or ran but did not
+    grade;
+  - a rep that graded fewer reads than the cell's fullest readable grade on either side
+    (holodeck counts only the records the aligner emitted, so dropped reads
+    leave a smaller but self-consistent table);
+  - an unreadable table (zero total, bins not summing to `ALL`, or malformed),
+    under the verdict `candidate_unreadable` / `prior_unreadable` /
+    `both_unreadable`: a data error on that side, not a `REGRESSION`.
+
+  It prints a one-line summary (`N cells (k REGRESSION, …), worst Δmismapped
+  …`) counting each failing verdict by kind. With `--golden-ref-sha` (always,
+  on a bless) a candidate with **no** graded truth meth cell fails too; without
+  it (a routine sweep, which runs no sim sample) the gate reports "not
+  evaluated". On a bless a prior release with no grades at all also fails
+  (collect it), as Gate #2 fails an un-ingested golden.
+
+  A grade is keyed by SHA, sample, arch, rep and tool, not by the alignment it
+  graded. If a rep is re-aligned (`--forcerun`) and its new grade is never
+  ingested, the old grade for that rep still counts. Both alignments come from
+  the same SHA on the same simulated input, so this is accepted rather than
+  checked; re-run `collect` after any forced re-run before reading the gate.
+
+  **The v0.17.0 bless is the first comparison and straddles #756:** the v0.16.0
+  bare `--meth` arms ran collapsed scoring, the candidate's run genomic. The
+  gate passes it because genomic is better (sim-meth-place mismapped at
+  MAPQ >= 20: 203 -> 84 ppm), not because the arms are comparable.
 - **Gate #2 — vs-golden:** concordance against the previous blessed release
   (`--golden-ref-sha`); requires `>= 99.999%` on every golden-backed cell.
 - **Gate #3 — thread scaling:** pipeline efficiency across the thread ladder.
@@ -108,15 +150,22 @@ arena bump.
    `summary`). This is a *judgment* step; the full report and `bless-golden`
    both consume it. Writing it here (not before submit) keeps the preflight and
    ladder invariants intact through the run.
-8. **Check the gates:**
-   `cli bench regression --fg-labs-sha <sha> --prev <prev> --golden-ref-sha <prev>`
-   / `cli bench full-report`. **STOP on any gate failure** — do not promote.
+8. **Check the gates (required):**
+   `cli bench regression --fg-labs-sha <sha> --prev <prev> --golden-ref-sha <prev>`.
+   **STOP on any gate failure** — do not promote. This is the only command that
+   runs the gates (#1, #1b, #2, #3); `cli bench full-report` is supplemental
+   reading and runs none of them, so it cannot stand in for this step.
    Always pass `--golden-ref-sha`: without it Gate #2 checks only the
    comparisons that exist, so a run that produced or collected none of them
    passes. With it, Gate #2 fails closed — every rep of every sweep cell the
    golden's run holds must have a comparison, so the golden must be collected
    too — and prints a summary (`N cells, M compares, min concordance X%`) to
-   confirm it actually ran.
+   confirm it actually ran. Gate #1b needs the `--prev` release's accuracy rows,
+   so collect it too.
+   **The v0.17.0 bless renames the meth samples** (`meth-twist-emseq-trim-5M`,
+   `smoke-meth-trim`: UMI-trimmed input). The v0.16.0 golden holds only the
+   untrimmed names, so Gate #2 has no meth cell to compare that once and the
+   bwameth / minibwa caches realign the new names from scratch.
    **The first bless after v0.16.0 straddles a writer change:** the sweep stopped
    timing htslib's close-time fdatasync, so the candidate's walls drop by up to
    ~6 s per cell with no code change while the v0.16.0 walls it is gated against

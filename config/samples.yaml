@@ -98,10 +98,17 @@ samples:
     source: data/panel/agilent-qxt/downsampled-5M/
     fg_labs_flags: []
 
-  meth-twist-emseq-5M:
+  # Twist EM-seq with the 7 bp inline UMI + spacer (5-base UMI, 2-base skip)
+  # trimmed from the 5' end of both reads, as bwa-mem3's `--meth` docs require
+  # (fg-labs/bwa-mem3#756). Replaces `meth-twist-emseq-5M`, the same reads
+  # untrimmed: there `collapsed` scoring force-aligns the UMI and `genomic`
+  # soft-clips it, which inflates every meth comparison. A new name rather than
+  # a new `source` under the old one: the bwameth / minibwa caches and every
+  # historical result are keyed by sample name, so reusing it would mix inputs.
+  meth-twist-emseq-trim-5M:
     baseline_tool: bwameth
     reference: hg38-meth
-    source: data/meth/twist-emseq/downsampled-5M/
+    source: data/meth/twist-emseq/downsampled-5M-trim7/
     fg_labs_flags: ["--meth"]
 
   smoke-1M:
@@ -113,10 +120,11 @@ samples:
   # Tiny bisulfite smoke — ~10K pairs. Exercises the full meth pipeline
   # (hg38-meth reference, bwameth.py baseline, fg-labs --meth, meth queue)
   # without paying for a 5M-pair alignment. Use via `--target smoke_meth`.
-  smoke-meth:
+  # UMI-trimmed like meth-twist-emseq-trim-5M; replaces the untrimmed `smoke-meth`.
+  smoke-meth-trim:
     baseline_tool: bwameth
     reference: hg38-meth
-    source: data/smoke-meth/10K/
+    source: data/smoke-meth/10K-trim7/
     fg_labs_flags: ["--meth"]
 
   # 1M Hi-C read pairs (HG002, 2x151 PE). Chimeric / long-range-mate structure
@@ -191,8 +199,11 @@ samples:
 
   # Meth: D3 collapsed vs D3 genomic vs bwameth, graded on placement + MAPQ +
   # methylation-level correlation (sim-meth-place) and the variant-recovery
-  # headline (sim-meth-vars). The collapsed arm is the default `["--meth"]`;
-  # the genomic arm is its `*-genomic` sibling sharing this `source`.
+  # headline (sim-meth-vars). The bare `["--meth"]` arm runs the binary's
+  # DEFAULT scoring: collapsed through v0.16.0, genomic from v0.17.0
+  # (fg-labs/bwa-mem3#756), when it becomes identical to the `*-genomic` sibling
+  # sharing this `source`. Simulated reads carry no inline UMI, so these need no
+  # trim.
   sim-meth-place:
     baseline_tool: bwameth
     reference: hg38-meth
@@ -274,10 +285,10 @@ samples:
     source: data/wes/1kg-HG00100/downsampled-5M/
     fg_labs_flags: ["--fast"]
 
-  meth-twist-emseq-5M-fast:
+  meth-twist-emseq-trim-5M-fast:
     baseline_tool: bwameth
     reference: hg38-meth
-    source: data/meth/twist-emseq/downsampled-5M/
+    source: data/meth/twist-emseq/downsampled-5M-trim7/
     fg_labs_flags: ["--meth", "--fast"]
 
   # Remaining real datasets, so `--fast` is compared on every dataset the
@@ -555,10 +566,10 @@ samples:
     source: data/smoke/1M/
     fg_labs_flags: ["--fast"]
 
-  smoke-meth-fast:
+  smoke-meth-trim-fast:
     baseline_tool: bwameth
     reference: hg38-meth
-    source: data/smoke-meth/10K/
+    source: data/smoke-meth/10K-trim7/
     fg_labs_flags: ["--meth", "--fast"]
 
   sim-smoke-vars-fast:

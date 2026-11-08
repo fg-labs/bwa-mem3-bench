@@ -32,6 +32,11 @@
 #                      A sample is gated on confident_relocation when an entry that
 #                      names it declares that metric; budgets on different metrics
 #                      are never summed together.
+#   gating             true (default) or false. false = REPORT-ONLY: the sample's
+#                      number is still computed and shown against the budget, labeled
+#                      `report-only`, but an over-budget cell does not fail Gate #1.
+#                      A row is report-only only when every entry applying to it on
+#                      its metric says false, so one gating entry keeps it gated.
 #
 # Concordance budgets are set just above the empirically observed drift at
 # bwa-mem3 `bffae5a` (full bench, all archs x all samples x 5 reps): non-meth
@@ -70,8 +75,22 @@ divergences:
       so this budget is expressed on CONFIDENT PLACEMENT rather than full-record
       concordance: the share of primaries that either aligner maps at MAPQ >= 20
       which the two place at a different locus. Truth-based accuracy is gated
-      separately by the sim-meth holodeck eval, and release-to-release stability
-      by Gate #2.
+      by Gate #1b (sim-meth placement vs holodeck truth, no worse than the prior
+      release), and release-to-release stability by Gate #2.
+
+      REPORT-ONLY since bwa-mem3 v0.17.0 (`gating: false`). fg-labs/bwa-mem3#756
+      made `--meth-scoring genomic` the default. On the bench's own sim truth
+      (sim-meth-place, 10,724,652 reads) genomic is MORE accurate than the old
+      collapsed default: mismapped reads at MAPQ >= 20 fall from 203 to 84 per
+      10^6 reads, mismapped at MAPQ 60 from 166 to 25 per 10^6, and correct at
+      MAPQ >= 20 rises from 90.39% to 91.37% (v0.16.0 0a65bec1 vs the v0.17.0
+      candidate 1eaeb8ee, all reps identical). Yet it diverges further from
+      bwameth by design, because bwameth scores like collapsed: the v0.17.0
+      candidate measured ~0.8% relocated against this 0.25% budget. Relocation
+      against a different aligner therefore penalised an accuracy improvement,
+      so it is kept as a visible number and the correctness gate moved to sim
+      truth (Gate #1b). The candidate's default meth output is record-identical
+      to v0.16.0 run with `--meth-scoring genomic`, so #756 is the whole delta.
 
       Why not concordance. The bisulfite tag sets are not comparable at all and
       were always excluded (see METH_IGNORE_TAGS in workflow_config.py), but the
@@ -98,11 +117,19 @@ divergences:
       reads both sides are confident about, 77% of position differences are
       within 10 bp of the same unclipped 5' end (clip and indel placement).
       0.25% leaves room for smoke-meth's small-sample noise while still failing
-      on a doubling of meth-twist's relocations.
+      on a doubling of meth-twist's relocations. Those figures are for the
+      UNTRIMMED inputs; from v0.17.0 the meth samples are the UMI-trimmed
+      meth-twist-emseq-trim-5M / smoke-meth-trim (the 7 bp inline UMI + spacer
+      removed from both reads), which have no measurement at this budget yet.
+      The budget is left at 0.25% because it no longer gates. The retired
+      untrimmed names stay listed so `bench regression` over a historical run
+      still scores them on relocation (report-only) rather than falling back to
+      concordance at a zero budget.
     affected: meth_alignment
     metric: confident_relocation
+    gating: false
     expected_drift_pct: 0.25
-    samples: [meth-twist-emseq-5M, smoke-meth]
+    samples: [meth-twist-emseq-trim-5M, smoke-meth-trim, meth-twist-emseq-5M, smoke-meth]
 
   - id: FG-SUPP-ADDITIONS
     # Source PR not yet pinned: these additions are default-on and are NOT the

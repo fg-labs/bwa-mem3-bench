@@ -6,9 +6,13 @@ import json
 import math
 from pathlib import Path
 
+import pytest
+
 from bwa_mem3_bench.report.accuracy import (
     build_accuracy_class_table,
     build_accuracy_table,
+    mapq_bin_bounds,
+    mapq_bin_lower_bound,
     render_accuracy_markdown,
 )
 from bwa_mem3_bench.storage.sqlite import connect, upsert_accuracy, upsert_run
@@ -219,3 +223,31 @@ def test_build_accuracy_class_table_skips_empty_lowest_rep(tmp_path: Path) -> No
     # The populated rep-2 row is surfaced rather than dropped by the empty rep-1.
     assert list(classes["subclass"]) == ["all"]
     assert classes.iloc[0]["n_represented"] == 79  # noqa: PLR2004
+
+
+@pytest.mark.parametrize("label", ["0garbage", "20-29x", "60++", "20-", "-20", " 20-29", ""])
+def test_a_label_that_is_not_wholly_a_mapq_range_is_rejected(label: str) -> None:
+    """The whole label must be a MAPQ range, not just its leading digits."""
+    with pytest.raises(ValueError, match="unrecognised MAPQ bin"):
+        mapq_bin_lower_bound(label)
+
+
+@pytest.mark.parametrize(("label", "lower"), [("0", 0), ("1-9", 1), ("20-29", 20), ("60+", 60)])
+def test_holodeck_bin_labels_parse(label: str, lower: int) -> None:
+    """Every label holodeck writes parses to its lower bound."""
+    assert mapq_bin_lower_bound(label) == lower
+
+
+@pytest.mark.parametrize("label", ["19-0", "29-20", "1-0"])
+def test_a_reversed_mapq_range_is_rejected(label: str) -> None:
+    """``19-0`` must not read as a low bin: its upper bound is below its lower one."""
+    with pytest.raises(ValueError, match="reversed MAPQ bin"):
+        mapq_bin_lower_bound(label)
+
+
+@pytest.mark.parametrize(
+    ("label", "bounds"), [("0", (0, 0)), ("20-29", (20, 29)), ("5-5", (5, 5)), ("60+", (60, None))]
+)
+def test_mapq_bin_bounds(label: str, bounds: tuple[int, int | None]) -> None:
+    """A single value is its own range; ``N+`` has no upper bound."""
+    assert mapq_bin_bounds(label) == bounds

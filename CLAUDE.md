@@ -501,7 +501,7 @@ from `arch.baseline_arch` in `config/archs.yaml`:
   six `vs_default` census cells (paired, single-end, meth): the fast arm and its
   default sibling emit an identical tag set. So a `-fast` sample's tag set can be
   derived from its default arm's, which is how `smoke-1M-fast` / `smoke-meth-fast`
-  are covered despite never having been run.
+  (now `smoke-meth-trim-fast`) are covered despite never having been run.
 - **The full tag vocabulary is statically enumerable — use that, not just the
   census.** `grep -ohE 'bam_aux_append\(b, "[A-Za-z][A-Za-z0-9]"' src/*.cpp` plus
   the `kputsn_u("\tXX:` / `ksprintf(str, "\tXX:` forms across bwa-mem3's three
@@ -681,6 +681,61 @@ from `arch.baseline_arch` in `config/archs.yaml`:
   `Time taken for main_mem function` / `Index read time` lines over inferring it
   from wall minus `PROCESS()`.
 
+- **Meth correctness is gated on sim truth (Gate #1b), not on bwameth.** From
+  bwa-mem3 v0.17.0, fg-labs/bwa-mem3#756 made `--meth-scoring genomic` the
+  default. On `sim-meth-place` it is more accurate (mismapped at MAPQ >= 20:
+  203 -> 84 per 10^6 reads at v0.16.0 `0a65bec1` vs the v0.17.0 candidate
+  `1eaeb8ee`) yet relocates ~0.8% of confident reads against bwameth, which
+  scores like the old collapsed default. So `FG-METH-DIVERGENCE` is now
+  `gating: false`: Gate #1 shows the meth relocation rows labeled `report-only`
+  and never fails on them. Gate #1b (`report/meth_accuracy_gate.py`) does the
+  gating instead: every `truth` + `is_meth` cell graded in both releases must be
+  no worse than `--prev` on mismapped-at-MAPQ>=20 ppm (2% + 1 ppm tolerance) and
+  correct-at-MAPQ>=20 % (0.02 pp), bounds inclusive. Each release's median is
+  over its own graded reps, restricted to its trial reps when the cell has
+  trials. Scope comes from the config flags, not names. A graded cell the prior
+  never RAN is shown as `new_only` and not compared; `new_only` trusts the
+  prior's ingested trials as its inventory, as Gate #2 trusts the golden's. It
+  fails closed on: any candidate trial rep without a grade (new cells
+  included); a compared cell's prior rep without a grade; a cell the prior
+  graded that the candidate did not, or ran but did not grade; a rep that
+  graded fewer reads than the cell's fullest readable grade (holodeck counts only the
+  records the aligner emitted, so dropped reads leave a smaller, self-consistent
+  table); and an unreadable table (zero total, bins not summing to `ALL`, or
+  malformed), which fails under a verdict naming the side at fault --
+  `candidate_unreadable` / `prior_unreadable` / `both_unreadable` -- so a bad
+  prior table is never read as the candidate regressing. A candidate with NO
+  graded truth meth cell fails when `--golden-ref-sha` is given (a bless, the
+  same signal Gate #2 uses to expect data) and is "not evaluated" otherwise (the
+  `rule all` sweep). So a sweep checked WITH `--golden-ref-sha` fails Gate #1b
+  by design: drop the flag, or run the accuracy target too.
+  Prefer `gating: false` over deleting a registry entry or zeroing its budget:
+  the number stays visible. A row is report-only only when every entry applying
+  to it ON ITS SELECTED METRIC says `gating: false`; one gating entry on that
+  metric keeps it gated (budgets on the metric are summed as usual), while an
+  entry on the other metric has no say.
+- **The first Gate #1b comparison spans #756.** The v0.16.0 bare `--meth` sim
+  arms (`sim-meth-place`, `sim-meth-vars`, their `-fast` siblings) ran collapsed
+  scoring; the v0.17.0 candidate's run genomic, and its bare arm is
+  record-identical to its `-genomic` sibling. The gate passes that bless because
+  genomic is better, not because the two arms measure the same configuration.
+  Expect the bare and `-genomic` rows to read identically from v0.17.0 on.
+- **The real meth samples are UMI-trimmed and renamed from v0.17.0.** The
+  Twist EM-seq FASTQs carry a 7 bp inline UMI + spacer at the 5' end of both
+  reads; untrimmed, collapsed scoring force-aligned it and genomic soft-clips it
+  (53% of reads clip 5-7 bp), inflating every meth comparison. The active
+  samples are `meth-twist-emseq-trim-5M`, `smoke-meth-trim` and their `-fast`
+  siblings (`DataSource.trim_5p=7`, S3 `...-trim7/` prefixes). The old
+  `meth-twist-emseq-5M` / `smoke-meth` DataSources stay for reproducing old
+  releases, and the registry still lists them with the same relocation metric
+  and budget, so a historical run is scored on the same number -- but that row
+  is now report-only, so an over-budget legacy cell that used to fail Gate #1
+  no longer does. New names, not a new `source` under old names, because the bwameth /
+  minibwa caches and the published results key on the sample name. Consequences
+  for the first bless on them: Gate #2 has no meth golden (v0.16.0 holds only the
+  untrimmed names), and the bwameth and minibwa meth arms realign from scratch.
+  Measurements under the two names are not comparable.
+
 ## Known issues
 
 - fg-labs bwa-mem3 @ `690914f`: `mem_reg2aln` assertion on `avx512bw` variant
@@ -784,7 +839,7 @@ pixi run python -m bwa_mem3_bench.cli bench speedup --fg-labs-sha <fg-sha> \
   `align_minibwa.smk`; the `.meth.mbw` index is staged in S3). It is excluded
   from the default `minibwa` target only because that target's `MINIBWA_ARCHS`
   drops m7i (the meth arch) — but the rule runs meth fine, and the `--fast`
-  benchmark's `_fast_minibwa_targets()` runs minibwa on `meth-twist-emseq-5M`
+  benchmark's `_fast_minibwa_targets()` runs minibwa on `meth-twist-emseq-trim-5M`
   /m7i (mem bumped to 48 GB for the 12.8 GB `.meth.mbw`). minibwa also runs the
   sim-meth accuracy datasets. Compare meth on **placement + speed + memory
   only** — do NOT frame aligner-emitted methylation calls (XM tags,

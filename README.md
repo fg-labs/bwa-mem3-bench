@@ -198,7 +198,7 @@ what you are trying to find out.
 comparison at all), the six `FAST_REAL_BASES` siblings for `vs_default`, and the
 hard-coded `fast_smoke` targets. The allowlist is the measured union over a
 46-cell `tag-census` sweep covering every one of them except `smoke-1M-fast` and
-`smoke-meth-fast`, which have never been run. Those two are covered by
+`smoke-meth-fast` (now `smoke-meth-trim-fast`), which have never been run. Those two are covered by
 measurement rather than assumption: across all six `vs_default` cells — paired,
 single-end and meth — the fast arm and its default sibling emit an **identical**
 tag vocabulary, so each derives from its measured default arm.

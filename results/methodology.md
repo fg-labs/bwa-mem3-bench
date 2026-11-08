@@ -106,7 +106,16 @@ instead of whole-record concordance: the share of primary reads that either
 aligner maps at MAPQ >= 20 which the two place at a different locus. The two
 aligners score bisulfite reads differently by design, so record concordance
 mostly measures that scoring difference. Releases benchmarked before the metric
-existed show it as not measured.
+existed show it as not measured. From v0.17.0 it is informational: bwa-mem3's
+default bisulfite scoring became more accurate on simulated truth while
+diverging further from bwameth, so methylation correctness is judged against
+the simulated truth below instead.
+
+The methylation dataset carries a 7 bp inline UMI and spacer at the 5' end of
+both reads. Releases up to v0.16.0 aligned those reads untrimmed
+(`meth-twist-emseq-5M`); from v0.17.0 the 7 bases are trimmed before alignment
+(`meth-twist-emseq-trim-5M`), as bwa-mem3's `--meth` documentation requires.
+The two datasets are not directly comparable across that boundary.
 
 ## Accuracy
 

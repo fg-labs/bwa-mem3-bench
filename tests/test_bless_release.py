@@ -189,3 +189,13 @@ def test_plan_follows_routing_not_the_tuning_table(monkeypatch: pytest.MonkeyPat
     fake = dataclasses.replace(real, archs=rerouted)
     monkeypatch.setattr(_bless_release, "load_config", lambda _path: fake)
     assert _plan_variants() == {"avx512bw"}
+
+
+def test_plan_requires_bench_regression_and_not_full_report_as_a_substitute() -> None:
+    """Only `bench regression` runs the gates; `full-report` must not read as an alternative."""
+    plan = _bless_release._plan("a" * 40, "b" * 40)
+    gate_steps = [step for step in plan if "bench regression" in step]
+    assert len(gate_steps) == 1
+    assert "/ full-report" not in gate_steps[0]
+    assert "REQUIRED" in gate_steps[0]
+    assert "full-report is supplemental and runs no gate" in gate_steps[0]

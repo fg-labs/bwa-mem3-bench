@@ -27,6 +27,7 @@ import pandas as pd
 from bwa_mem3_bench import minibwa_sha
 from bwa_mem3_bench.arena_ladder import arena_releases
 from bwa_mem3_bench.release_allowances import ReleaseAllowance, sha_prefix_match
+from bwa_mem3_bench.report.accuracy import mapq_bin_lower_bound
 from bwa_mem3_bench.report.arena import arena_rows, arena_table_from_rows
 from bwa_mem3_bench.storage.ingest import baseline_sha_for
 from bwa_mem3_bench.storage.queries import query_df
@@ -66,12 +67,23 @@ class Dataset:
     title: str
     source: str
     notes: str = ""
+    # A RETIRED sample (no longer in config/samples.yaml) names the configured
+    # sample whose layout / comparator / flags it shares, so a historical
+    # release's snapshot can still be rebuilt from the database.
+    config_sample: str = ""
+
+    @property
+    def configured_as(self) -> str:
+        """The configured sample this dataset's alignment settings come from."""
+        return self.config_sample or self.sample
 
 
 # The datasets that get a page, in display order. Smoke samples and the
 # simulated truth sets (which get the accuracy page instead) are deliberately
-# absent. The source text is public provenance; keep it in step with
-# docs/data-setup.md.
+# absent. A release has trials for only one of the two meth entries: up to
+# v0.16.0 the untrimmed `meth-twist-emseq-5M` (retired from config, kept here so
+# those snapshots can still be rebuilt), from v0.17.0 the UMI-trimmed one. The
+# source text is public provenance; keep it in step with docs/data-setup.md.
 DATASETS: tuple[Dataset, ...] = (
     Dataset(
         sample="wgs-5M",
@@ -115,6 +127,18 @@ DATASETS: tuple[Dataset, ...] = (
         ),
     ),
     Dataset(
+        sample="meth-twist-emseq-trim-5M",
+        title="Methylation (Twist EM-seq)",
+        source=(
+            "Twist EM-seq library, downsampled to 5M read pairs, with the 7 bp inline UMI and "
+            "spacer trimmed from the 5' end of both reads, aligned with `--meth`."
+        ),
+        notes=(
+            "Compared against bwameth, not bwa-mem2, and run only on m7i (the methylation "
+            "index needs a 64 GB host)."
+        ),
+    ),
+    Dataset(
         sample="meth-twist-emseq-5M",
         title="Methylation (Twist EM-seq)",
         source="Twist EM-seq library, downsampled to 5M read pairs, aligned with `--meth`.",
@@ -122,6 +146,7 @@ DATASETS: tuple[Dataset, ...] = (
             "Compared against bwameth, not bwa-mem2, and run only on m7i (the methylation "
             "index needs a 64 GB host)."
         ),
+        config_sample="meth-twist-emseq-trim-5M",
     ),
     Dataset(
         sample="wgs-5M-alt",
@@ -282,7 +307,7 @@ def _dataset_snapshot(
     archs = sorted({arch for (sample, arch) in trials if sample == dataset.sample})
     if not archs:
         return None
-    sample_cfg = config.samples[dataset.sample]
+    sample_cfg = config.samples[dataset.configured_as]
     threads = config.threads
 
     speed = []
@@ -413,7 +438,7 @@ def _accuracy_snapshot(db_path: Path, sha: str) -> list[dict[str, Any]]:
         for blob in group["placement_json"]:
             bins = _json(blob).get("bins", {})
             total = sum(b["total"] for b in bins.values())
-            conf = [b for key, b in bins.items() if _bin_lower_bound(key) >= _CONFIDENT_MAPQ]
+            conf = [b for key, b in bins.items() if mapq_bin_lower_bound(key) >= _CONFIDENT_MAPQ]
             conf_total = sum(b["total"] for b in conf)
             if total and conf_total:
                 confident_share.append(conf_total / total * 100.0)
@@ -436,14 +461,6 @@ def _accuracy_snapshot(db_path: Path, sha: str) -> list[dict[str, Any]]:
             }
         )
     return out
-
-
-def _bin_lower_bound(key: str) -> int:
-    """Lower MAPQ bound of a holodeck bin key (``"0"``, ``"20-29"``, ``"60+"``)."""
-    match = re.match(r"\d+", key)
-    if match is None:
-        raise ValueError(f"unrecognised MAPQ bin {key!r}")
-    return int(match.group(0))
 
 
 def _accuracy_aligner(tool: str, *, fast: bool, meth: bool) -> str:
