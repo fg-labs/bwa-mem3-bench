@@ -128,6 +128,8 @@ def test_incomplete_golden_fails(
     out = capsys.readouterr().out
     assert "[FAIL] golden holds every cell" in out
     assert "2 cell(s) missing, e.g. wes-5M/c6a, wgs-5M/c6a" in out
+    # bless-golden --from-s3 copies from the run's BAMs, which expire after 180 days.
+    assert "restore or regenerate" in out
 
 
 def test_unlistable_golden_is_a_clean_fail(

@@ -161,7 +161,8 @@ def _golden_complete_check(golden_sha: str) -> tuple[bool, str]:
         shown = ", ".join(f"{s}/{a}" for s, a in missing[:_MAX_MISSING_SHOWN])
         return False, (
             f"{label} -- {len(missing)} cell(s) missing, e.g. {shown}; "
-            f"re-run bless-golden --from-s3 --fg-labs-sha {golden_sha}"
+            f"re-run bless-golden --from-s3 --fg-labs-sha {golden_sha}, which copies from "
+            "the run's BAMs; if those have expired, restore or regenerate them first"
         )
     return True, label
 

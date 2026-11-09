@@ -34,6 +34,9 @@ EXPECTED_ARENA_QUEUE_COUNT = 2
 # happily follow it wherever it moved.
 EXPECTED_OIDC_SUBJECT = "repo:fg-labs/bwa-mem3-bench:environment:image-build"
 
+# runs/ BAMs are deleted 180 days after upload (golden/ BAMs never are).
+EXPECTED_RUN_BAM_EXPIRATION_DAYS = 180
+
 
 def _synth(out_dir: Path) -> None:
     """Invoke `python app.py` from the cdk dir with CDK_OUTDIR override."""
@@ -232,3 +235,78 @@ def test_the_image_build_environment_requires_approval() -> None:
         "the `image-build` environment has no required_reviewers rule, so the "
         "OIDC subject pinned to it would let any branch push to ECR unattended"
     )
+
+
+def _bucket_lifecycle(tmp_path: Path) -> dict[str, object]:
+    out_dir = tmp_path / "cdk.out"
+    _synth(out_dir)
+    template = json.loads((out_dir / "BwaMem3BenchStorage.template.json").read_text())
+    (bucket,) = (
+        r["Properties"] for r in template["Resources"].values() if r["Type"] == "AWS::S3::Bucket"
+    )
+    lifecycle: dict[str, object] = bucket["LifecycleConfiguration"]
+    return lifecycle
+
+
+def test_bucket_lifecycle_matches_the_deployed_rules(tmp_path: Path) -> None:
+    """The stack declares every rule the live bucket runs, so a deploy cannot drop one.
+
+    The run-BAM rule filters by size (the workflow never tags its BAMs), deleted
+    versions expire after 30 days (the bucket is versioned), and stalled multipart
+    uploads are aborted after 7.
+    """
+    lifecycle = _bucket_lifecycle(tmp_path)
+    assert lifecycle["TransitionDefaultMinimumObjectSize"] == "all_storage_classes_128K"
+    rules = {r["Id"]: r for r in lifecycle["Rules"]}  # type: ignore[attr-defined]
+    assert all(r["Status"] == "Enabled" for r in rules.values())
+    runs = rules["runs-aligned-bam-lifecycle"]
+    assert runs["Prefix"] == "runs/"
+    assert runs["ObjectSizeGreaterThan"] == 100 * 1024 * 1024
+    assert "TagFilters" not in runs
+    assert runs["Transitions"] == [{"StorageClass": "GLACIER_IR", "TransitionInDays": 30}]
+    assert runs["ExpirationInDays"] == EXPECTED_RUN_BAM_EXPIRATION_DAYS
+    # No other enabled rule whose prefix covers runs/ may expire current versions sooner.
+    for rule in rules.values():
+        prefix = rule.get("Prefix", "")
+        if (
+            rule["Status"] == "Enabled"
+            and rule["Id"] != runs["Id"]
+            and ("runs/".startswith(prefix) or prefix.startswith("runs/"))
+        ):
+            assert "ExpirationInDays" not in rule, rule["Id"]
+            assert "ExpirationDate" not in rule, rule["Id"]
+    # The two housekeeping rules cover the whole bucket: no prefix, size or tag filter.
+    for rule_id in ("expire-noncurrent-versions", "abort-incomplete-multipart-uploads"):
+        rule = rules[rule_id]
+        assert rule.get("Prefix", "") == "", rule_id
+        assert "TagFilters" not in rule, rule_id
+        assert "ObjectSizeGreaterThan" not in rule, rule_id
+        assert "ObjectSizeLessThan" not in rule, rule_id
+    noncurrent = rules["expire-noncurrent-versions"]
+    assert noncurrent["NoncurrentVersionExpiration"] == {"NoncurrentDays": 30}
+    multipart = rules["abort-incomplete-multipart-uploads"]
+    assert multipart["AbortIncompleteMultipartUpload"] == {"DaysAfterInitiation": 7}
+
+
+def test_golden_bams_move_to_glacier_ir_and_never_expire(tmp_path: Path) -> None:
+    """Old goldens are kept (any release stays reproducible) but leave Standard.
+
+    Gate #2 reads only the current golden, which a release cadence under 30 days
+    keeps in Standard; older goldens move to Glacier IR and are never expired.
+    """
+    lifecycle = _bucket_lifecycle(tmp_path)
+    rules = {r["Id"]: r for r in lifecycle["Rules"]}  # type: ignore[attr-defined]
+    golden = rules["golden-bam-archive"]
+    assert golden["Status"] == "Enabled"
+    assert golden["Prefix"] == "golden/"
+    assert golden["ObjectSizeGreaterThan"] == 100 * 1024 * 1024
+    assert "TagFilters" not in golden
+    assert golden["Transitions"] == [{"StorageClass": "GLACIER_IR", "TransitionInDays": 30}]
+    # No enabled rule whose prefix covers golden/ may expire current versions.
+    for rule in rules.values():
+        prefix = rule.get("Prefix", "")
+        if rule["Status"] == "Enabled" and (
+            "golden/".startswith(prefix) or prefix.startswith("golden/")
+        ):
+            assert "ExpirationInDays" not in rule, rule["Id"]
+            assert "ExpirationDate" not in rule, rule["Id"]
