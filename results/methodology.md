@@ -76,7 +76,7 @@ AVX2/AVX-512 kernels; the Arm (NEON vs NEON) comparison is the like-for-like one
   index loading.
 
 From v0.13.0, bwa-mem3 can use a denser suffix-array index (`bwa-mem3 re-sa`),
-which gives byte-identical output, runs faster and uses more memory. Each release
+which gives identical alignment records, runs faster and uses more memory. Each release
 page states which index its bwa-mem3 arms used; the comparators always use their
 stock index.
 

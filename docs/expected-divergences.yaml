@@ -120,7 +120,8 @@ divergences:
       on a doubling of meth-twist's relocations. Those figures are for the
       UNTRIMMED inputs; from v0.17.0 the meth samples are the UMI-trimmed
       meth-twist-emseq-trim-5M / smoke-meth-trim (the 7 bp inline UMI + spacer
-      removed from both reads), which have no measurement at this budget yet.
+      removed from both reads). Measured at v0.17.0 (1eaeb8ee, genomic scoring
+      by default): meth-twist-emseq-trim-5M 0.8215%, smoke-meth-trim 0.8671%.
       The budget is left at 0.25% because it no longer gates. The retired
       untrimmed names stay listed so `bench regression` over a historical run
       still scores them on relocation (report-only) rather than falling back to

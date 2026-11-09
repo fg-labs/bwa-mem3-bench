@@ -231,10 +231,9 @@ def render_release_readme(snap: dict[str, Any]) -> str:
         "",
         "## Headline: same-host speed (arena)",
         "",
-        "Every aligner below ran interleaved on one dedicated on-demand host per "
-        f"architecture, aligning `{snap['arena_sample']}` with {snap['arena_threads']} "
-        "threads, "
-        "so these ratios are like-for-like. Speedup is the other aligner's wall time "
+        "Every aligner below ran on one dedicated on-demand host per architecture, "
+        f"aligning `{snap['arena_sample']}` with {snap['arena_threads']} threads. "
+        f"{_arena_schedule_note(snap)} Speedup is the other aligner's wall time "
         f"divided by bwa-mem3's: above 1 means bwa-mem3 is faster. {_arena_index_note(snap)}",
         "",
         "Every row, earlier releases included, was re-measured in this release's arena run, "
@@ -264,19 +263,46 @@ def render_release_readme(snap: dict[str, Any]) -> str:
         f"Speed and agreement for each dataset, across {_instance_count(snap)} AWS instance types:",
         "",
     ]
+    all_archs = {cell["arch"] for d in snap["datasets"] for cell in d["speed"]}
     for d in snap["datasets"]:
-        lines.append(f"- [{d['sample']}]({d['sample']}.md): {d['title']}")
+        archs = sorted({cell["arch"] for cell in d["speed"]})
+        only = f" ({', '.join(archs)} only)" if archs and set(archs) != all_archs else ""
+        lines.append(f"- [{d['sample']}]({d['sample']}.md): {d['title']}{only}")
     lines += [
         "",
         "## Also",
         "",
         "- [Accuracy against simulated truth](accuracy.md)",
         "- [Thread scaling](scaling.md)",
-        f"- Agreement with the previous release ({prev['version']}) is on each dataset page.",
+        _previous_agreement_line(snap["datasets"], prev["version"]),
         f"- Raw aggregates: [`{_SNAPSHOT_NAME}`]({_SNAPSHOT_NAME})",
         "",
     ]
     return "\n".join(lines)
+
+
+def _arena_schedule_note(snap: dict[str, Any]) -> str:
+    """How the arena ordered its runs, which bounds what its ratios compare.
+
+    A paired arena (rows carry ``vs_prior_note``) groups arms into blocks by index
+    family and keeps only the candidate and the previous release (and their ``--fast``
+    siblings) back-to-back in every round; an older arena ran each aligner's reps
+    back-to-back. Neither interleaves every aligner, so the page must not say so.
+    """
+    paired = any("vs_prior_note" in row for rows in snap["arena"].values() for row in rows)
+    if paired:
+        return (
+            "Runs were grouped into blocks by index family, and in each round of a block "
+            "every arm ran once, in shuffled order. This release and the previous one "
+            "always ran back-to-back, so their ratio is a paired, like-for-like estimate. "
+            "Other arms in a block shared its rounds but were not always adjacent, and a "
+            "ratio across blocks, such as against another aligner, can also carry a "
+            "change in host state between them."
+        )
+    return (
+        "Each aligner's runs ran back-to-back, in shuffled aligner order, so the ratios "
+        "share a host but not a moment of host state."
+    )
 
 
 def _arena_index_note(snap: dict[str, Any]) -> str:
@@ -294,13 +320,13 @@ def _arena_index_note(snap: dict[str, Any]) -> str:
     if not dense:
         return (
             f"bwa-mem3 {snap['version']} used a denser stride-{stride} suffix-array index "
-            "(byte-identical output, more memory, reflected in its RSS); every other arm "
+            "(identical alignment records, more memory, reflected in its RSS); every other arm "
             "used its stock index."
         )
     span = dense[0] if len(dense) == 1 else f"{dense[0]} to {dense[-1]}"
     return (
         f"bwa-mem3 {snap['version']} and releases {span} used a denser stride-{stride} "
-        "suffix-array index (byte-identical output, more memory, reflected in their RSS); "
+        "suffix-array index (identical alignment records, more memory, reflected in their RSS); "
         f"{release_label_to_version(_ARENA_DENSE_AFTER)} and older releases, and the other "
         "aligners, used their stock index."
     )
@@ -316,9 +342,27 @@ def _sweep_index_note(snap: dict[str, Any]) -> str:
     if stride == 8:  # noqa: PLR2004
         return "bwa-mem3 used its stock stride-8 suffix-array index, as did the comparator."
     return (
-        f"bwa-mem3 used a denser stride-{stride} suffix-array index (byte-identical "
-        "output, faster, more memory); the comparator used its stock index."
+        f"bwa-mem3 used a denser stride-{stride} suffix-array index (identical alignment "
+        "records, faster, more memory); the comparator used its stock index."
     )
+
+
+def _previous_agreement_line(datasets: list[dict[str, Any]], prev: str) -> str:
+    """The README bullet saying which dataset pages carry agreement with ``prev``.
+
+    A dataset whose page reports the comparison as not measured (e.g. a sample the
+    previous golden does not hold, so there is nothing to compare against) is named
+    rather than implied to have it.
+    """
+    measured = [d["sample"] for d in datasets if d["agreement"].get("vs-golden")]
+    missing = [d["sample"] for d in datasets if not d["agreement"].get("vs-golden")]
+    lead = f"- Agreement with the previous release ({prev})"
+    if not missing:
+        return f"{lead} is on each dataset page."
+    if not measured:
+        return f"{lead} was not measured for this release."
+    pages = ", ".join(f"[{s}]({s}.md)" for s in measured)
+    return f"{lead} is on the pages for {pages}; it was not measured for {', '.join(missing)}."
 
 
 def _instance_count(snap: dict[str, Any]) -> int:

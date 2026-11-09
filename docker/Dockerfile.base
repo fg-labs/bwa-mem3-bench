@@ -520,6 +520,23 @@ RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-relea
     cd /build && \
     rm -rf /build/arena-releases/v160
 
+RUN git clone --quiet https://github.com/fg-labs/bwa-mem3.git /build/arena-releases/v170 && \
+    cd /build/arena-releases/v170 && \
+    git fetch --quiet origin 1eaeb8ee31f997a14c82c888efc0b43329a6b9c4 && \
+    git checkout --quiet 1eaeb8ee31f997a14c82c888efc0b43329a6b9c4 && \
+    git submodule update --init --recursive && \
+    { sed -i '/^static inline unsigned long long __rdtsc/,/^}$/d' src/utils.h || true; } && \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        make arch=arm64 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto arch=arm64 CXX=clang++ CC=clang; \
+    else \
+        make BASELINE_ARCH=avx2 -j"$(nproc)" CXX=clang++ CC=clang && \
+            require-lto BASELINE_ARCH=avx2 CXX=clang++ CC=clang; \
+    fi && \
+    install -Dm755 bwa-mem3 /out/bin/bwa-mem3.v170 && \
+    cd /build && \
+    rm -rf /build/arena-releases/v170
+
 # Install tricorder (fg-labs/tricord) for benchmarking the alignment subprocess
 # without snakemake's `benchmark:` directive. Tricord requires Rust 1.94+, so
 # install a separate stable toolchain rather than retraining 1.85 above. We

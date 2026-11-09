@@ -1034,8 +1034,8 @@ def test_meminfo_snapshot_reads_the_expected_proc_fields(tmp_path: Path) -> None
 # A candidate SHA that is not on the arena ladder. A ladder SHA (e.g. the latest
 # release's) is refused by the candidate guard once the inputs exist.
 _NEW_CANDIDATE_SHA = "1234567890abcdef1234567890abcdef12345678"
-_LADDER_SHA = "0a65bec1f47f8b773cf40b85d16833de010c8107"  # v160
-_LADDER_ALIAS_SHA = "fa688f0bc019968844073ae7d3fe124cf66d0011"  # v0.16.0's tag commit
+_LADDER_SHA = "1eaeb8ee31f997a14c82c888efc0b43329a6b9c4"  # v170
+_LADDER_ALIAS_SHA = "58d55c1845acddda82bf8ad0b6518400f9c3036f"  # v0.17.0's tag commit
 
 
 def _arena_dry_run(tmp_path: Path, sha: str, *config: str) -> subprocess.CompletedProcess[str]:
@@ -1081,12 +1081,12 @@ def test_arena_refuses_a_candidate_already_on_the_ladder(tmp_path: Path, sha: st
     _touch_arena_inputs(tmp_path, sha)
     result = _arena_dry_run(tmp_path, sha)
     assert result.returncode != 0
-    assert "already on the arena ladder as 'v160'" in result.stdout + result.stderr
+    assert "already on the arena ladder as 'v170'" in result.stdout + result.stderr
 
 
 def test_arena_allows_a_ladder_sha_when_no_candidate_arm_runs(tmp_path: Path) -> None:
     """A narrowed run of releases only (no `fg-labs-*` arm) has nothing to self-pair."""
-    labels = "arena_labels=v151,v160"
+    labels = "arena_labels=v160,v170"
     _touch_arena_inputs(tmp_path, _LADDER_SHA, labels)
     result = _arena_dry_run(tmp_path, _LADDER_SHA, labels)
     assert result.returncode == 0, (result.stdout + result.stderr)[-2000:]
