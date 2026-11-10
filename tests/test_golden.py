@@ -322,12 +322,28 @@ def test_list_recursive_needs_no_aws_cli(monkeypatch: pytest.MonkeyPatch) -> Non
         assert golden.list_recursive("s3://B/runs/abc/") == ["runs/abc/k"]
 
 
+def test_parse_run_cells_reads_only_rep_meta_jsons() -> None:
+    sha = "abc"
+    keys = [
+        f"runs/{sha}/wgs-5M/c6a/rep-1/benchmarks/meta.json",
+        f"runs/{sha}/wgs-5M/c6a/rep-2/benchmarks/meta.json",
+        f"runs/{sha}/wes-5M/c8g/rep-1/benchmarks/meta.json",
+        f"runs/{sha}/hic-1M/c6a/rep-1/aligned.bam",  # a BAM alone is not a cell
+        f"runs/{sha}/hic-1M/c6a/rep-backup/benchmarks/meta.json",  # not a rep dir
+        f"runs/{sha}/hic-1M/c6a/rep-1/compare/meta.json",  # wrong directory
+        f"runs/{sha}/meta.json",
+        "runs/other/sbx-1M/c6a/rep-1/benchmarks/meta.json",  # another run
+    ]
+    assert golden.parse_run_cells(keys, sha) == frozenset({("wgs-5M", "c6a"), ("wes-5M", "c8g")})
+
+
 def test_missing_golden_cells_reports_run_cells_absent_from_golden() -> None:
     sha = "abc"
     _, patched = _patch_prefixes(
         {
             f"runs/{sha}/": [
-                f"runs/{sha}/{s}/c6a/rep-1/aligned.bam" for s in ("hic-1M", "wes-5M", "wgs-5M")
+                f"runs/{sha}/{s}/c6a/rep-1/benchmarks/meta.json"
+                for s in ("hic-1M", "wes-5M", "wgs-5M")
             ],
             f"golden/fg-labs-{sha}/": [f"golden/fg-labs-{sha}/hic-1M/c6a/aligned.bam"],
         }
@@ -336,8 +352,65 @@ def test_missing_golden_cells_reports_run_cells_absent_from_golden() -> None:
         assert golden.missing_golden_cells("B", sha) == [("wes-5M", "c6a"), ("wgs-5M", "c6a")]
 
 
+def test_run_and_golden_parsers_skip_empty_sample_or_arch() -> None:
+    """A key with an empty path component is not a cell, so it cannot be reported missing."""
+    sha = "abc"
+    assert (
+        golden.parse_run_cells(
+            [
+                f"runs/{sha}//c6a/rep-1/benchmarks/meta.json",
+                f"runs/{sha}/wgs-5M//rep-1/benchmarks/meta.json",
+            ],
+            sha,
+        )
+        == frozenset()
+    )
+    assert (
+        golden.parse_run_reps(
+            [f"runs/{sha}//c6a/rep-1/aligned.bam", f"runs/{sha}/wgs-5M//rep-1/aligned.bam"], sha
+        )
+        == {}
+    )
+    assert (
+        golden.parse_golden_cells(
+            [f"golden/fg-labs-{sha}//c6a/aligned.bam", f"golden/fg-labs-{sha}/wgs-5M//aligned.bam"],
+            sha,
+        )
+        == frozenset()
+    )
+
+
+def test_missing_golden_cells_counts_cells_with_a_bam_or_a_meta_json() -> None:
+    """A cell is in the run if either file is: older runs may hold a BAM with no meta.json."""
+    sha = "abc"
+    _, patched = _patch_prefixes(
+        {
+            f"runs/{sha}/": [
+                f"runs/{sha}/sim-wgs/c6a/rep-1/aligned.bam",
+                f"runs/{sha}/wgs-5M/c6a/rep-1/benchmarks/meta.json",
+            ],
+            f"golden/fg-labs-{sha}/": [],
+        }
+    )
+    with patched:
+        assert golden.missing_golden_cells("B", sha) == [("sim-wgs", "c6a"), ("wgs-5M", "c6a")]
+
+
+def test_missing_golden_cells_survives_expired_run_bams() -> None:
+    """The run BAMs expire after 180 days; the per-rep meta.json does not."""
+    sha = "abc"
+    _, patched = _patch_prefixes(
+        {
+            f"runs/{sha}/": [f"runs/{sha}/wgs-5M/c6a/rep-1/benchmarks/meta.json"],
+            f"golden/fg-labs-{sha}/": [f"golden/fg-labs-{sha}/wgs-5M/c6a/aligned.bam"],
+        }
+    )
+    with patched:
+        assert golden.missing_golden_cells("B", sha) == []
+
+
 def test_missing_golden_cells_rejects_an_empty_run_tree() -> None:
-    """With no run BAMs there is nothing to check completeness against: fail, don't pass."""
+    """With no run cells there is nothing to check completeness against: fail, don't pass."""
     _, patched = _patch_prefixes({})
-    with patched, pytest.raises(RuntimeError, match="no aligned.bam"):
+    with patched, pytest.raises(RuntimeError, match="no aligned.bam or benchmarks/meta.json"):
         golden.missing_golden_cells("B", "abc")

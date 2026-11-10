@@ -163,6 +163,10 @@ _S3_URI_RE = re.compile(r"s3://([^/]+)/(.*)")
 # An aligned-BAM key relative to runs/<sha>/ is <sample>/<arch>/rep-<N>/aligned.bam.
 _RUN_BAM_PARTS = 4
 
+# A rep's meta.json key relative to runs/<sha>/ is
+# <sample>/<arch>/rep-<N>/benchmarks/meta.json.
+_RUN_META_PARTS = 5
+
 # A golden BAM key relative to golden/fg-labs-<sha>/ is <sample>/<arch>/aligned.bam.
 _GOLDEN_BAM_PARTS = 3
 
@@ -193,11 +197,30 @@ def parse_run_reps(keys: Iterable[str], fg_labs_sha: str) -> dict[tuple[str, str
         if not key.startswith(prefix) or not key.endswith("/aligned.bam"):
             continue
         rel = key[len(prefix) :].split("/")
-        if len(rel) != _RUN_BAM_PARTS or not is_rep_dir(rel[2]):
+        if len(rel) != _RUN_BAM_PARTS or not (rel[0] and rel[1]) or not is_rep_dir(rel[2]):
             continue
         cell = (rel[0], rel[1])
         reps[cell] = reps.get(cell, 0) + 1
     return reps
+
+
+def parse_run_cells(keys: Iterable[str], fg_labs_sha: str) -> frozenset[tuple[str, str]]:
+    """Map the object keys under ``runs/<sha>/`` to the ``(sample, arch)`` cells it aligned.
+
+    Reads ``<sample>/<arch>/rep-<N>/benchmarks/meta.json`` rather than ``aligned.bam``.
+    The align rule writes both, but the bucket lifecycle expires run BAMs after 180
+    days and ``aws cleanup-s3`` deletes older runs' BAMs sooner, while the small
+    per-rep artifacts are kept for good.
+    """
+    prefix = f"runs/{fg_labs_sha}/"
+    cells: set[tuple[str, str]] = set()
+    for key in keys:
+        if not key.startswith(prefix) or not key.endswith("/benchmarks/meta.json"):
+            continue
+        rel = key[len(prefix) :].split("/")
+        if len(rel) == _RUN_META_PARTS and rel[0] and rel[1] and is_rep_dir(rel[2]):
+            cells.add((rel[0], rel[1]))
+    return frozenset(cells)
 
 
 def parse_golden_cells(keys: Iterable[str], golden_ref_sha: str) -> frozenset[tuple[str, str]]:
@@ -208,7 +231,7 @@ def parse_golden_cells(keys: Iterable[str], golden_ref_sha: str) -> frozenset[tu
         if not key.startswith(prefix) or not key.endswith("/aligned.bam"):
             continue
         rel = key[len(prefix) :].split("/")
-        if len(rel) == _GOLDEN_BAM_PARTS:
+        if len(rel) == _GOLDEN_BAM_PARTS and rel[0] and rel[1]:
             cells.add((rel[0], rel[1]))
     return frozenset(cells)
 
@@ -253,17 +276,25 @@ def missing_golden_cells(bucket: str, golden_ref_sha: str) -> list[tuple[str, st
     so the missing samples are then never compared at all -- the v0.12.0 golden
     lost every sample after ``sim-wgs-vars-compat`` this way, and v0.13.0 shipped
     with no vs-golden check on wgs-5M or wes-5M. The run tree is the reference for
-    "complete": ``cleanup-s3`` keeps blessed-golden runs' BAMs.
+    "complete": a cell counts if any rep has an ``aligned.bam`` or a
+    ``benchmarks/meta.json``. The ``meta.json`` (:func:`parse_run_cells`) lets the
+    check outlive the run's BAMs; the BAM covers an older run that lacks one.
 
-    :raises RuntimeError: if the run tree holds no aligned BAMs, since there is
-        then nothing to check the golden against -- reporting "nothing missing"
+    :raises RuntimeError: if the run tree holds neither file for any rep, since there
+        is then nothing to check the golden against -- reporting "nothing missing"
         would pass a golden that was never verified.
     """
     run_uri = f"s3://{bucket}/runs/{golden_ref_sha}/"
-    run_cells = parse_run_reps(list_recursive(run_uri), golden_ref_sha)
+    run_keys = list_recursive(run_uri)
+    run_cells = (
+        parse_run_cells(run_keys, golden_ref_sha) | parse_run_reps(run_keys, golden_ref_sha).keys()
+    )
     if not run_cells:
-        raise RuntimeError(f"no aligned.bam files under {run_uri} to check the golden against")
+        raise RuntimeError(
+            f"no aligned.bam or benchmarks/meta.json files under {run_uri} "
+            "to check the golden against"
+        )
     golden_cells = parse_golden_cells(
         list_recursive(f"s3://{bucket}/golden/fg-labs-{golden_ref_sha}/"), golden_ref_sha
     )
-    return sorted(set(run_cells) - golden_cells)
+    return sorted(run_cells - golden_cells)

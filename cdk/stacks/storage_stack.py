@@ -86,10 +86,20 @@ class StorageStack(cdk.Stack):
             versioned=True,
             encryption=s3.BucketEncryption.S3_MANAGED,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            # S3 skips transitions for objects under 128 KiB, so the small per-run
+            # artifacts `collect` ingests never pay a Glacier minimum.
+            transition_default_minimum_object_size=(
+                s3.TransitionDefaultMinimumObjectSize.ALL_STORAGE_CLASSES_128_K
+            ),
             lifecycle_rules=[
+                # Aligned BAMs under runs/<sha>/: Glacier IR after 30 days, gone
+                # after 180. Filtered by size, not by tag, because the workflow
+                # never tags what it writes; the per-run artifacts are far below
+                # 100 MiB. `aws cleanup-s3` deletes older runs' BAMs sooner.
                 s3.LifecycleRule(
                     id="runs-aligned-bam-lifecycle",
                     prefix="runs/",
+                    object_size_greater_than=100 * 1024 * 1024,
                     transitions=[
                         s3.Transition(
                             storage_class=s3.StorageClass.GLACIER_INSTANT_RETRIEVAL,
@@ -97,7 +107,31 @@ class StorageStack(cdk.Stack):
                         ),
                     ],
                     expiration=cdk.Duration.days(180),
-                    tag_filters={"artifact": "aligned-bam"},
+                ),
+                # Golden BAMs under golden/fg-labs-<sha>/: kept forever, so every
+                # blessed release stays reproducible, but moved to Glacier IR after
+                # 30 days. Gate #2 reads only the current golden, which a release
+                # cadence under 30 days keeps in Standard.
+                s3.LifecycleRule(
+                    id="golden-bam-archive",
+                    prefix="golden/",
+                    object_size_greater_than=100 * 1024 * 1024,
+                    transitions=[
+                        s3.Transition(
+                            storage_class=s3.StorageClass.GLACIER_INSTANT_RETRIEVAL,
+                            transition_after=cdk.Duration.days(30),
+                        ),
+                    ],
+                ),
+                # The bucket is versioned, so an overwrite or delete leaves a
+                # noncurrent version; drop those after 30 days.
+                s3.LifecycleRule(
+                    id="expire-noncurrent-versions",
+                    noncurrent_version_expiration=cdk.Duration.days(30),
+                ),
+                s3.LifecycleRule(
+                    id="abort-incomplete-multipart-uploads",
+                    abort_incomplete_multipart_upload_after=cdk.Duration.days(7),
                 ),
             ],
         )
