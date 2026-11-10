@@ -265,6 +265,7 @@ ARENA_RELEASES = [
     ("v150", "cbe2db325cf057eff03a7ffb3ebd629453d0fd49"),
     ("v151", "a6b2ba1eb5cda2efbd45d22e2010b8afc87f928e"),
     ("v160", "0a65bec1f47f8b773cf40b85d16833de010c8107"),
+    ("v170", "1eaeb8ee31f997a14c82c888efc0b43329a6b9c4"),
 ]
 
 # The release immediately preceding today's candidate -- the one arm the

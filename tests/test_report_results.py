@@ -396,6 +396,57 @@ def test_every_published_dataset_is_a_configured_sample(config: WorkflowConfig) 
             assert dataset.sample not in config.samples
 
 
+def _dataset_line(readme: str, sample: str) -> str:
+    """The README's dataset-list bullet for ``sample``."""
+    return next(line for line in readme.splitlines() if line.startswith(f"- [{sample}]("))
+
+
+def test_readme_marks_a_dataset_run_on_fewer_instance_types(snap: dict[str, Any]) -> None:
+    """A dataset measured on fewer instance types than the release names them."""
+    # The fixture runs meth on m7i only and wgs-5M on c6a and c8g; give wgs-5M an m7i
+    # cell so it covers every instance type the release ran on.
+    wgs = next(d for d in snap["datasets"] if d["sample"] == "wgs-5M")
+    full = {**wgs, "speed": [*wgs["speed"], {**wgs["speed"][0], "arch": "m7i"}]}
+    changed = {
+        **snap,
+        "datasets": [full if d["sample"] == "wgs-5M" else d for d in snap["datasets"]],
+    }
+    readme = results.render_release_readme(changed)
+    assert _dataset_line(readme, "meth-twist-emseq-trim-5M").endswith("(m7i only)")
+    assert "only" not in _dataset_line(readme, "wgs-5M")
+
+
+def test_readme_names_the_datasets_without_previous_release_agreement(
+    snap: dict[str, Any],
+) -> None:
+    """The README names a dataset with no agreement against the previous release."""
+    prev = snap["previous"]["version"]
+    # The fixture's meth dataset has no vs-golden cells (its golden predates it).
+    also = results.render_release_readme(snap).split("## Also")[1]
+    assert "is on each dataset page" not in also
+    assert "was not measured for meth-twist-emseq-trim-5M." in also
+    assert "[wgs-5M](wgs-5M.md)" in also.split("was not measured")[0]
+
+    golden = next(d for d in snap["datasets"] if d["sample"] == "wgs-5M")["agreement"]
+    every = {
+        **snap,
+        "datasets": [
+            {**d, "agreement": {**d["agreement"], "vs-golden": golden["vs-golden"]}}
+            for d in snap["datasets"]
+        ],
+    }
+    assert (
+        f"- Agreement with the previous release ({prev}) is on each dataset page."
+        in results.render_release_readme(every)
+    )
+
+    none = {**snap, "datasets": [{**d, "agreement": {}} for d in snap["datasets"]]}
+    assert (
+        f"- Agreement with the previous release ({prev}) was not measured for this release."
+        in results.render_release_readme(none)
+    )
+
+
 def test_alt_rep_note_counts_instance_types_not_architectures() -> None:
     # The speed table has one row per instance type, and several share an
     # architecture (c6a / c7a / c7i are all x86), so "per architecture" names the wrong unit.
@@ -543,6 +594,27 @@ def test_a_paired_arena_publishes_the_paired_estimate(
     assert "3 paired rounds (comparators 3), median" in readme
 
 
+def test_arena_schedule_is_described_by_the_snapshot_it_renders(
+    tmp_path: Path, config: WorkflowConfig, snap: dict[str, Any]
+) -> None:
+    """Neither arena interleaves every aligner, so neither page may claim it does."""
+    legacy = results.render_release_readme(snap).split("## Headline")[1].split("###")[0]
+    assert "ran interleaved" not in legacy
+    assert "back-to-back" in legacy
+
+    db = tmp_path / "bench.db"
+    _seed(db)
+    _pair_the_fixture_arena(db, {1: 40.0, 2: 40.0, 3: 40.0})
+    paired = results.render_release_readme(_snapshot(db, config))
+    headline = paired.split("## Headline")[1].split("###")[0]
+    assert "ran interleaved" not in headline
+    assert "blocks by index family" in headline
+    # Only the candidate and the previous release are guaranteed adjacent in each round.
+    assert "always ran back-to-back" in headline
+    assert "paired, like-for-like" in headline
+    assert "not always adjacent" in headline
+
+
 def test_an_inconclusive_paired_estimate_is_marked_on_the_page(
     tmp_path: Path, config: WorkflowConfig
 ) -> None:
@@ -649,6 +721,18 @@ def test_arena_index_note_names_the_dense_earlier_releases(snap: dict[str, Any])
     assert "releases v0.13.0 to v0.15.1 used a denser stride-2" in note
     assert "v0.12.0 and older releases" in note
     assert "every other arm" not in note
+
+
+@pytest.mark.parametrize("version", ["v0.13.0", "v0.16.0"])
+def test_dense_index_notes_claim_identical_records_not_bytes(
+    snap: dict[str, Any], version: str
+) -> None:
+    """A denser index leaves the alignment records unchanged, not the BAM bytes: compression
+    and the header can still differ, so the notes must not imply matching checksums."""
+    changed = {**snap, "version": version, "sweep_sa_stride": 4}
+    for note in (results._arena_index_note(changed), results._sweep_index_note(changed)):
+        assert "identical alignment records" in note
+        assert "byte-identical" not in note
 
 
 def test_arena_readme_says_every_row_comes_from_this_release_run(snap: dict[str, Any]) -> None:

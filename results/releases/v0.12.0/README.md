@@ -9,7 +9,7 @@ How these numbers were produced, and what each comparison means, is in [the meth
 
 ## Headline: same-host speed (arena)
 
-Every aligner below ran interleaved on one dedicated on-demand host per architecture, aligning `wgs-5M` with 16 threads, so these ratios are like-for-like. Speedup is the other aligner's wall time divided by bwa-mem3's: above 1 means bwa-mem3 is faster. Every aligner used its stock index.
+Every aligner below ran on one dedicated on-demand host per architecture, aligning `wgs-5M` with 16 threads. Each aligner's runs ran back-to-back, in shuffled aligner order, so the ratios share a host but not a moment of host state. Speedup is the other aligner's wall time divided by bwa-mem3's: above 1 means bwa-mem3 is faster. Every aligner used its stock index.
 
 Every row, earlier releases included, was re-measured in this release's arena run, so the rows compare with each other but not with the walls on another release's page: the arena's method has changed between releases (see [the methodology page](../../methodology.md)).
 
@@ -81,12 +81,12 @@ Speed and agreement for each dataset, across 6 AWS instance types:
 - [panel-agilent-qxt-5M](panel-agilent-qxt-5M.md): Targeted panel (Agilent SureSelect QXT)
 - [hic-1M](hic-1M.md): Hi-C (HG002)
 - [sbx-1M](sbx-1M.md): Roche SBX (HG002, single-end)
-- [meth-twist-emseq-5M](meth-twist-emseq-5M.md): Methylation (Twist EM-seq)
+- [meth-twist-emseq-5M](meth-twist-emseq-5M.md): Methylation (Twist EM-seq) (m7i only)
 - [wgs-5M-alt](wgs-5M-alt.md): Whole genome, ALT-aware (HG00096)
 
 ## Also
 
 - [Accuracy against simulated truth](accuracy.md)
 - [Thread scaling](scaling.md)
-- Agreement with the previous release (v0.11.0) is on each dataset page.
+- Agreement with the previous release (v0.11.0) is on the pages for [wgs-5M](wgs-5M.md), [wes-5M](wes-5M.md), [panel-agilent-qxt-5M](panel-agilent-qxt-5M.md), [hic-1M](hic-1M.md), [sbx-1M](sbx-1M.md), [meth-twist-emseq-5M](meth-twist-emseq-5M.md); it was not measured for wgs-5M-alt.
 - Raw aggregates: [`data.json`](data.json)

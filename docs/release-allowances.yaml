@@ -966,3 +966,62 @@ allowances:
     # the tag resolves here.
     aliases:
       - fa688f0bc019968844073ae7d3fe124cf66d0011   # v0.16.0 release tag (release-please #637; src/ identical to 0a65bec1)
+
+  - to_sha: 1eaeb8ee31f997a14c82c888efc0b43329a6b9c4
+    pr: fg-labs/bwa-mem3#756
+    date: 2026-11-08
+    summary: >-
+      bwa-mem3 v0.17.0. The only alignment change on this corpus is
+      fg-labs/bwa-mem3#756, which makes `--meth-scoring genomic` (-B 4) the
+      `--meth` default in place of collapsed (-B 2). Every DNA cell is unchanged
+      against the v0.16.0 golden. The meth change is confirmed as the sole
+      cause by record hashes on m7i.
+
+      This is also the first bless on the UMI-trimmed meth inputs
+      (fg-labs/bwa-mem3-bench#137): `meth-twist-emseq-trim-5M` and
+      `smoke-meth-trim` drop the 7 bp inline UMI + spacer from both reads, as
+      bwa-mem3's `--meth` docs require. The v0.16.0 golden holds only the
+      untrimmed names, so Gate #2 has no meth cell to compare this once (36
+      cells, 180 compares, min concordance 100.0000%, all DNA).
+
+      Gate #1 passes: all 70 gating DNA vs-upstream cells are 100.0000%. Meth
+      confident relocation against bwameth is 0.8215% (meth-twist-emseq-trim-5M)
+      and 0.8671% (smoke-meth-trim). That is over the 0.25% budget, but the rows
+      are report-only from #137 on (FG-METH-DIVERGENCE, gating: false), because
+      genomic scoring diverges from bwameth by design. Placement correctness is
+      gated by the new Gate #1b against sim truth instead, and passes on all 6
+      cells. Genomic scoring improves the bare `--meth` arms: mismapped at
+      MAPQ >= 20, sim-meth-place 203.3 -> 84.0 ppm and sim-meth-vars
+      198.7 -> 111.8 ppm; correct at MAPQ >= 20, +0.99 pp and +2.10 pp. The
+      `-genomic` arms are unchanged. Gate #3 passes on efficiency at every rung
+      of the c8g64 ladder.
+
+      This is the first bless whose images build bwa-mem3 with LTO, as the
+      release ships it (fg-labs/bwa-mem3-bench#136). An earlier run of this SHA
+      on non-LTO images was discarded and its outputs deleted.
+
+      PERFORMANCE, arena (paired rounds, candidate vs v0.16.0): default preset
+      1.060x on m8a (paired estimate; 17.21 -> 16.19 s) and 1.015x on m8g
+      (paired; 28.53 -> 28.19 s). --fast 1.016x on m8a (inconclusive; per-round
+      spread 1.00-1.05x) and 1.009x on m8g (paired). Against minibwa on the
+      default preset, bwa-mem3 is 1.99x faster on m8a (16.19 vs 32.24 s) and
+      1.43x on m8g (28.19 vs 40.43 s). The cross-run perf table flags no
+      regression: of 171 cells, 47 improvement, 52 flat, 69 noisy, 3 new_only,
+      mean -8.2%. That mean is inflated by the sweep's writer change: the
+      candidate's walls no longer include htslib's close-time fdatasync, while
+      the v0.16.0 walls do (see docs/RELEASE.md step 8).
+
+      Drift accepted: meth only. It comes from #756 plus the trimmed inputs, and
+      no meth cell is compared against this golden this once.
+    expected_drift_pct: 0.0
+    # Golden lives under 1eaeb8ee -- main at the 0.17.0 candidate, benched via
+    # biffix run-c40d2b79 (target bless_release, reps=5 across the six sweep
+    # archs, plus the thread-scaling ladder and arena). Smokes: run-2ab46b55
+    # (smoke) and run-b8f519c2 (smoke_meth). Workflow version
+    # fcf8f2f5:d8897ec9:0; images <sha> e19cb074..., <sha>-neoverse-v2 aa00508f....
+    # The v0.17.0 tag (58d55c18, release-please #730) is 1 commit ahead touching
+    # only CHANGELOG, version.txt and the release-please manifest, so src/ is
+    # identical and the shipped binary differs only in its version string.
+    # Aliased so a vs-golden run pinned to the tag resolves here.
+    aliases:
+      - 58d55c1845acddda82bf8ad0b6518400f9c3036f   # v0.17.0 release tag (release-please #730; src/ identical to 1eaeb8ee)
