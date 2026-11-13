@@ -1,0 +1,97 @@
+"""Build standard reference indexes independently of the benchmark DAG."""
+
+import re
+import sys
+from pathlib import Path
+
+from snakemake.exceptions import WorkflowError
+
+sys.path.insert(0, str(Path(workflow.basedir)))
+from reference_indexing import fasta_basename, index_memory_budget_bytes, validate_config
+
+try:
+    CONFIG = validate_config(config)
+except ValueError as error:
+    raise WorkflowError(f"Invalid reference-indexing config: {error}") from error
+
+SUFFIXES = [".amb", ".ann", ".bwt.2bit.64", ".pac"]
+if CONFIG.emit_unpacked_ref:
+    SUFFIXES.append(".0123")
+PREFIX = "indexes/{assembly}/{fasta}"
+# Declared outputs besides the index itself. The build log is a `log:` (kept when a job fails, so
+# the indexer's error survives) and is staged and checksummed with the outputs.
+METADATA = [".version.txt", ".source.sha256", ".checksums.sha256"]
+TARGETS = [
+    path.format(assembly=assembly, fasta=fasta_basename(reference))
+    for assembly, reference in CONFIG.assemblies.items()
+    for path in multiext(PREFIX, *SUFFIXES, *METADATA)
+]
+
+
+def reference_input(wildcards):
+    """Never resolve a source URI beneath the run's default output storage prefix."""
+    reference = CONFIG.assemblies[wildcards.assembly]
+    if wildcards.fasta != fasta_basename(reference):
+        raise WorkflowError(
+            f"assembly {wildcards.assembly!r}: requested FASTA {wildcards.fasta!r} does not "
+            f"match the configured {fasta_basename(reference)!r}"
+        )
+    return storage.s3(reference) if reference.startswith("s3://") else local(reference)
+
+
+wildcard_constraints:
+    assembly="|".join(re.escape(name) for name in CONFIG.assemblies),
+    fasta="[^/]+\\.(?:fa|fasta)",
+
+
+rule all:
+    """Require every declared artifact for every configured assembly."""
+    input:
+        TARGETS,
+
+
+rule index_reference:
+    """Write a complete index at an output prefix without copying or modifying the FASTA."""
+    input:
+        fasta=reference_input,
+    output:
+        index=multiext(PREFIX, *SUFFIXES),
+        version=PREFIX + ".version.txt",
+        source=PREFIX + ".source.sha256",
+        checksums=PREFIX + ".checksums.sha256",
+    log:
+        build=PREFIX + ".index.log",
+    threads: CONFIG.threads
+    resources:
+        # MiB, like every rule in this repo: the AWS Batch executor passes mem_mb unchanged as the
+        # container's MEMORY, which Batch reads as MiB. mem_mib would make Snakemake derive a
+        # decimal mem_mb ~4.9% larger and request that much more from Batch.
+        mem_mb=CONFIG.mem_mb,
+    params:
+        binary=CONFIG.binary,
+        unpacked="--emit-unpacked-ref" if CONFIG.emit_unpacked_ref else "",
+        max_memory=lambda wildcards, resources: index_memory_budget_bytes(resources.mem_mb),
+        prefix=lambda wildcards, output: str(output.index[0])[: -len(SUFFIXES[0])],
+        directory=lambda wildcards, output: str(Path(output.version).parent),
+        checksum_names=lambda wildcards, output: [
+            Path(path).name for path in (*output.index, output.version, output.source)
+        ]
+        + [wildcards.fasta + ".index.log"],
+    shell:
+        r"""
+        (
+            printf 'Building standard reference index\n'
+            {params.binary:q} version > {output.version:q}
+            test -s {output.version:q}
+            {params.binary:q} index -t {threads} --max-memory {params.max_memory} {params.unpacked} \
+                -p {params.prefix:q} {input.fasta:q}
+            for artifact in {output.index:q}; do
+                test -s "$artifact"
+            done
+            digest=$(sha256sum < {input.fasta:q})
+            printf '%s  %s\n' "${{digest%% *}}" {wildcards.fasta:q} > {output.source:q}
+        ) > {log.build:q} 2>&1
+        test -s {log.build:q}
+        (cd {params.directory:q} && sha256sum -- {params.checksum_names:q}) \
+            > {output.checksums:q}
+        """

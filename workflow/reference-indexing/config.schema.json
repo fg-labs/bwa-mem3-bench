@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Reference Indexing",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["assemblies"],
+  "properties": {
+    "assemblies": {
+      "title": "Assembly FASTAs",
+      "description": "Map assembly names to absolute local paths or s3://bucket/key URIs of uncompressed <name>.fa or <name>.fasta files. Keep inputs outside the run's output prefix.",
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^(?=.*[^/]\\.(?:fa|fasta)$)(?:s3://[a-z0-9][a-z0-9.-]*[a-z0-9])?(?:/(?!\\.\\.?(?:/|$))[^/\\x00-\\x1f\\x7f-\\x9f{}\\\\?#%]+)+$"
+      }
+    },
+    "threads": {
+      "title": "Threads per assembly",
+      "type": "integer",
+      "minimum": 1,
+      "default": 16
+    },
+    "mem_mb": {
+      "title": "Memory per assembly (MiB)",
+      "type": "integer",
+      "minimum": 1,
+      "default": 98304
+    },
+    "emit_unpacked_ref": {
+      "title": "Emit unpacked reference for bwa-mem2",
+      "type": "boolean",
+      "default": false
+    },
+    "binary": {
+      "title": "Indexer executable",
+      "description": "The existing benchmark image supplies bwa-mem2.fg-labs (bwa-mem3 built under that name). An absolute executable path is for local runs only.",
+      "type": "string",
+      "pattern": "^(?:/[^\\n\\r\\t{}]*|[^/\\s{}]+)$",
+      "default": "bwa-mem2.fg-labs"
+    }
+  }
+}

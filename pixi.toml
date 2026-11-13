@@ -45,7 +45,21 @@ pysam = ">=0.22"
 python = "3.11.*"
 
 [feature.py311.tasks]
-py-floor-parse = "python scripts/check-python-floor.py bwa_mem3_bench"
+py-floor-parse = "python scripts/check-python-floor.py bwa_mem3_bench workflow/reference-indexing"
+
+# The engine biffix runs workflow/reference-indexing on (its biffix.yaml `engine_version`;
+# tests/test_reference_indexing.py checks they match). The default env stays on Snakemake 8 for
+# the benchmark DAG, so this env runs only the indexing workflow's tests, on the real engine.
+[feature.sm9.dependencies]
+python = ">=3.12,<3.13"
+snakemake-minimal = "==9.27.0"
+snakemake-storage-plugin-s3 = ">=0.3.3,<0.4"
+pytest = ">=7.0"
+pyyaml = ">=6.0"
+jsonschema = ">=4.0"
+
+[feature.sm9.tasks]
+py-test-reference-indexing = "pytest -v tests/test_reference_indexing.py"
 
 [feature.dev.dependencies]
 pre-commit = ">=3.0"
@@ -67,6 +81,7 @@ rich = ">=13"
 default = { features = ["workflow", "analysis", "cdk"] }
 dev = { features = ["workflow", "analysis", "dev", "cdk"] }
 py311 = { features = ["py311"], no-default-feature = true }
+sm9 = { features = ["sm9"], no-default-feature = true }
 
 [tasks]
 # Rust
@@ -77,10 +92,10 @@ cargo-test       = "cargo test --workspace"
 cargo-build      = "cargo build --workspace --release"
 
 # Python
-py-fmt-check = "ruff format --check bwa_mem3_bench tests scripts"
-py-fmt       = "ruff format bwa_mem3_bench tests scripts"
-py-lint      = "ruff check bwa_mem3_bench tests scripts"
-py-type      = "mypy --strict bwa_mem3_bench scripts"
+py-fmt-check = "ruff format --check bwa_mem3_bench tests scripts workflow/reference-indexing"
+py-fmt       = "ruff format bwa_mem3_bench tests scripts workflow/reference-indexing"
+py-lint      = "ruff check bwa_mem3_bench tests scripts workflow/reference-indexing"
+py-type      = "mypy --strict bwa_mem3_bench scripts workflow/reference-indexing"
 py-test      = "pytest -v"
 
 # GitHub Actions workflows. Checks the workflow SCHEMA and shellchecks every
@@ -101,7 +116,7 @@ workflow-lint = "actionlint .github/workflows/*.yml"
 install-fgumi = "bash scripts/install-fgumi.sh"
 
 # Combined
-check = { depends-on = ["cargo-fmt-check", "cargo-clippy", "cargo-test", "workflow-lint", "py-fmt-check", "py-lint", "py-type", { task = "py-floor-parse", environment = "py311" }, "py-test"] }
+check = { depends-on = ["cargo-fmt-check", "cargo-clippy", "cargo-test", "workflow-lint", "py-fmt-check", "py-lint", "py-type", { task = "py-floor-parse", environment = "py311" }, "py-test", { task = "py-test-reference-indexing", environment = "sm9" }] }
 
 # Docker
 #

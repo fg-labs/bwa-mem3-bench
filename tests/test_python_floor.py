@@ -44,7 +44,7 @@ def test_floor_interpreter_check_is_wired_in() -> None:
     feature = _PIXI["feature"]["py311"]
     assert feature["dependencies"]["python"] == "3.11.*"
     assert feature["tasks"]["py-floor-parse"] == (
-        "python scripts/check-python-floor.py bwa_mem3_bench"
+        "python scripts/check-python-floor.py bwa_mem3_bench workflow/reference-indexing"
     )
     assert _PIXI["environments"]["py311"]["features"] == ["py311"]
     assert {"task": "py-floor-parse", "environment": "py311"} in _PIXI["tasks"]["check"][
