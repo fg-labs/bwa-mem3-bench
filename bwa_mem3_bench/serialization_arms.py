@@ -1,36 +1,66 @@
-"""Arms, shell commands and run order for the serialization timing rule.
+"""Arms, shell commands and run order for the serialization rules.
 
-`workflow/rules/serialization.smk` writes the plan built here (`plan_tsv`) into the job and loops
-over it. Every config-derived token is quoted with `shlex`. The index, reads and per-run output
-paths are referenced as `"$IDX"`, `"$R1"`, `"$R2"`, `"$RUN_OUT"` and `"$RUN_ERR"`, which the
-shell loop exports before each run.
+`workflow/rules/serialization.smk` renders the fidelity commands from `bwa_mem3_argv` and writes
+the timing plan built here (`plan_tsv`) into the job, then loops over it. Every config-derived
+token is quoted with `shlex`. The index, reads and per-run output paths are referenced as
+`"$IDX"`, `"$R1"`, `"$R2"`, `"$RUN_OUT"` and `"$RUN_ERR"`, which the shell loop exports before
+each run.
 """
 
 from __future__ import annotations
 
-import random
-import re
 import shlex
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+
+from bwa_mem3_bench.arena_arms import build_schedule
 
 MODES = ("default", "fast")
 ENDPOINTS = ("pinned", "unpinned", "practical")
 TOOLS = ("bwa-mem3", "bwa", "bwa-mem2", "minibwa")
 INDEXES = ("stock", "dense")
+COMPARATORS = ("bwa", "minibwa", "bwa-mem2")
+
+# bwa-mem3 `mem`'s getopt option string (src/fastmap.cpp); a letter before `:` takes an argument.
+MEM_OPTSTRING = "51qpaMCSPVYjuk:c:v:s:r:t:R:A:B:O:E:U:w:L:d:T:Q:D:m:I:N:W:x:G:h:y:K:X:H:o:f:z:"
+_TAKES_ARG = frozenset(
+    c for c, nxt in zip(MEM_OPTSTRING, MEM_OPTSTRING[1:] + " ", strict=True) if nxt == ":"
+)
+_CONTROLLED_SHORT = "tKof"
+_CONTROLLED_LONG = ("fast", "bam", "bam-threads")
 
 
-def flag_clash(token: str) -> str | None:
-    """Why a sample flag token clashes with an option the benchmark sets itself, else None."""
-    if token.startswith("--"):
-        name = token.split("=", 1)[0]
-        prefix = len(name) > 2 and ("--fast".startswith(name) or "--bam".startswith(name))  # noqa: PLR2004
-        if name.startswith("--bam") or prefix:
-            return "sets or abbreviates an option the benchmark controls (--fast, --bam*)"
-        return None
-    if re.match(r"-[A-Za-z]*[tKof]", token):
-        return "sets -t, -K, -o or -f (alone or bundled), which the benchmark controls"
-    return None
+def flag_clashes(tokens: Sequence[str]) -> list[str]:
+    """Why each flag in `tokens` clashes with an option the benchmark sets itself.
+
+    Tokens are read as getopt reads them: a short bundle (`-5St4`) is one option per character
+    until an option that takes an argument, whose value is the rest of the token or, if nothing
+    is left, the next token. Long options match by prefix, as getopt_long allows. `--compat` must
+    be spelled `--compat=<target>` so that `Sample.compat_target` sees it.
+    """
+    problems: list[str] = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        i += 1
+        if token.startswith("--"):
+            name = token[2:].split("=", 1)[0]
+            if not name or any(option.startswith(name) for option in _CONTROLLED_LONG):
+                problems.append(f"{token!r} sets or abbreviates --fast, --bam or --bam-threads")
+            elif "compat".startswith(name) and not token.startswith("--compat="):
+                problems.append(f"{token!r} must be spelled --compat=<target>")
+            continue
+        if not token.startswith("-") or token == "-":
+            continue
+        for j, option in enumerate(token[1:], start=2):
+            if option in _CONTROLLED_SHORT:
+                problems.append(f"{token!r} sets -{option}")
+                break
+            if option in _TAKES_ARG:
+                if j == len(token):
+                    i += 1  # the value is the next token
+                break
+    return problems
 
 
 @dataclass(frozen=True)
@@ -53,20 +83,19 @@ class Arm:
 def arm_groups(
     tools: Iterable[str], modes: Iterable[str], indexes: Iterable[str], *, upstream: bool
 ) -> list[tuple[Arm, ...]]:
-    """Arms in run-together groups: each bwa-mem3 native/SAM pair stays adjacent in a round.
+    """Arms in run-together groups: each bwa-mem3 (native, SAM) pair is one group.
 
     bwa, minibwa and upstream bwa-mem2 (only where `upstream`, i.e. x86) run the SAM route on the
     stock index in default mode, so they need `default` and `stock` to be selected.
     """
-    modes, indexes = list(modes), list(indexes)
+    tools, modes, indexes = list(tools), list(modes), list(indexes)
     groups: list[tuple[Arm, ...]] = []
     if "bwa-mem3" in tools:
         groups += [
             (Arm("bwa-mem3", m, i, "native"), Arm("bwa-mem3", m, i)) for m in modes for i in indexes
         ]
     if "default" in modes and "stock" in indexes:
-        comparators = ("bwa", "minibwa", "bwa-mem2") if upstream else ("bwa", "minibwa")
-        groups += [(Arm(tool),) for tool in comparators if tool in tools]
+        groups += [(Arm(t),) for t in COMPARATORS if t in tools and (upstream or t != "bwa-mem2")]
     return groups
 
 
@@ -84,15 +113,20 @@ class Context:
     minibwa_flags: tuple[str, ...] = ()
 
 
-def _aligner_argv(arm: Arm, ctx: Context, threads: int) -> list[str]:
-    head = ["-t", str(threads)]
-    if arm.tool == "minibwa":
-        return ["minibwa", "map", *head, *ctx.minibwa_flags]
-    head += ["-K", str(ctx.batch_k), *ctx.mem_flags]
-    if arm.tool == "bwa-mem3":
-        fast = ["--fast"] if arm.mode == "fast" else []
-        return [ctx.aligner, "mem", *head, *ctx.fg_labs_flags, *fast]
-    return ["bwa" if arm.tool == "bwa" else ctx.upstream, "mem", *head]
+def bwa_mem3_argv(ctx: Context, mode: str, threads: int, level: int | None = None) -> list[str]:
+    """The bwa-mem3 `mem` argv shared by fidelity and timing, up to the output destination.
+
+    SAM to stdout when `level` is None, else native BAM at that compression level (`--bam=1`
+    compresses on `ctx.helpers` threads).
+    """
+    fast = ["--fast"] if mode == "fast" else []
+    argv = [ctx.aligner, "mem", "-t", str(threads), "-K", str(ctx.batch_k), *ctx.mem_flags]
+    argv += [*ctx.fg_labs_flags, *fast]
+    if level == 0:
+        argv.append("--bam=0")
+    elif level == 1:
+        argv += ["--bam=1", "--bam-threads", str(ctx.helpers)]
+    return argv
 
 
 def prewarm_command(arm: Arm) -> str:
@@ -113,10 +147,16 @@ def run_command(arm: Arm, endpoint: str, ctx: Context) -> str:
     pinned and practical run under `taskset` on the first `budget` CPUs.
     """
     practical = endpoint == "practical"
-    argv = _aligner_argv(arm, ctx, ctx.budget if practical else ctx.budget - ctx.helpers)
-    if arm.route == "native":
-        level = ["--bam=0"] if practical else ["--bam=1", "--bam-threads", str(ctx.helpers)]
-        argv += [*level, "-o", "-"]
+    threads = ctx.budget if practical else ctx.budget - ctx.helpers
+    if arm.tool == "bwa-mem3":
+        level = None if arm.route == "sam" else 0 if practical else 1
+        argv = bwa_mem3_argv(ctx, arm.mode, threads, level)
+        argv += ["-o", "-"] if level is not None else []
+    elif arm.tool == "minibwa":
+        argv = ["minibwa", "map", "-t", str(threads), *ctx.minibwa_flags]
+    else:
+        binary = "bwa" if arm.tool == "bwa" else ctx.upstream
+        argv = [binary, "mem", "-t", str(threads), "-K", str(ctx.batch_k), *ctx.mem_flags]
     stages = [f'{shlex.join(argv)} "$IDX" "$R1" "$R2" 2> "$RUN_ERR"']
     if arm.route == "sam" and not practical:
         stages.append(f"samtools view -@ {ctx.helpers} -O BAM,level=1 -o - -")
@@ -136,19 +176,30 @@ def _row(fields: Sequence[str]) -> str:
 def plan_tsv(
     groups: Sequence[tuple[Arm, ...]], endpoint: str, ctx: Context, reps: int, seed: str
 ) -> str:
-    """Every run in execution order: round 0 (warmup) then `reps` rounds, order seeded per round.
+    """Every run in execution order, scheduled by the arena's `build_schedule`.
 
-    Columns: round position label tool mode index route writes_file prewarm command.
+    Arms are blocked by index family; each block runs a warmup round 0 then `reps` rounds, each
+    round a seeded permutation of the block's arms in which every bwa-mem3 (native, SAM) pair
+    runs back to back, alternating which leads. Columns: block round position label tool mode
+    index route writes_file prewarm command.
     """
+    arms = {arm.label: arm for group in groups for arm in group}
+    binaries = {"bwa": "bwa", "minibwa": "minibwa", "bwa-mem2": ctx.upstream}
+    schedule = build_schedule(
+        [(a.label, binaries.get(a.tool, ctx.aligner), a.mode) for a in arms.values()],
+        dense_labels=frozenset(label for label, a in arms.items() if a.index == "dense"),
+        pairs=[(group[0].label, group[1].label) for group in groups if len(group) == 2],  # noqa: PLR2004
+        candidate_label=next(iter(arms)),
+        seed=seed,
+        headline_rounds=reps,
+        context_rounds=reps,
+    )
     writes = "0" if endpoint == "practical" else "1"
     lines = []
-    for rnd in range(reps + 1):
-        rng = random.Random(f"{seed}:{rnd}")  # noqa: S311 -- run order, not security
-        order = [list(group) for group in groups]
-        rng.shuffle(order)
-        for group in order:
-            rng.shuffle(group)
-        for pos, a in enumerate(a for group in order for a in group):
-            fields = [str(rnd), str(pos), a.label, a.tool, a.mode, a.index, a.route, writes]
-            lines.append(_row([*fields, prewarm_command(a), run_command(a, endpoint, ctx)]))
+    for run in schedule:
+        a = arms[run.label]
+        fields = [run.block, str(run.round), str(run.position), a.label, a.tool, a.mode, a.index]
+        lines.append(
+            _row([*fields, a.route, writes, prewarm_command(a), run_command(a, endpoint, ctx)])
+        )
     return "\n".join(lines)

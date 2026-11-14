@@ -10,16 +10,16 @@ endpoints: [pinned, unpinned, practical]
 tools: [bwa-mem3, bwa, bwa-mem2, minibwa]
 indexes: [stock, dense]
 # The same list for fidelity and timing, so their results pair up.
-archs: [m8a, m8g]
+archs: [m8a, m8g]  # each must be in arena.archs
 # CPUs the pinned and practical endpoints are confined to (`taskset -c 0-<budget-1>`).
 budget: 8
 # BAM compression threads (`--bam-threads` / `samtools view -@`) at pinned and unpinned.
 helpers: 2
 # Measured rounds per timing job, after one warmup round.
 reps: 5
-# `-K`, for bwa-mem3, bwa and upstream bwa-mem2.
-batch_k: 160000000
-# `-t` for the fidelity alignments.
+# `-K`, for bwa-mem3, bwa and upstream bwa-mem2. null means `batch_bases` (config/defaults.yaml).
+batch_k: null
+# `-t` for the fidelity alignments; at most `arena.threads`.
 fidelity_threads: 16
 # The bwa-mem3 binary under test, as installed in the image.
 aligner: bwa-mem2.fg-labs
