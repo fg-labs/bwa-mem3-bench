@@ -203,3 +203,18 @@ def plan_tsv(
             _row([*fields, a.route, writes, prewarm_command(a), run_command(a, endpoint, ctx)])
         )
     return "\n".join(lines)
+
+
+def version_probes(upstream: str) -> dict[str, str]:
+    """Shell snippets that print each comparator's version for settings.json; never fail.
+
+    bwa has no version command and prints `Version:` in its usage on stderr, exiting 1. minibwa
+    prints its version for `version` (it rejects `--version`). The upstream bwa-mem2 launcher
+    writes "Looking to launch executable ..." to stderr before the real binary prints the
+    version on stdout, so only stdout is kept.
+    """
+    return {
+        "bwa": "bwa 2>&1 | grep -m 1 '^Version' || true",
+        "minibwa": "minibwa version 2>/dev/null | sed -n 1p || true",
+        "bwa-mem2": f"{shlex.quote(upstream)} version 2>/dev/null | sed -n 1p || true",
+    }
