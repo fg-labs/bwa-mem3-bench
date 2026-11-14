@@ -181,6 +181,7 @@ include: "rules/scaling.smk"
 # PARSE time (building its module-level ARENA_* constants), so it must be
 # included after all three.
 include: "rules/arena.smk"
+include: "rules/serialization.smk"
 
 
 # Aggregator targets have no shell body, so they always run on the coordinator.
