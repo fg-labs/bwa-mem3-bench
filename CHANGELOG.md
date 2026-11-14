@@ -118,6 +118,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Serialization `settings.json` records the comparators' real versions.**
+  minibwa's version comes from `minibwa version` (it rejects `--version`), and
+  upstream bwa-mem2's from the launcher's stdout only, so the "Looking to launch
+  executable" line no longer stands in for it.
 - **In-image snakemake parses the workflow again.** `bwa_mem3_bench/golden.py`
   used PEP 695 generic syntax (`def f[T]`), which needs Python 3.12, but the
   per-SHA image runs Debian bookworm's Python 3.11 and the Snakefile imports that

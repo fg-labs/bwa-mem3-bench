@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import shlex
+import subprocess
 from collections import Counter
+from pathlib import Path
 
 import pytest
 
 from bwa_mem3_bench.serialization_arms import (
+    COMPARATORS,
     Arm,
     Context,
     arm_groups,
@@ -16,6 +19,7 @@ from bwa_mem3_bench.serialization_arms import (
     plan_tsv,
     prewarm_command,
     run_command,
+    version_probes,
 )
 
 PLAN_COLUMNS = 11
@@ -216,3 +220,51 @@ def test_plan_keeps_pairs_adjacent_and_alternates_their_lead() -> None:
                 assert abs(i - j) == 1
                 leads.append(i < j)
             assert all(a != b for a, b in zip(leads, leads[1:], strict=False)), leads
+
+
+# Stand-ins that print as the real comparators do: bwa's usage (with its `Version:` line) on
+# stderr and exit 1; minibwa's `version` command on stdout (`--version` is an unknown command);
+# the upstream bwa-mem2 launcher's "Looking to launch" line on stderr, then the version on stdout.
+_COMPARATOR_STAND_INS = {
+    "bwa": 'printf "\\nProgram: bwa\\nVersion: 0.7.19-r1273\\n" >&2; exit 1',
+    "minibwa": (
+        '[ "$1" = version ] && { echo 0.1-r250; exit 0; }; '
+        "echo \"ERROR: unknown command '$1'\" >&2; exit 1"
+    ),
+    "bwa-mem2.upstream": (
+        'echo "Looking to launch executable \\"x.avx512bw\\", simd = .avx512bw" >&2; '
+        'echo "Launching executable \\"x.avx512bw\\"" >&2; '
+        '[ "$1" = version ] && echo 2.2.1'
+    ),
+}
+
+
+def test_version_probes_print_each_comparators_version(tmp_path: Path) -> None:
+    for name, body in _COMPARATOR_STAND_INS.items():
+        script = tmp_path / name
+        script.write_text(f"#!/bin/bash\n{body}\n")
+        script.chmod(0o755)
+    probes = version_probes(str(tmp_path / "bwa-mem2.upstream"))
+    assert set(probes) == set(COMPARATORS)
+    env = {"PATH": f"{tmp_path}:/usr/bin:/bin"}
+    versions = {
+        tool: subprocess.run(  # noqa: S603 -- fixed args; the probe is ours
+            ["bash", "-c", probe], capture_output=True, text=True, check=True, env=env
+        ).stdout.strip()
+        for tool, probe in probes.items()
+    }
+    assert versions == {"bwa": "Version: 0.7.19-r1273", "minibwa": "0.1-r250", "bwa-mem2": "2.2.1"}
+
+
+def test_version_probes_never_fail_the_job(tmp_path: Path) -> None:
+    """A missing comparator yields an empty version, not a non-zero exit under `set -e`."""
+    probes = version_probes(str(tmp_path / "absent"))
+    for probe in probes.values():
+        result = subprocess.run(  # noqa: S603 -- fixed args; the probe is ours
+            ["bash", "-c", f'set -euo pipefail; v=$({probe}); echo "[$v]"'],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={"PATH": f"{tmp_path}:/usr/bin:/bin"},
+        )
+        assert result.returncode == 0, result.stderr

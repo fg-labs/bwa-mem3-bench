@@ -26,6 +26,7 @@ from bwa_mem3_bench.serialization_arms import (
     bwa_mem3_argv as ser_bwa_mem3_argv,
     flag_clashes as ser_flag_clashes,
     plan_tsv as ser_plan_tsv,
+    version_probes as ser_version_probes,
 )
 
 _SER_DEFAULTS = yaml.safe_load((Path(workflow.basedir).parent / "config" / "serialization.yaml").read_text())
@@ -440,12 +441,7 @@ def _ser_plan(wc):
     return shlex.quote(ser_plan_tsv(_ser_groups(wc.arch), wc.endpoint, _ser_context(wc.sample), reps, seed=wc.sha))
 
 
-# Comparator version probes for settings.json; `|| true` because bwa exits non-zero on usage.
-_SER_VERSION_PROBES = {
-    "bwa": "bwa 2>&1 | grep -m 1 '^Version' || true",
-    "minibwa": "minibwa --version 2>&1 | sed -n 1p || true",
-    "bwa-mem2": f"{shlex.quote(BASELINE_BINARY)} version 2>&1 | sed -n 1p || true",
-}
+_SER_VERSION_PROBES = ser_version_probes(BASELINE_BINARY)
 
 
 def _ser_version_args(wc):
