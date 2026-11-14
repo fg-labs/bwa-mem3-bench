@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Reference-indexing workflow** (`workflow/reference-indexing/`). A standalone
+  Snakemake workflow, registered with biffix on its own, that builds standard
+  bwa-mem3 indexes (`.amb`, `.ann`, `.bwt.2bit.64`, `.pac`; `.0123` with
+  `emit_unpacked_ref`) for a map of existing local or S3 FASTAs, with a build
+  log, version, source-FASTA digest and sha256 manifest per assembly. Runs on the
+  existing benchmark image; the benchmark DAG is unchanged. A new `sm9` pixi env
+  runs its tests on Snakemake 9.27.0, the engine biffix runs it on.
 - **Arena per-run host state** (schema v14). Every `arena.tsv` row records its
   schedule position (`block`, `position`, round in `rep`), output `writer`, the
   binary's index-read time, tricorder `io_in` and starting page cache, and

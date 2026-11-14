@@ -1,0 +1,15 @@
+engine: snakemake
+engine_version: "9.27.0"
+entrypoint: Snakefile
+schema: config.schema.json
+about: README.md
+target: all
+# Register this directory with --source-mode s3 --image "$IMAGE" (an existing benchmark image).
+# biffix pins that default worker image; no image is built by this workflow.
+catalog:
+  description: Build standard bwa-mem3 reference indexes from existing FASTA files.
+  tags: [reference, indexing]
+form:
+  title: Reference Indexing
+samples:
+  wildcard: assembly

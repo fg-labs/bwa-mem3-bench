@@ -1,0 +1,9 @@
+# Replace these illustrative source locations with existing, readable FASTAs.
+# These inputs are independent of biffix's per-run output prefix.
+assemblies:
+  hg38: s3://your-input-bucket/references/hg38/assembly.fasta
+  mouse: s3://your-input-bucket/references/mouse/assembly.fa
+threads: 16
+mem_mb: 98304
+emit_unpacked_ref: false
+binary: bwa-mem2.fg-labs
