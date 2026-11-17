@@ -56,7 +56,7 @@ _CANDIDATE_LABELS = {"default": "fg-labs-default", "fast": "fg-labs-fast"}
 
 # Arena ladder labels for 0.x releases: the minor digits then one patch digit,
 # e.g. `v021` (v0.2.1) and `v110` (v0.11.0).
-_RELEASE_LABEL = re.compile(r"^v(\d+)(\d)$")
+RELEASE_LABEL = re.compile(r"^v(\d+)(\d)$")
 
 
 @dataclass(frozen=True)
@@ -177,7 +177,7 @@ def release_label_to_version(label: str) -> str:
     A label that is not a release tag is a blessed interim build between two
     releases (e.g. ``394f8f8``) and is marked as such.
     """
-    match = _RELEASE_LABEL.match(label)
+    match = RELEASE_LABEL.match(label)
     if not match:
         return f"{label} (interim build)"
     return f"v0.{int(match.group(1))}.{match.group(2)}"

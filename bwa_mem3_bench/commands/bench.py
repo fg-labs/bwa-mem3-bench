@@ -14,6 +14,7 @@ from bwa_mem3_bench.report.compare import generate_compare
 from bwa_mem3_bench.report.docs import generate_docs, parse_releases
 from bwa_mem3_bench.report.full_report import generate_full_report
 from bwa_mem3_bench.report.performance import generate_performance
+from bwa_mem3_bench.report.readme_tables import generate_readme_tables
 from bwa_mem3_bench.report.regression import check_regression
 from bwa_mem3_bench.report.results import rerender, write_release
 from bwa_mem3_bench.report.results_data import build_snapshot
@@ -194,8 +195,8 @@ def release_speedup(
 
     One row per bwa-mem3 release (chronological), with stock and `--fast`
     columns, each measured against `baseline_label`'s own median wall time on
-    the SAME arena host — see `workflow/rules/arena.smk`. Meant to feed the
-    README's release-history speedup table on every bless. Markdown is
+    the SAME arena host — see `workflow/rules/arena.smk`. bwa-mem3's README
+    tables come from `bench readme-tables`, not from this. Markdown is
     written to stdout by default; pass ``--out path/file.md`` to redirect to
     a file.
 
@@ -215,6 +216,47 @@ def release_speedup(
         print(text)
     else:
         print(f"wrote {out}")
+
+
+def readme_tables(
+    *,
+    fg_labs_sha: str,
+    version: str,
+    readme: Path,
+    arena_sa_stride: int,
+    out: Path | None = None,
+) -> None:
+    """Rewrite bwa-mem3's README performance tables from a bless's arena.
+
+    Replaces every cell of the README's headline table and its per-host
+    release-history tables (m8g, m8a) with this arena's median walls, and moves
+    the prose's "current release" and "v0.13.0 through vX.Y.Z" markers to
+    `version`. Every cell changes, not just the new row, because the arena
+    re-measures every release. Fails without writing if the arena is not
+    collected or narrowed for a README host, did not run on the stride-2 index the
+    README describes, or the README's tables, headline table or prose markers have
+    drifted. See docs/RELEASE.md (the bwa-mem3 README step).
+
+    :param fg_labs_sha: the blessed candidate SHA whose arena rows to use.
+    :param version: the release the candidate shipped as, e.g. ``v0.18.0``.
+    :param readme: path to bwa-mem3's README.md (in a checkout of fg-labs/bwa-mem3).
+    :param arena_sa_stride: the suffix-array stride the arena's dense arms used
+        must be explicitly declared as 2 after verifying the run configuration.
+        Recorded blocks verify index family, not numeric stride.
+    :param out: write here instead of rewriting `readme` in place (for previewing).
+    """
+    config = load_config(REPO_ROOT / "config")
+    target = generate_readme_tables(
+        db_path=DB_PATH,
+        fg_labs_sha=fg_labs_sha,
+        version=version,
+        readme=readme,
+        arena_sa_stride=arena_sa_stride,
+        headline_rounds=config.arena.reps,
+        context_rounds=config.arena.context_reps,
+        out=out,
+    )
+    print(f"wrote {target}")
 
 
 def accuracy(*, fg_labs_sha: str, out: Path | None = None) -> None:

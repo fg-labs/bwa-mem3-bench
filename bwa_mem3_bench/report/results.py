@@ -72,12 +72,12 @@ def _version_key(version: str) -> tuple[int, ...]:
 
 
 # The non-bwa-mem3 arena arms, as (arena label, published name), in table order.
-_ARENA_COMPARATORS = (("bwa", "bwa"), ("bwa-mem2-upstream", "bwa-mem2"), ("minibwa", "minibwa"))
+ARENA_COMPARATORS = (("bwa", "bwa"), ("bwa-mem2-upstream", "bwa-mem2"), ("minibwa", "minibwa"))
 
 # The last ladder release on the stock index: when the arena's dense index is on,
 # every later release arm is dense too (`ARENA_DENSE_SA_MIN_LABEL` in arena.smk,
 # pinned equal by a test).
-_ARENA_DENSE_AFTER = "v120"
+ARENA_DENSE_AFTER = "v120"
 
 
 def _arena_comparator_names(snap: dict[str, Any]) -> list[str]:
@@ -89,7 +89,7 @@ def _arena_comparator_names(snap: dict[str, Any]) -> list[str]:
     labels = {
         row["label"] for rows in snap["arena"].values() for row in rows if row["wall_s"] is not None
     }
-    return [name for label, name in _ARENA_COMPARATORS if label in labels]
+    return [name for label, name in ARENA_COMPARATORS if label in labels]
 
 
 def _arena_comparator_table(rows: list[dict[str, Any]], version: str) -> str:
@@ -114,7 +114,7 @@ def _arena_comparator_table(rows: list[dict[str, Any]], version: str) -> str:
             _fmt(ours_fast["rss_gb"], 1) if ours_fast else EM_DASH,
         ],
     ]
-    for label, name in _ARENA_COMPARATORS:
+    for label, name in ARENA_COMPARATORS:
         row = by_label.get((label, "default"))
         if row is None or row["wall_s"] is None:
             continue
@@ -310,7 +310,7 @@ def _arena_index_note(snap: dict[str, Any]) -> str:
     if stride == 8:  # noqa: PLR2004
         return "Every aligner used its stock index."
     ladder = snap["arena_ladder"]
-    later = ladder[ladder.index(_ARENA_DENSE_AFTER) + 1 :] if _ARENA_DENSE_AFTER in ladder else []
+    later = ladder[ladder.index(ARENA_DENSE_AFTER) + 1 :] if ARENA_DENSE_AFTER in ladder else []
     dense: list[str] = []
     for label in later:  # releases before this one; the ladder may run past it
         version = release_label_to_version(label)
@@ -327,7 +327,7 @@ def _arena_index_note(snap: dict[str, Any]) -> str:
     return (
         f"bwa-mem3 {snap['version']} and releases {span} used a denser stride-{stride} "
         "suffix-array index (identical alignment records, more memory, reflected in their RSS); "
-        f"{release_label_to_version(_ARENA_DENSE_AFTER)} and older releases, and the other "
+        f"{release_label_to_version(ARENA_DENSE_AFTER)} and older releases, and the other "
         "aligners, used their stock index."
     )
 

@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bench readme-tables`** rewrites the performance tables in fg-labs/bwa-mem3's
+  README (the headline table and the m8g and m8a release-history tables) from a
+  bless's arena, and moves the README's current-release markers to the new
+  version. It replaces a hand-edited post-bless step (docs/RELEASE.md step 13) and
+  fails without writing on a missing or narrowed arena, an arena that did not run on
+  the expected index family, or a drifted README. The numeric arena stride must
+  be independently verified and explicitly declared with `--arena-sa-stride 2`.
 - **Reference-indexing workflow** (`workflow/reference-indexing/`). A standalone
   Snakemake workflow, registered with biffix on its own, that builds standard
   bwa-mem3 indexes (`.amb`, `.ann`, `.bwt.2bit.64`, `.pac`; `.0123` with
