@@ -227,6 +227,14 @@ def _plan(fg_labs_sha: str, golden_ref_sha: str) -> list[str]:
         "(+ bless-baseline if the upstream tag moved).",
         f"Publish the results pages: {cli} bench results --fg-labs-sha {sha} "
         "--version <vX.Y.Z> --previous-version <prev vX.Y.Z>, and commit results/.",
+        "Write the GitHub release preamble: prepend the hand-written summary (headline, "
+        "what changed, arena speed vs the previous release, Should I upgrade?) above "
+        "release-please's changelog with `gh release edit vX.Y.Z -R fg-labs/bwa-mem3 "
+        "--notes-file <file>`. See docs/RELEASE.md step 12.",
+        f"Update bwa-mem3's README performance tables: open a `docs(readme): update "
+        f"performance tables for vX.Y.Z` PR on fg-labs/bwa-mem3, replacing every cell of "
+        f"the headline and per-host release-history tables from {cli} bench arena -f {sha}. "
+        "See docs/RELEASE.md step 13.",
         "Bump the arena ladder for the NEXT bless: add this release to arena.smk + "
         "Dockerfile.base (test_arena_ladder.py enforces this) and rebuild the base.",
     ]

@@ -112,7 +112,7 @@ The candidate's `release-allowances.yaml` entry is written **late** (step 7),
 not first: `submit` needs only the *prior* release's allowance, and writing the
 candidate's entry early would make it the newest ledger row — tripping the
 preflight's "golden is the most recent blessed release" check and the
-`ladder_problems` "arena-tail == newest release" invariant until the step-12
+`ladder_problems` "arena-tail == newest release" invariant until the step-14
 arena bump.
 
 1. **Rebuild the base image _only if the arena ladder changed_** (a new release
@@ -191,16 +191,46 @@ arena bump.
     After changing the renderer, `cli bench results-render` rebuilds every page
     from the committed snapshots; `tests/test_report_results.py` fails if the
     committed pages are stale.
-12. **Bump the arena ladder for the _next_ bless.** Add this now-blessed release
+12. **Write the GitHub release preamble.** release-please publishes the
+    `fg-labs/bwa-mem3` release with only its generated changelog. Prepend a
+    hand-written preamble above it, matching the earlier releases (v0.17.0 is a
+    good model): a `## X.Y.Z — <headline>` title, one paragraph saying what
+    changed and whether alignment output moved (cite Gate #2's concordance),
+    sections for the notable changes, a same-host speed table against the
+    previous release from this bless's arena (m8a and m8g, median wall,
+    speedup), a `### Should I upgrade?` section, then a `---` rule before the
+    generated changelog. Take every number from the bless (`bench regression`,
+    `bench arena`) and the results page, never from memory. Apply it with
+    `gh release edit vX.Y.Z -R fg-labs/bwa-mem3 --notes-file <file>`, where the
+    file is the preamble followed by the current body
+    (`gh release view vX.Y.Z -R fg-labs/bwa-mem3 --json body -q .body`), so the
+    changelog is kept.
+13. **Update bwa-mem3's README performance tables.** Open a
+    `docs(readme): update performance tables for vX.Y.Z` PR on
+    `fg-labs/bwa-mem3` (v0.17.0's was fg-labs/bwa-mem3#766, v0.18.0's #804).
+    The README has a headline table (current release vs `bwa`, `bwa-mem2` and
+    `minibwa`, `stock / --fast`) and a release-history table per arena host
+    (m8g, m8a). Replace **every** cell, not just the new row, from this bless's
+    `bench arena -f <sha>`: the arena re-measures every release, so the old
+    numbers are from a different run. The cells are ratios of median walls
+    (`vs bwa` = bwa's wall / the row's; `vs prev` = the previous release's wall /
+    the row's, skipping the unreleased `394f8f8` arm; v0.2.1's `vs prev` is
+    against upstream bwa-mem2). The candidate's arena rows are labelled
+    `fg-labs-default` / `fg-labs-fast`. Bold the new release's row, and move
+    the prose's "current release" and "v0.13.0 through vX.Y.Z" markers to the
+    new version. Check your script by regenerating the previous release's
+    tables from its own arena first: they must come out identical to the
+    README as it stands.
+14. **Bump the arena ladder for the _next_ bless.** Add this now-blessed release
     to `ARENA_RELEASES` (`arena.smk`) **and** a `RUN` block in `Dockerfile.base`,
     then rebuild the base image. `tests/test_arena_ladder.py` fails until both
-    are done — that is the guard that keeps step 12 from being forgotten (it was,
+    are done — that is the guard that keeps step 14 from being forgotten (it was,
     for v0.10.0).
 
 ## Running the bless on biffix
 
 The release matrix can also run as a biffix workflow instead of through
-`cli submit`. Steps 1–3 and 6–12 are unchanged; this replaces steps 4–5. Since
+`cli submit`. Steps 1–3 and 6–14 are unchanged; this replaces steps 4–5. Since
 biffix bypasses `cli submit`, the params below set everything `submit` would
 have set, `reps` and `archs` included.
 

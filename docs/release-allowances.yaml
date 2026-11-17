@@ -1025,3 +1025,48 @@ allowances:
     # Aliased so a vs-golden run pinned to the tag resolves here.
     aliases:
       - 58d55c1845acddda82bf8ad0b6518400f9c3036f   # v0.17.0 release tag (release-please #730; src/ identical to 1eaeb8ee)
+
+  - to_sha: 0368a60001874372f8203aade5cf1c8934324068
+    pr: fg-labs/bwa-mem3#802
+    date: 2026-11-16
+    summary: >-
+      bwa-mem3 v0.18.0. A feature release with no alignment change on this
+      corpus: `--alt-project` (fg-labs/bwa-mem3#775), `--tie-break name`
+      (#767) and prefixed minimal methylation indexes (#794) are all opt-in,
+      and none of the fixes (#768, #771, #796, #802) moves a record here.
+
+      Gate #2 passes: 38 cells, 190 compares, min concordance 100.0000%
+      against the v0.17.0 golden (1eaeb8ee), meth included (the first bless
+      whose golden holds the UMI-trimmed meth names). Gate #1 passes: all 70
+      gating DNA vs-upstream cells are 100.0000%. Meth confident relocation
+      against bwameth is unchanged from v0.17.0 at 0.8215%
+      (meth-twist-emseq-trim-5M) and 0.8671% (smoke-meth-trim), report-only
+      (FG-METH-DIVERGENCE, gating: false). Gate #1b passes on all 6 sim-truth
+      meth cells with zero change (sim-meth-place 84.0 ppm mismapped at
+      MAPQ >= 20, sim-meth-vars 111.8 ppm). Gate #3 passes on the absolute
+      basis (v0.17.0's ladder reads super-linear): every c8g64 rung is 1-6%
+      faster on PROCESS().
+
+      PERFORMANCE, arena (paired rounds, candidate vs v0.17.0): flat. Default
+      preset 0.999x on m8a (inconclusive; per-round spread 0.97-1.04x;
+      15.25 -> 15.44 s) and 1.001x on m8g (paired; 28.39 -> 28.42 s). --fast
+      1.008x on m8a and 1.001x on m8g (both paired). Against minibwa on the
+      default preset, bwa-mem3 is 1.94x faster on m8a (15.44 vs 30.03 s) and
+      1.43x on m8g (28.42 vs 40.66 s). The arena's fgumi spot check finds the
+      candidate's default-preset BAM identical to v0.17.0's on both hosts
+      (10,030,558 records, 0 diffs). The cross-run perf table flags no
+      regression: of 171 cells, 126 flat and 45 noisy.
+
+      Drift accepted: none.
+    expected_drift_pct: 0.0
+    # Golden lives under 0368a600 -- main at the 0.18.0 candidate (after #802),
+    # benched via biffix run-56995cbd (target bless_release, reps=5 across the
+    # six sweep archs, plus the thread-scaling ladder and arena). Smokes:
+    # run-3b2e3edc (smoke) and run-145e6003 (smoke_meth). Workflow version
+    # 1527f604:ff208079:0; images <sha> 1e8fb390..., <sha>-neoverse-v2 5b36c061....
+    # The v0.18.0 tag (e0903cb9, release-please #769) is 1 commit ahead touching
+    # only CHANGELOG, version.txt and the release-please manifest, so src/ is
+    # identical and the shipped binary differs only in its version string.
+    # Aliased so a vs-golden run pinned to the tag resolves here.
+    aliases:
+      - e0903cb9395bc755059358f916b2efdb58a30073   # v0.18.0 release tag (release-please #769; src/ identical to 0368a600)
