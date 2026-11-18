@@ -280,16 +280,16 @@ def _release_chronology() -> dict[str, int]:
 def _bwa_mem3_release_chain(arch_group: pd.DataFrame) -> pd.DataFrame:
     """Every default-mode bwa-mem3 release row, plus fg-labs-default's, oldest first.
 
-    The rows of `arch_group` (one arch) whose labels `_mode_chain` returns, in
+    The rows of `arch_group` (one arch) whose labels `mode_chain` returns, in
     its order -- the same chain `build_arena_table` walks, so the two can never
     define "release order" differently.
     """
-    order = _mode_chain(arch_group, "default")
+    order = mode_chain(arch_group, "default")
     chain = arch_group[(arch_group["mode"] == "default") & arch_group["label"].isin(order)]
     return chain.set_index("label").loc[order].reset_index()
 
 
-def _fast_sibling_label(label: str) -> str:
+def fast_sibling_label(label: str) -> str:
     """The `-fast` arm's label for a given default-mode release label.
 
     Today's candidate is `fg-labs-default` / `fg-labs-fast` -- two
@@ -337,7 +337,7 @@ def _release_of(label: str) -> str:
     return label.removesuffix("-fast")
 
 
-def _mode_chain(arch_rows: pd.DataFrame, mode: str) -> list[str]:
+def mode_chain(arch_rows: pd.DataFrame, mode: str) -> list[str]:
     """Every bwa-mem3 arm label of `mode` on one arch, oldest release first.
 
     Ordered by `_release_chronology()` (the canonical ARENA_RELEASES order),
@@ -385,7 +385,7 @@ def arena_table_from_rows(raw: pd.DataFrame) -> pd.DataFrame:
         measured = grouped[grouped["arch"] == arch].set_index(["label", "mode"])
         for mode in ("default", "fast"):
             last_measured: str | None = None
-            for label in _mode_chain(arch_rows, mode):
+            for label in mode_chain(arch_rows, mode):
                 if last_measured is not None:
                     paired[(str(arch), label, mode)] = paired_ratio(
                         arch_rows[
@@ -469,19 +469,19 @@ def build_writer_control_table(*, db_path: Path, fg_labs_sha: str) -> pd.DataFra
     )
 
 
-def _format_seconds(value: float | None) -> str:
+def format_seconds(value: float | None) -> str:
     if value is None or pd.isna(value):
         return EM_DASH
     return f"{float(value):.2f}"
 
 
-def _format_speedup(value: float | None) -> str:
+def format_speedup(value: float | None) -> str:
     if value is None or pd.isna(value):
         return EM_DASH
     return f"{float(value):.2f}x"
 
 
-def _format_vs_prev(value: float | None) -> str:
+def format_vs_prev(value: float | None) -> str:
     """Format the release-over-release speedup ratio (blank for None).
 
     Three decimals, since consecutive releases are often within ~1% and a
@@ -572,20 +572,20 @@ def render_arena_markdown(*, db_path: Path, fg_labs_sha: str) -> str:
             str(row.arch),
             str(row.label),
             str(row.mode),
-            _format_seconds(row.median_wall_s),
-            _format_seconds(row.median_process_s),
+            format_seconds(row.median_wall_s),
+            format_seconds(row.median_process_s),
             str(int(row.n_reps)),
             str(int(row.n_skipped)),
             str(int(row.cold_runs)),
             EM_DASH if pd.isna(row.thp_fallback) else f"{float(row.thp_fallback):.0f}",
-            _format_vs_prev(row.vs_prior_release),
+            format_vs_prev(row.vs_prior_release),
             prior_range,
             EM_DASH
             if pd.isna(row.prior_rounds) or row.prior_note == NOTE_UNPAIRED
             else str(int(row.prior_rounds)),
-            _format_vs_prev(row.vs_prior_process),
+            format_vs_prev(row.vs_prior_process),
             row.prior_note if isinstance(row.prior_note, str) else EM_DASH,
-            _format_speedup(row.vs_fg_labs),
+            format_speedup(row.vs_fg_labs),
         ]
         body_rows.append("| " + " | ".join(cells) + " |")
 
@@ -611,8 +611,8 @@ def render_arena_markdown(*, db_path: Path, fg_labs_sha: str) -> str:
         )
         for row in writers.itertuples(index=False):
             lines.append(
-                f"| {row.arch} | {row.label} | {_format_vs_prev(row.native_saves)} | "
-                f"{_format_vs_prev(row.process_saves)} | {row.rounds} | {row.note} |"
+                f"| {row.arch} | {row.label} | {format_vs_prev(row.native_saves)} | "
+                f"{format_vs_prev(row.process_saves)} | {row.rounds} | {row.note} |"
             )
         lines.append("")
     return "\n".join(lines)
@@ -630,8 +630,11 @@ def generate_arena(*, db_path: Path, fg_labs_sha: str, out_md: Path | None) -> s
 def build_release_speedup_table(
     *, db_path: Path, fg_labs_sha: str, arch: str, baseline_label: str = "bwa"
 ) -> pd.DataFrame:
-    """One row per bwa-mem3 release (chronological) for `arch`, feeding the
-    README's release-history speedup table.
+    """One row per bwa-mem3 release (chronological) for `arch`.
+
+    Not the source of bwa-mem3's README tables: `report/readme_tables.py` builds
+    those, dropping interim ladder builds and computing ratios from the walls as
+    printed.
 
     Columns: ``label``, ``stock_median_wall_s``, ``stock_speedup``,
     ``fast_median_wall_s``, ``fast_speedup``, ``stock_vs_prev_speedup``,
@@ -699,7 +702,7 @@ def build_release_speedup_table(
     prev_fast: float | None = None
     for chain_row in _bwa_mem3_release_chain(grouped).itertuples(index=False):
         stock_wall = _wall(chain_row.label, "default")
-        fast_wall = _wall(_fast_sibling_label(chain_row.label), "fast")
+        fast_wall = _wall(fast_sibling_label(chain_row.label), "fast")
         rows.append(
             {
                 "label": chain_row.label,
@@ -779,12 +782,12 @@ def render_release_speedup_markdown(
     for row in df.itertuples(index=False):
         cells = [
             str(row.label),
-            _format_seconds(row.stock_median_wall_s),
-            _format_speedup(row.stock_speedup),
-            _format_seconds(row.fast_median_wall_s),
-            _format_speedup(row.fast_speedup),
-            _format_vs_prev(row.stock_vs_prev_speedup),
-            _format_vs_prev(row.fast_vs_prev_speedup),
+            format_seconds(row.stock_median_wall_s),
+            format_speedup(row.stock_speedup),
+            format_seconds(row.fast_median_wall_s),
+            format_speedup(row.fast_speedup),
+            format_vs_prev(row.stock_vs_prev_speedup),
+            format_vs_prev(row.fast_vs_prev_speedup),
         ]
         body_rows.append("| " + " | ".join(cells) + " |")
 

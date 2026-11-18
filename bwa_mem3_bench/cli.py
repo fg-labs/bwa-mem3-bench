@@ -51,6 +51,7 @@ def main(argv: list[str] | None = None) -> None:
                 "accuracy": bench_module.accuracy,
                 "arena": bench_module.arena,
                 "release-speedup": bench_module.release_speedup,
+                "readme-tables": bench_module.readme_tables,
                 "docs": bench_module.docs,
                 "results": bench_module.results,
                 "results-render": bench_module.results_render,

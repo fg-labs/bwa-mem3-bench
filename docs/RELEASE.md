@@ -210,17 +210,43 @@ arena bump.
     `fg-labs/bwa-mem3` (v0.17.0's was fg-labs/bwa-mem3#766, v0.18.0's #804).
     The README has a headline table (current release vs `bwa`, `bwa-mem2` and
     `minibwa`, `stock / --fast`) and a release-history table per arena host
-    (m8g, m8a). Replace **every** cell, not just the new row, from this bless's
-    `bench arena -f <sha>`: the arena re-measures every release, so the old
-    numbers are from a different run. The cells are ratios of median walls
-    (`vs bwa` = bwa's wall / the row's; `vs prev` = the previous release's wall /
-    the row's, skipping the unreleased `394f8f8` arm; v0.2.1's `vs prev` is
-    against upstream bwa-mem2). The candidate's arena rows are labelled
-    `fg-labs-default` / `fg-labs-fast`. Bold the new release's row, and move
-    the prose's "current release" and "v0.13.0 through vX.Y.Z" markers to the
-    new version. Check your script by regenerating the previous release's
-    tables from its own arena first: they must come out identical to the
-    README as it stands.
+    (m8g, m8a). Every cell changes, not just the new row, because the arena
+    re-measures every release. Create a new branch from `main` in a fresh
+    `fg-labs/bwa-mem3` checkout. Then, from this `bwa-mem3-bench` checkout
+    (the module lives only in its pixi environment) and after `collect`:
+
+    ```bash
+    pixi run python -m bwa_mem3_bench.cli bench readme-tables \
+        --fg-labs-sha <sha> --version vX.Y.Z --arena-sa-stride 2 \
+        --readme <bwa-mem3>/README.md
+    ```
+
+    Verify the run's original configuration before declaring `--arena-sa-stride 2`.
+    It is required: recorded blocks distinguish dense from stock indexes but do not
+    distinguish stride 2 from stride 4. The command checks recorded index families;
+    the numeric stride remains an operator declaration, not verified provenance.
+
+    This rewrites the three tables in place from the arena in `benchmark.db`
+    and moves the prose's "current release" and "v0.13.0 through vX.Y.Z"
+    markers to the new version. It fails without writing if a host's arena
+    is missing or narrowed (a release the README lists, a `--fast` wall it
+    shows, a comparator, or the candidate's `--fast` arm has no wall), if an
+    arm has a wall in only some rounds or fewer rounds than its block, or a
+    block ran a measured-round count other than the config's (`arena.reps`
+    for the candidate's block, `arena.context_reps` for the rest, the numbers
+    the README's "N rounds ..., M for the rest" states), if the declared stride
+    is not 2 or an arm recorded the wrong index family, or if the README's tables
+    (including one split by a blank line), table headers or headline rows, or
+    prose markers have drifted from what it expects (then fix the README by
+    hand and rerun). The prose markers are checked on every run, including a
+    rerun for the README's current version, which refreshes the tables and
+    moves nothing. Cells are ratios of median walls, computed from the walls
+    as printed (`vs prev` skips the interim `394f8f8` arm; v0.2.1's `vs prev`
+    is against upstream bwa-mem2). So the new release's `vs prev` on either
+    host can differ from `bench arena`'s paired `vs_prior_release` by a
+    percent or so (v0.18.0: m8a 0.988x vs 0.999x paired): quote the paired
+    estimate in the PR body and the release preamble. Review `git diff`, then
+    commit and open the PR.
 14. **Bump the arena ladder for the _next_ bless.** Add this now-blessed release
     to `ARENA_RELEASES` (`arena.smk`) **and** a `RUN` block in `Dockerfile.base`,
     then rebuild the base image. `tests/test_arena_ladder.py` fails until both

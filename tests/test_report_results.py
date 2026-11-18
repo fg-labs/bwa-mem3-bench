@@ -711,7 +711,7 @@ def test_arena_dense_threshold_matches_the_workflow() -> None:
     text = (Path(__file__).resolve().parents[1] / "workflow/rules/arena.smk").read_text()
     match = re.search(r'^ARENA_DENSE_SA_MIN_LABEL = "([^"]+)"', text, re.MULTILINE)
     assert match is not None
-    assert match.group(1) == results._ARENA_DENSE_AFTER
+    assert match.group(1) == results.ARENA_DENSE_AFTER
 
 
 def test_arena_index_note_names_the_dense_earlier_releases(snap: dict[str, Any]) -> None:
